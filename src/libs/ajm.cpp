@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -125,6 +126,10 @@ constexpr uint32_t AJM_DEC_OPUS_FRAME_SAMPLES         = 960;
 
 static std::atomic_uint32_t g_ajm_next_instance {1};
 static std::atomic_uint32_t g_ajm_next_batch {1};
+enum class AjmBatchState { Completed, Canceled };
+static std::mutex g_ajm_batches_mutex;
+static std::condition_variable g_ajm_batches_cv;
+static std::unordered_map<uint32_t, AjmBatchState> g_ajm_batches;
 
 static uint32_t AjmGetFlagChannelCount(uint64_t flags) {
 	return static_cast<uint32_t>(flags & AJM_INSTANCE_FLAG_MAX_CHANNEL_MASK);
@@ -839,8 +844,7 @@ int KYTY_SYSV_ABI AjmMemoryUnregister(uint32_t context, void* ptr) {
 int KYTY_SYSV_ABI AjmBatchInitialize(void* buffer, size_t size, AjmBatchInfo* info) {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(info == nullptr);
+	if (buffer == nullptr || info == nullptr || size == 0) return AJM_ERROR_INVALID_PARAMETER;
 
 	info->buffer           = buffer;
 	info->offset           = 0;
@@ -855,8 +859,7 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, const AjmBatchInfo* info, int 
                                 AjmBatchError* error, uint32_t* batch) {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(info == nullptr);
-	EXIT_NOT_IMPLEMENTED(batch == nullptr);
+	if (info == nullptr || batch == nullptr || info->buffer == nullptr || info->size == 0) return AJM_ERROR_INVALID_PARAMETER;
 
 	(void)context;
 	(void)priority;
@@ -866,6 +869,11 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, const AjmBatchInfo* info, int 
 	}
 
 	*batch = g_ajm_next_batch.fetch_add(1, std::memory_order_relaxed);
+	{
+		std::lock_guard lock(g_ajm_batches_mutex);
+		g_ajm_batches.emplace(*batch, AjmBatchState::Completed);
+	}
+	g_ajm_batches_cv.notify_all();
 
 	return OK;
 }
@@ -873,8 +881,13 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, const AjmBatchInfo* info, int 
 int KYTY_SYSV_ABI AjmBatchWait(uint32_t context, uint32_t batch, uint32_t timeout,
                                AjmBatchError* error) {
 	(void)context;
-	(void)batch;
-	(void)timeout;
+	std::unique_lock lock(g_ajm_batches_mutex);
+	const auto ready = [&] { return g_ajm_batches.find(batch) != g_ajm_batches.end(); };
+	if (timeout != 0 && !g_ajm_batches_cv.wait_for(lock, std::chrono::microseconds(timeout), ready)) return LibKernel::KERNEL_ERROR_ETIMEDOUT;
+	const auto it = g_ajm_batches.find(batch);
+	if (it == g_ajm_batches.end()) return AJM_ERROR_INVALID_PARAMETER;
+	const bool canceled = it->second == AjmBatchState::Canceled;
+	if (canceled) return LibKernel::KERNEL_ERROR_ECANCELED;
 
 	if (error != nullptr) {
 		std::memset(error, 0, sizeof(AjmBatchError));
@@ -886,6 +899,12 @@ int KYTY_SYSV_ABI AjmBatchWait(uint32_t context, uint32_t batch, uint32_t timeou
 int KYTY_SYSV_ABI AjmBatchCancel(uint32_t context, uint32_t batch) {
 	PRINT_NAME();
 	LOGF("\t context = %" PRIu32 ", batch = %" PRIu32 "\n", context, batch);
+	std::lock_guard lock(g_ajm_batches_mutex);
+	const auto it = g_ajm_batches.find(batch);
+	if (it == g_ajm_batches.end()) return AJM_ERROR_INVALID_PARAMETER;
+	if (it->second == AjmBatchState::Completed) return LibKernel::KERNEL_ERROR_EBUSY;
+	it->second = AjmBatchState::Canceled;
+	g_ajm_batches_cv.notify_all();
 	return OK;
 }
 

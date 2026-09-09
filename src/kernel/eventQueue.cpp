@@ -1,4 +1,5 @@
 #include "kernel/eventQueue.h"
+#include "kernel/waitDeadline.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -27,6 +28,8 @@ constexpr uint16_t EV_CLEAR   = 0x20;
 constexpr uint16_t EV_ERROR   = 0x4000;
 
 static uint64_t MonotonicTimeNs() {
+	if (WaitSupport::test_hooks != nullptr && WaitSupport::test_hooks->now_micros)
+		return WaitSupport::NowMicros() * 1000;
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 	                                 std::chrono::steady_clock::now().time_since_epoch())
 	                                 .count());
@@ -71,20 +74,20 @@ KernelEqueuePrivate::~KernelEqueuePrivate() {
 }
 
 void KernelEqueuePrivate::Close() {
-	Common::LockGuard lock(m_mutex);
-
-	if (m_closed) {
-		return;
+	std::list<KernelEqueueEvent> removed;
+	{
+		Common::LockGuard lock(m_mutex);
+		if (m_closed) return;
+		m_closed = true;
+		removed.splice(removed.end(), m_events);
+		m_cond_var.SignalAll();
 	}
-	m_closed = true;
-	for (auto& event: m_events) {
+	for (auto& event: removed) {
 		if (event.filter.delete_event_func != nullptr) {
 			auto owner = event.filter.owner;
 			event.filter.delete_event_func(m_handle, &event);
 		}
 	}
-	m_events.clear();
-	m_cond_var.SignalAll();
 }
 
 int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
@@ -171,28 +174,19 @@ int KernelEqueuePrivate::WaitForEvents(KernelEvent* ev, int num, uint32_t micros
 		return KERNEL_ERROR_EBADF;
 	}
 
-	uint32_t      elapsed = 0;
-	Common::Timer t;
-	t.Start();
+	WaitSupport::Deadline deadline(micros == 0 ? nullptr : &micros);
 
 	for (;;) {
 		int ret = GetTriggeredEvents(ev, num);
 
-		if (ret != 0 || (elapsed >= micros && micros != 0)) {
+		if (ret != 0 || deadline.Expired()) {
 			return ret;
 		}
 
 		uint32_t   timer_wait = 0;
 		const bool has_timer  = GetNextTimerWaitMicros(MonotonicTimeNs(), &timer_wait);
-		if (micros == 0 && !has_timer) {
-			m_cond_var.Wait(&m_mutex);
-		} else {
-			const auto external_wait = micros != 0 ? micros - elapsed : UINT32_MAX;
-			m_cond_var.WaitFor(&m_mutex,
-			                   has_timer ? std::min(external_wait, timer_wait) : external_wait);
-		}
-
-		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
+		const auto slice = deadline.Slice();
+		WaitSupport::Park(m_cond_var, m_mutex, has_timer ? std::min(slice, timer_wait) : slice);
 	}
 
 	return 0;
@@ -286,14 +280,17 @@ int KernelEqueuePrivate::DeleteEvent(uintptr_t ident, int16_t filter) {
 		return e.event.ident == ident && e.event.filter == filter;
 	});
 	if (it != m_events.end()) {
-		auto& event = *it;
+		std::list<KernelEqueueEvent> removed;
+		removed.splice(removed.end(), m_events, it);
+		auto& event = removed.front();
+		m_mutex.Unlock();
 
 		if (event.filter.delete_event_func != nullptr) {
 			auto owner = event.filter.owner;
 			event.filter.delete_event_func(m_handle, &event);
 		}
 
-		m_events.erase(it);
+		m_mutex.Lock();
 
 		return OK;
 	}
@@ -321,7 +318,7 @@ int KYTY_SYSV_ABI KernelCreateEqueue(KernelEqueue* eq, const char* name) {
 	{
 		Common::LockGuard lock(g_equeues_mutex);
 		if (g_next_equeue > static_cast<uint64_t>(std::numeric_limits<KernelEqueue>::max())) {
-			EXIT("event queue handle space exhausted\n");
+			return KERNEL_ERROR_ENOMEM;
 		}
 		*eq        = static_cast<KernelEqueue>(g_next_equeue++);
 		auto owner = std::make_shared<KernelEqueuePrivate>(*eq);
@@ -400,7 +397,7 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	EXIT_NOT_IMPLEMENTED(out == nullptr);
+	if (out == nullptr) return KERNEL_ERROR_EFAULT;
 
 	LOGF("\tEqueue wait: %s, caller = 0x%016" PRIx64 ", eq = 0x%016" PRIx64 ", ev = 0x%016" PRIx64
 	     ", num = %d, timo = %s, thread_id = %d\n",

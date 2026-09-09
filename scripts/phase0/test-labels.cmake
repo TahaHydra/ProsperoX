@@ -21,3 +21,4 @@ set_tests_properties(phase0_unresolved_import phase0_path_containment phase0_wav
 set_tests_properties(phase1_imports phase1_tls phase1_native_state phase1_patching
     phase1_load_rollback phase1_modules PROPERTIES LABELS "host;native" TIMEOUT 60)
 set_tests_properties(phase1_paths phase1_executables PROPERTIES TIMEOUT 60)
+set_tests_properties(phase2_kernel phase2_kernel_stress PROPERTIES LABELS "host;native" TIMEOUT 120)

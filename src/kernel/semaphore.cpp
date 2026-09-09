@@ -1,4 +1,6 @@
 #include "kernel/semaphore.h"
+#include "kernel/handleRegistry.h"
+#include "kernel/waitDeadline.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -32,6 +34,7 @@ public:
 	    : m_name(name), m_fifo_order(fifo), m_count(init_count), m_init_count(init_count),
 	      m_max_count(max_count) {};
 	virtual ~KernelSemaPrivate();
+	void Close();
 
 	KYTY_CLASS_NO_COPY(KernelSemaPrivate);
 
@@ -72,15 +75,11 @@ private:
 	int                         m_max_count;
 };
 
-KernelSemaPrivate::~KernelSemaPrivate() {
+KernelSemaPrivate::~KernelSemaPrivate() { Close(); }
+
+void KernelSemaPrivate::Close() {
 	Common::LockGuard lock(m_mutex);
-
-	while (m_status != Status::Set) {
-		m_mutex.Unlock();
-		Common::Thread::SleepMicro(10);
-		m_mutex.Lock();
-	}
-
+	if (m_status == Status::Deleted) return;
 	m_status = Status::Deleted;
 
 	for (auto* waiter: m_waiting_threads) {
@@ -92,12 +91,9 @@ KernelSemaPrivate::~KernelSemaPrivate() {
 
 	m_cond_var.SignalAll();
 
-	while (!m_waiting_threads.empty()) {
-		m_mutex.Unlock();
-		Common::Thread::SleepMicro(10);
-		m_mutex.Lock();
-	}
 }
+
+static HandleRegistry<KernelSema, KernelSemaPrivate> g_kernel_semas;
 
 KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_waiting_threads) {
 	Common::LockGuard lock(m_mutex);
@@ -137,7 +133,7 @@ KernelSemaPrivate::Result KernelSemaPrivate::Signal(int signal_count) {
 		return Result::Deleted;
 	}
 
-	if (m_count + signal_count > m_max_count) {
+	if (signal_count <= 0 || signal_count > m_max_count - m_count) {
 		return Result::InvalCount;
 	}
 
@@ -191,28 +187,17 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 		return Result::Deleted;
 	}
 
-	uint32_t micros     = 0;
-	bool     infinitely = true;
-	if (ptr_micros != nullptr) {
-		micros     = *ptr_micros;
-		infinitely = false;
-	}
-
-	uint32_t      elapsed = 0;
-	Common::Timer t;
-	t.Start();
+	WaitSupport::Deadline deadline(ptr_micros);
 
 	int id = Common::Thread::GetThreadIdUnique();
 
 	if (m_count >= need_count) {
 		m_count -= need_count;
-		if (ptr_micros != nullptr) {
-			*ptr_micros = micros;
-		}
+		deadline.Update(ptr_micros);
 		return Result::Ok;
 	}
 
-	if (!infinitely && micros == 0) {
+	if (deadline.Expired()) {
 		return Result::TimedOut;
 	}
 
@@ -223,30 +208,23 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 	AddWaiter(&waiter);
 
 	while (!waiter.ready) {
-		if ((elapsed >= micros && !infinitely)) {
+		if (deadline.Expired()) {
 			RemoveWaiter(&waiter);
 			*ptr_micros = 0;
 			return Result::TimedOut;
 		}
 
-		if (infinitely) {
-			m_cond_var.WaitFor(&m_mutex, SIGNAL_APC_POLL_MICROS);
-		} else {
-			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
-		}
+		WaitSupport::Park(m_cond_var, m_mutex, deadline.Slice());
 
 		m_mutex.Unlock();
 		LibKernel::KernelDispatchPendingSignalForCurrentThread();
 		m_mutex.Lock();
 
-		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
 	}
 
 	RemoveWaiter(&waiter);
 
-	if (ptr_micros != nullptr) {
-		*ptr_micros = (elapsed >= micros ? 0 : micros - elapsed);
-	}
+	deadline.Update(ptr_micros);
 
 	return waiter.result;
 }
@@ -255,9 +233,7 @@ int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t a
                                    int max, void* opt) {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(sem == nullptr);
-
-	if (name == nullptr || attr > 2 || init < 0 || max <= 0 || init > max) {
+	if (sem == nullptr || name == nullptr || opt != nullptr || attr > 2 || init < 0 || max <= 0 || init > max) {
 		return KERNEL_ERROR_EINVAL;
 	}
 
@@ -269,7 +245,8 @@ int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t a
 		default: fifo = false; break;
 	}
 
-	*sem = new KernelSemaPrivate(std::string(name), fifo, init, max);
+	*sem = g_kernel_semas.Insert(std::make_shared<KernelSemaPrivate>(std::string(name), fifo, init, max));
+	if (*sem == nullptr) return KERNEL_ERROR_ENOMEM;
 
 	return OK;
 }
@@ -277,21 +254,23 @@ int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t a
 int KYTY_SYSV_ABI KernelDeleteSema(KernelSema sem) {
 	PRINT_NAME();
 
-	if (sem == nullptr) {
+	auto object = g_kernel_semas.Remove(sem);
+	if (object == nullptr) {
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	delete sem;
+	object->Close();
 
 	return OK;
 }
 
 int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
-	if (sem == nullptr) {
+	auto object = g_kernel_semas.Acquire(sem);
+	if (object == nullptr) {
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	auto result = sem->Wait(need, time);
+	auto result = object->Wait(need, time);
 
 	int ret = OK;
 
@@ -309,11 +288,12 @@ int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time)
 int KYTY_SYSV_ABI KernelPollSema(KernelSema sem, int need) {
 	PRINT_NAME();
 
-	if (sem == nullptr) {
+	auto object = g_kernel_semas.Acquire(sem);
+	if (object == nullptr) {
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	auto result = sem->Poll(need);
+	auto result = object->Poll(need);
 
 	int ret = OK;
 
@@ -329,11 +309,12 @@ int KYTY_SYSV_ABI KernelPollSema(KernelSema sem, int need) {
 }
 
 int KYTY_SYSV_ABI KernelSignalSema(KernelSema sem, int count) {
-	if (sem == nullptr) {
+	auto object = g_kernel_semas.Acquire(sem);
+	if (object == nullptr) {
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	auto result = sem->Signal(count);
+	auto result = object->Signal(count);
 
 	int ret = OK;
 
@@ -351,11 +332,12 @@ int KYTY_SYSV_ABI KernelSignalSema(KernelSema sem, int count) {
 int KYTY_SYSV_ABI KernelCancelSema(KernelSema sem, int count, int* threads) {
 	PRINT_NAME();
 
-	if (sem == nullptr) {
+	auto object = g_kernel_semas.Acquire(sem);
+	if (object == nullptr) {
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	auto result = sem->Cancel(count, threads);
+	auto result = object->Cancel(count, threads);
 
 	int ret = OK;
 

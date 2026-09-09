@@ -43,7 +43,7 @@ def properties(test):
 
 def expected_names(is_windows):
     data = json.loads((HERE / "inventory.json").read_text())
-    return set(data["original"] + data["phase0"] + data.get("phase1", []) + (data["windows_only"] if is_windows else []))
+    return set(data["original"] + data["phase0"] + data.get("phase1", []) + data.get("phase2", []) + (data["windows_only"] if is_windows else []))
 
 
 def verify_inventory(tests, is_windows):

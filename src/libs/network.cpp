@@ -38,6 +38,8 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <memory>
 #include <fmt/format.h>
 #include <limits>
 #include <mutex>
@@ -843,10 +845,33 @@ using SocketLength                                  = socklen_t;
 using SocketIoLength                                = size_t;
 #endif
 
-struct SocketSlot {
-	bool         used   = false;
+struct SocketState {
 	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	int type = 0;
+	std::atomic_bool closed{false};
+	std::atomic_bool nonblocking{false};
+	std::mutex receive_mutex;
+	std::deque<char> received;
+	std::atomic_size_t buffered{0};
+	~SocketState() {
+		if (socket == INVALID_NATIVE_SOCKET) return;
+#if defined(_WIN32)
+		closesocket(socket);
+#else
+		::close(socket);
+#endif
+	}
 };
+
+struct SocketLease {
+	std::shared_ptr<SocketState> owner;
+	NativeSocket borrowed = INVALID_NATIVE_SOCKET;
+	operator NativeSocket() const { return owner ? owner->socket : borrowed; }
+	SocketLease& operator=(NativeSocket native) { owner.reset(); borrowed=native; return *this; }
+	bool Buffered() const { return owner && owner->buffered.load(std::memory_order_acquire)!=0; }
+};
+
+struct SocketSlot { std::shared_ptr<SocketState> owner; };
 
 struct NetTimeval {
 	int64_t tv_sec;
@@ -1103,7 +1128,7 @@ static int ConvertHostSockaddr(const sockaddr_storage* addr, SocketLength addrle
 	return 0;
 }
 
-static bool GetSocketBackend(int guest_fd, NativeSocket* out) {
+static bool GetSocketBackend(int guest_fd, SocketLease* out) {
 	EXIT_IF(out == nullptr);
 
 	if (guest_fd < 0 || guest_fd >= SOCKET_FD_MAX) {
@@ -1111,11 +1136,11 @@ static bool GetSocketBackend(int guest_fd, NativeSocket* out) {
 	}
 
 	Common::LockGuard lock(g_socket_mutex);
-	if (!g_sockets[static_cast<size_t>(guest_fd)].used) {
+	if (!g_sockets[static_cast<size_t>(guest_fd)].owner) {
 		return false;
 	}
 
-	*out = g_sockets[static_cast<size_t>(guest_fd)].socket;
+	out->owner = g_sockets[static_cast<size_t>(guest_fd)].owner;
 	return true;
 }
 
@@ -1125,10 +1150,10 @@ bool KYTY_SYSV_ABI IsSocket(int s) {
 	}
 
 	Common::LockGuard lock(g_socket_mutex);
-	return g_sockets[static_cast<size_t>(s)].used;
+	return bool(g_sockets[static_cast<size_t>(s)].owner);
 }
 
-static bool TakeSocketBackend(int guest_fd, NativeSocket* out) {
+static bool TakeSocketBackend(int guest_fd, SocketLease* out) {
 	EXIT_IF(out == nullptr);
 
 	if (guest_fd < 0 || guest_fd >= SOCKET_FD_MAX) {
@@ -1137,12 +1162,12 @@ static bool TakeSocketBackend(int guest_fd, NativeSocket* out) {
 
 	Common::LockGuard lock(g_socket_mutex);
 	auto&             slot = g_sockets[static_cast<size_t>(guest_fd)];
-	if (!slot.used) {
+	if (!slot.owner) {
 		return false;
 	}
 
-	*out = slot.socket;
-	slot = {};
+	out->owner = std::move(slot.owner);
+	out->owner->closed = true;
 	return true;
 }
 
@@ -1150,9 +1175,11 @@ static int AllocSocketFd(NativeSocket socket) {
 	Common::LockGuard lock(g_socket_mutex);
 	for (int fd = SOCKET_FD_MIN; fd < SOCKET_FD_MAX; fd++) {
 		auto& slot = g_sockets[static_cast<size_t>(fd)];
-		if (!slot.used) {
-			slot.used   = true;
-			slot.socket = socket;
+		if (!slot.owner) {
+			slot.owner = std::make_shared<SocketState>();
+			slot.owner->socket = socket;
+			SocketLength length = sizeof(slot.owner->type);
+			::getsockopt(socket, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&slot.owner->type), &length);
 			return fd;
 		}
 	}
@@ -1528,7 +1555,7 @@ int KYTY_SYSV_ABI EpollWait(int eid, NetEpollEvent* events, int maxevents, int t
 #if defined(_WIN32)
 	struct HostRegistration {
 		EpollRegistration guest;
-		NativeSocket      socket = INVALID_NATIVE_SOCKET;
+		SocketLease       socket;
 	};
 
 	fd_set host_read {};
@@ -1541,7 +1568,7 @@ int KYTY_SYSV_ABI EpollWait(int eid, NetEpollEvent* events, int maxevents, int t
 	std::vector<HostRegistration> host_registrations;
 	host_registrations.reserve(registrations.size());
 	for (const auto& registration: registrations) {
-		NativeSocket socket = INVALID_NATIVE_SOCKET;
+		SocketLease socket;
 		if (!GetSocketBackend(registration.id, &socket)) {
 			continue;
 		}
@@ -1570,18 +1597,23 @@ int KYTY_SYSV_ABI EpollWait(int eid, NetEpollEvent* events, int maxevents, int t
 		host_timeout_ptr     = &host_timeout;
 	}
 
-	const int result = ::select(0, &host_read, &host_write, &host_except, host_timeout_ptr);
+	const bool buffered_read = std::any_of(host_registrations.begin(), host_registrations.end(), [](const auto& registration) {
+		return (registration.guest.event.events & EPOLL_IN) != 0 && registration.socket.Buffered();
+	});
+	timeval immediate{};
+	const int result = ::select(0, &host_read, &host_write, &host_except, buffered_read ? &immediate : host_timeout_ptr);
 	if (result == SOCKET_ERROR) {
 		return SetHostSocketError();
 	}
-	if (result == 0) {
+	if (result == 0 && !buffered_read) {
 		return 0;
 	}
 
 	int count = 0;
 	for (const auto& registration: host_registrations) {
 		uint32_t ready = 0;
-		if (FD_ISSET(registration.socket, &host_read)) {
+		if (FD_ISSET(registration.socket, &host_read) ||
+		    ((registration.guest.event.events & EPOLL_IN) != 0 && registration.socket.Buffered())) {
 			ready |= EPOLL_IN;
 		}
 		if (FD_ISSET(registration.socket, &host_write)) {
@@ -1629,20 +1661,15 @@ int KYTY_SYSV_ABI SocketClose(int s) {
 
 	LOGF("\t s = %d\n", s);
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (!TakeSocketBackend(s, &socket)) {
 		return NET_ERROR_EBADF;
 	}
 	RemoveSocketFromEpolls(s);
 
-#if defined(_WIN32)
-	const int result = closesocket(socket);
-#else
-	const int result = ::close(socket);
-#endif
-	if (result != 0) {
-		return NET_ERROR_EBADF;
-	}
+	// Wake blocked operations, retaining the native socket until all leases end.
+	// An in-flight operation can never act on a recycled native descriptor.
+	::shutdown(socket, 2);
 
 	return OK;
 }
@@ -1693,7 +1720,7 @@ int KYTY_SYSV_ABI Bind(int s, const void* addr, uint32_t addrlen) {
 	     "\t addrlen = %" PRIu32 "\n",
 	     s, reinterpret_cast<uint64_t>(addr), addrlen);
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (addr == nullptr || !GetSocketBackend(s, &socket)) {
 		*Posix::GetErrorAddr() = (addr == nullptr ? Posix::POSIX_EFAULT : Posix::POSIX_EBADF);
 		return -1;
@@ -1720,7 +1747,7 @@ int KYTY_SYSV_ABI Connect(int s, const void* addr, uint32_t addrlen) {
 	     "\t addrlen = %" PRIu32 "\n",
 	     s, reinterpret_cast<uint64_t>(addr), addrlen);
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (addr == nullptr || !GetSocketBackend(s, &socket)) {
 		*Posix::GetErrorAddr() = (addr == nullptr ? Posix::POSIX_EFAULT : Posix::POSIX_EBADF);
 		return -1;
@@ -1746,7 +1773,7 @@ int KYTY_SYSV_ABI Listen(int s, int backlog) {
 	     "\t backlog = %d\n",
 	     s, backlog);
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (!GetSocketBackend(s, &socket)) {
 		*Posix::GetErrorAddr() = Posix::POSIX_EBADF;
 		return -1;
@@ -1767,7 +1794,7 @@ int KYTY_SYSV_ABI Accept(int s, void* addr, uint32_t* addrlen) {
 	     "\t addrlen = 0x%016" PRIx64 "\n",
 	     s, reinterpret_cast<uint64_t>(addr), reinterpret_cast<uint64_t>(addrlen));
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (!GetSocketBackend(s, &socket)) {
 		*Posix::GetErrorAddr() = Posix::POSIX_EBADF;
 		return -1;
@@ -1814,7 +1841,7 @@ int KYTY_SYSV_ABI Shutdown(int s, int how) {
 	     "\t how = %d\n",
 	     s, how);
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (!GetSocketBackend(s, &socket)) {
 		*Posix::GetErrorAddr() = Posix::POSIX_EBADF;
 		return -1;
@@ -1845,7 +1872,7 @@ int KYTY_SYSV_ABI Getsockname(int s, void* addr, uint32_t* addrlen) {
 	     "\t addrlen = 0x%016" PRIx64 "\n",
 	     s, reinterpret_cast<uint64_t>(addr), reinterpret_cast<uint64_t>(addrlen));
 
-	NativeSocket socket    = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	const bool   socket_ok = GetSocketBackend(s, &socket);
 	if (addr == nullptr || addrlen == nullptr || !socket_ok) {
 		*Posix::GetErrorAddr() = (!socket_ok ? Posix::POSIX_EBADF : Posix::POSIX_EFAULT);
@@ -1869,7 +1896,7 @@ int KYTY_SYSV_ABI Getsockopt(int s, int level, int optname, void* optval, uint32
 	     "\t optname = 0x%08" PRIx32 "\n",
 	     s, static_cast<uint32_t>(level), static_cast<uint32_t>(optname));
 
-	NativeSocket socket    = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	const bool   socket_ok = GetSocketBackend(s, &socket);
 	if (optval == nullptr || optlen == nullptr || !socket_ok) {
 		*Posix::GetErrorAddr() = (!socket_ok ? Posix::POSIX_EBADF : Posix::POSIX_EFAULT);
@@ -1908,7 +1935,7 @@ int KYTY_SYSV_ABI Setsockopt(int s, int level, int optname, const void* optval, 
 	     "\t optlen  = %" PRIu32 "\n",
 	     s, static_cast<uint32_t>(level), static_cast<uint32_t>(optname), optlen);
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (optval == nullptr || !GetSocketBackend(s, &socket)) {
 		*Posix::GetErrorAddr() = (optval == nullptr ? Posix::POSIX_EFAULT : Posix::POSIX_EBADF);
 		return -1;
@@ -1922,6 +1949,7 @@ int KYTY_SYSV_ABI Setsockopt(int s, int level, int optname, const void* optval, 
 		if (ioctlsocket(socket, FIONBIO, &enabled) == SOCKET_ERROR) {
 			return SetHostSocketError();
 		}
+		socket.owner->nonblocking = enabled != 0;
 		return 0;
 	}
 #else
@@ -1958,7 +1986,7 @@ int64_t KYTY_SYSV_ABI Sendto(int s, const void* buf, uint64_t len, int flags, co
 	     s, reinterpret_cast<uint64_t>(buf), len, static_cast<uint32_t>(flags),
 	     reinterpret_cast<uint64_t>(addr), addrlen);
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (buf == nullptr || !GetSocketBackend(s, &socket)) {
 		*Posix::GetErrorAddr() = (buf == nullptr ? Posix::POSIX_EFAULT : Posix::POSIX_EBADF);
 		return -1;
@@ -1994,6 +2022,47 @@ int64_t KYTY_SYSV_ABI Recv(int s, void* buf, uint64_t len, int flags) {
 	return Recvfrom(s, buf, len, flags, nullptr, nullptr);
 }
 
+#if defined(_WIN32)
+static int64_t ReceiveWindowsStream(const SocketLease& socket, void* output, int size, int flags) {
+	auto& state = *socket.owner;
+	std::unique_lock receive_lock(state.receive_mutex);
+	if (state.closed) return SetGuestSocketError(Posix::POSIX_EBADF);
+	if (size == 0) return 0;
+	const bool peek = (flags & 0x02) != 0;
+	const bool all = (flags & 0x40) != 0;
+	const bool nonblocking = (flags & 0x80) != 0 || state.nonblocking;
+	std::array<char, 16384> chunk{};
+	while (state.received.size() < static_cast<size_t>(size) && (all || state.received.empty())) {
+		if (state.closed) return SetGuestSocketError(Posix::POSIX_EBADF);
+		if (nonblocking) {
+			fd_set ready{};
+			FD_ZERO(&ready); FD_SET(socket, &ready);
+			timeval immediate{};
+			const int selected = ::select(0, &ready, nullptr, nullptr, &immediate);
+			if (selected <= 0) {
+				if (!state.received.empty()) break;
+				return selected < 0 ? SetHostSocketError() : SetGuestSocketError(Posix::POSIX_EWOULDBLOCK);
+			}
+		}
+		const auto needed = std::min<size_t>(chunk.size(), size - state.received.size());
+		// Winsock forbids PEEK|WAITALL. Retain peeked bytes in the pinned socket
+		// state, including in Select/epoll readiness, while receiving later fragments.
+		const int count = ::recv(socket, chunk.data(), static_cast<int>(needed), 0);
+		if (count <= 0) {
+			if (count == 0 || !state.received.empty()) break;
+			return state.closed ? SetGuestSocketError(Posix::POSIX_EBADF) : SetHostSocketError();
+		}
+		state.received.insert(state.received.end(), chunk.begin(), chunk.begin() + count);
+		state.buffered.store(state.received.size(), std::memory_order_release);
+	}
+	const size_t count = std::min<size_t>(size, state.received.size());
+	std::copy_n(state.received.begin(), count, static_cast<char*>(output));
+	if (!peek) state.received.erase(state.received.begin(), state.received.begin() + count);
+	state.buffered.store(state.received.size(), std::memory_order_release);
+	return static_cast<int64_t>(count);
+}
+#endif
+
 int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* addr,
                                uint32_t* addrlen) {
 	PRINT_NAME();
@@ -2012,7 +2081,7 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 		return -1;
 	}
 
-	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketLease socket;
 	if (!GetSocketBackend(s, &socket)) {
 		*Posix::GetErrorAddr() = Posix::POSIX_EBADF;
 		return -1;
@@ -2026,6 +2095,10 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 	const auto host_len = static_cast<SocketIoLength>(
 	    std::min<uint64_t>(len, std::numeric_limits<SocketIoLength>::max()));
 	int64_t result = 0;
+#if defined(_WIN32)
+	if (socket.owner->type == SOCK_STREAM && addr == nullptr)
+		return ReceiveWindowsStream(socket, buf, host_len, flags);
+#endif
 	if (addr == nullptr) {
 		result = ::recv(socket, static_cast<char*>(buf), host_len, host_flags);
 	} else {
@@ -2083,7 +2156,7 @@ int KYTY_SYSV_ABI Select(int nfds, void* readfds, void* writefds, void* exceptfd
 	FD_ZERO(&host_write);
 	FD_ZERO(&host_except);
 
-	std::vector<std::pair<int, NativeSocket>> descriptors;
+	std::vector<std::pair<int, SocketLease>> descriptors;
 	int host_nfds = 0;
 	for (int fd = 0; fd < nfds; fd++) {
 		const bool read = GuestFdIsSet(readfds, fd);
@@ -2092,7 +2165,7 @@ int KYTY_SYSV_ABI Select(int nfds, void* readfds, void* writefds, void* exceptfd
 		if (!read && !write && !except) {
 			continue;
 		}
-		NativeSocket socket = INVALID_NATIVE_SOCKET;
+		SocketLease socket;
 #if !defined(_WIN32)
 		if (fd < 3) {
 			socket = fd;
@@ -2146,14 +2219,24 @@ int KYTY_SYSV_ABI Select(int nfds, void* readfds, void* writefds, void* exceptfd
 	} else
 #endif
 	{
+		const bool buffered_read = std::any_of(descriptors.begin(), descriptors.end(), [&](const auto& descriptor) {
+			return GuestFdIsSet(readfds, descriptor.first) && descriptor.second.Buffered();
+		});
+		timeval immediate{};
 		result = ::select(host_nfds, readfds != nullptr ? &host_read : nullptr,
 		                  writefds != nullptr ? &host_write : nullptr,
-		                  exceptfds != nullptr ? &host_except : nullptr, host_timeout_ptr);
+		                  exceptfds != nullptr ? &host_except : nullptr, buffered_read ? &immediate : host_timeout_ptr);
 		if (result < 0) {
 			return SetHostSocketError();
 		}
 	}
 
+	for (const auto& [fd, socket]: descriptors) {
+		if (GuestFdIsSet(readfds, fd) && socket.Buffered() && !FD_ISSET(socket, &host_read)) {
+			FD_SET(socket, &host_read);
+			++result;
+		}
+	}
 	GuestFdZero(readfds, nfds);
 	GuestFdZero(writefds, nfds);
 	GuestFdZero(exceptfds, nfds);

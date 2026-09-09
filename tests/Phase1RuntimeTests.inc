@@ -338,7 +338,9 @@ int Paths() {
     std::ofstream(root / "outside" / "sentinel.txt") << "unchanged";
     F::Mount(root / "mount", "/phase1");
     F::Mount(root / "nested", "/phase1/sub");
-    Check(F::GetRealFilename("/phase1/sub/new.txt") == fs::weakly_canonical(root / "nested" / "new.txt"), "longest mount wins");
+    const auto expected_longest = fs::absolute(root / "nested" / "new.txt");
+    const auto actual_longest = F::GetRealFilename("/phase1/sub/new.txt");
+    Check(actual_longest == expected_longest, "longest mount wins");
     Check(F::GetRealFilename("/phase1/a/../ok.txt") == fs::weakly_canonical(root / "mount" / "ok.txt"), "in-mount parent traversal");
     for (const char* path: {"/phase1/../outside/sentinel.txt", "/phase1/sub/../../outside/sentinel.txt",
                            "/phase1-sibling/file", "/unmapped/file", "C:/Windows/file", "relative/file",

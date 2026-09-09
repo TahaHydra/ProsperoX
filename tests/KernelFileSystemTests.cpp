@@ -115,7 +115,7 @@ void CheckSocketWakeup() {
                     immediate.data()) == 0 && readable[reader / 64] == 0,
         "empty socket is not readable");
   const char payload[] = "wake";
-  Check(Net::Send(writer, payload, sizeof(payload), 0x20000) == sizeof(payload),
+  Check(Net::Send(writer, payload, 2, 0x20000) == 2,
         "send wake bytes with guest MSG_NOSIGNAL");
   readable[reader / 64] = bit;
   const std::array<int64_t, 2> deadline {1, 0};
@@ -123,17 +123,30 @@ void CheckSocketWakeup() {
                     deadline.data()) == 1 && readable[reader / 64] == bit,
         "select reports the guest descriptor after wake");
   std::array<char, sizeof(payload)> received {};
+  Check(Net::Recv(reader, received.data(), 2, 0x2) == 2,
+        "peek first stream fragment without consuming it");
+  readable[reader / 64] = bit;
+  Check(Net::Select(reader + 1, readable.data(), nullptr, nullptr, immediate.data()) == 1 &&
+            readable[reader / 64] == bit,
+        "peeked bytes remain readable after leaving the host receive queue");
+  Check(Net::Send(writer, payload + 2, sizeof(payload) - 2, 0) == sizeof(payload) - 2,
+        "send remaining stream fragment");
   Check(Net::Recv(reader, received.data(), received.size(), 0x42) == sizeof(payload) &&
             std::memcmp(received.data(), payload, sizeof(payload)) == 0,
         "guest PEEK and WAITALL preserve the wake bytes");
   Check(Net::Recv(reader, received.data(), received.size(), 0x40) == sizeof(payload),
         "consume wake bytes with guest WAITALL");
-#if !defined(_WIN32)
   Check(Net::Recv(reader, received.data(), received.size(), 0x80) == -1 &&
             *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_EWOULDBLOCK,
         "empty nonblocking receive translates guest errno");
-#endif
-  Check(Net::SocketClose(reader) == 0 && Net::SocketClose(writer) == 0,
+  Check(Net::Send(writer, payload, 2, 0) == 2 && Net::SocketClose(writer) == 0,
+        "send short final stream fragment and close peer");
+  Check(Net::Recv(reader, received.data(), received.size(), 0x40) == 2 &&
+            std::memcmp(received.data(), payload, 2) == 0,
+        "WAITALL returns a short read at peer EOF");
+  Check(Net::Recv(reader, received.data(), received.size(), 0x40) == 0,
+        "peer EOF remains observable");
+  Check(Net::SocketClose(reader) == 0,
         "close wake sockets");
   readable[reader / 64] = bit;
   Check(Net::Select(reader + 1, readable.data(), nullptr, nullptr,

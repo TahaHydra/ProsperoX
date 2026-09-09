@@ -1,4 +1,5 @@
 #include "kernel/syncOnAddress.h"
+#include "kernel/waitDeadline.h"
 
 #include "common/threads.h"
 #include "libs/errno.h"
@@ -189,32 +190,25 @@ int WaitPortable(volatile T* address, T expected, const uint32_t* timeout_micros
                  signal_poll_func_t signal_poll) {
 	PortableWaiter waiter;
 	auto           entry      = RegisterPortableWaiter(address, &waiter);
-	const auto     deadline   = MakeDeadline(timeout_micros);
-	bool           first_wait = true;
+	const WaitSupport::Deadline deadline(timeout_micros);
 	int            result     = OK;
 
 	while (ReadWord(address) == expected && !waiter.wake_requested) {
-		const auto slice_micros = GetWaitSliceMicros(deadline, first_wait);
-		if (slice_micros == UINT32_MAX) {
-			result = KERNEL_ERROR_ETIMEDOUT;
-			break;
-		}
-		if (slice_micros == 0) {
+		if (deadline.Expired()) {
 			result = KERNEL_ERROR_ETIMEDOUT;
 			break;
 		}
 
-		(void)waiter.condition.WaitFor(&entry->mutex, slice_micros);
+		WaitSupport::Park(waiter.condition, entry->mutex, deadline.Slice());
 		entry->mutex.Unlock();
 		PollSignals(signal_poll);
 		entry->mutex.Lock();
 
-		if (deadline.finite && Clock::now() >= deadline.end && ReadWord(address) == expected &&
+		if (deadline.Expired() && ReadWord(address) == expected &&
 		    !waiter.wake_requested) {
 			result = KERNEL_ERROR_ETIMEDOUT;
 			break;
 		}
-		first_wait = false;
 	}
 
 	UnregisterPortableWaiter(address, entry, &waiter);
