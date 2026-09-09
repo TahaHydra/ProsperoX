@@ -28,6 +28,11 @@ void RegisterRedZonePatchModule(void* module_ptr, uint64_t module_size, void* tr
                                 uint64_t trampoline_area_size);
 void UnregisterRedZonePatchModule(void* module_ptr);
 
+// Replace one decoded TLS instruction with a jump. The trampoline reserves the
+// guest red zone before its first stack write; helper is a state-preserving TCB getter.
+bool PatchTlsInstruction(uint64_t address, uint8_t length, uint64_t helper,
+                         uint8_t output_register, bool store, uint32_t immediate);
+
 RedZonePatchResult PatchRedZoneMemoryInstructions(uint64_t segment_addr, uint64_t segment_size,
                                                   std::span<const uintptr_t> function_starts);
 

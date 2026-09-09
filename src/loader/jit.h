@@ -2,6 +2,14 @@
 #define EMULATOR_INCLUDE_EMULATOR_LOADER_JIT_H_
 
 #include "common/abi.h"
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include "common/assert.h"
+#include <intrin.h>
+#include <xbyak/xbyak.h>
+#endif
 
 namespace Loader::Jit {
 
@@ -105,26 +113,67 @@ struct TlsRegStub {
 	}
 	static uint64_t GetSize() { return 32; }
 
-	// sub rsp,0x80
+	// lea rsp,[rsp-0x80] (does not change guest flags)
 	// push rax
 	// call safe_call
 	// mov <reg>,rax
 	// pop rax
-	// add rsp,0x80
+	// lea rsp,[rsp+0x80]
 	// ret
-	uint8_t code[32] = {0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x50, 0xE8, 0x00, 0x00,
-	                    0x00, 0x00, 0x48, 0x89, 0xC0, 0x58, 0x48, 0x81, 0xC4, 0x80, 0x00,
-	                    0x00, 0x00, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+	uint8_t code[32] = {0x48, 0x8D, 0x64, 0x24, 0x80, 0x90, 0x90, 0x50, 0xE8, 0x00, 0x00,
+	                    0x00, 0x00, 0x48, 0x89, 0xC0, 0x58, 0x48, 0x8D, 0xA4, 0x24, 0x80,
+	                    0x00, 0x00, 0x00, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
 };
 
 struct SafeCall {
 	using func_t = KYTY_MS_ABI uint8_t* (*)();
 
-	void SetFunc(func_t func) { *reinterpret_cast<func_t*>(&code[0x22]) = func; }
+	void SetFunc(func_t func) {
+#if defined(_WIN32)
+		int features[4]{};
+		__cpuidex(features, 1, 0);
+		EXIT_IF((features[2] & (1 << 27)) == 0);
+		uint32_t mask_low = 0, mask_high = 0;
+		asm volatile("xgetbv" : "=a"(mask_low), "=d"(mask_high) : "c"(0));
+		__cpuidex(features, 13, 0);
+		EXIT_IF(features[1] < 512 || features[1] > 65536);
+		const uint32_t state_size = (uint32_t(features[1]) + 63u) & ~63u;
+		Xbyak::CodeGenerator a(sizeof(code), code);
+		// A replaced MOV must preserve flags and all enabled floating/vector state.
+		// Reserve the guest red zone before saving anything beyond the CALL return.
+		a.lea(a.rsp, a.ptr[a.rsp-128]);
+		a.pushfq();
+		for (auto reg: {a.rcx,a.rdx,a.r8,a.r9,a.r10,a.r11,a.rbx,a.rdi,a.rsi,a.r12}) a.push(reg);
+		a.mov(a.rbx,a.rsp);
+		a.and_(a.rsp,-64);
+		a.sub(a.rsp,state_size+64);
+		a.lea(a.rdi,a.ptr[a.rsp+64]);
+		a.mov(a.ecx,state_size/8);
+		a.xor_(a.eax,a.eax);
+		a.cld();
+		a.rep(); a.stosq();
+		a.mov(a.eax,mask_low); a.mov(a.edx,mask_high);
+		for (uint8_t byte: {0x48,0x0f,0xae,0x64,0x24,0x40}) a.db(byte); // xsave64 [rsp+64]
+		a.mov(a.rax,reinterpret_cast<uint64_t>(func));
+		a.call(a.rax);
+		a.mov(a.r12,a.rax);
+		a.mov(a.eax,mask_low); a.mov(a.edx,mask_high);
+		for (uint8_t byte: {0x48,0x0f,0xae,0x6c,0x24,0x40}) a.db(byte); // xrstor64 [rsp+64]
+		a.mov(a.rax,a.r12);
+		a.mov(a.rsp,a.rbx);
+		for (auto reg: {a.r12,a.rsi,a.rdi,a.rbx,a.r11,a.r10,a.r9,a.r8,a.rdx,a.rcx}) a.pop(reg);
+		a.popfq();
+		a.lea(a.rsp,a.ptr[a.rsp+128]);
+		a.ret();
+		a.ready();
+#else
+		*reinterpret_cast<func_t*>(&code[0x22]) = func;
+#endif
+	}
 
 	static uint64_t GetSize() { return 0x1000; }
 
-	uint8_t code[0x90] = {
+	uint8_t code[0x100] = {
 	    /*00*/ 0x48, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00, // sub    rsp,0x80
 	    /*07*/ 0x9c,                                     // pushfq
 	    /*08*/ 0x51,                                     // push   rcx

@@ -9,6 +9,17 @@
 
 namespace Loader {
 
+static bool InRange(uint64_t offset, uint64_t size, uint64_t total) {
+	return offset <= total && size <= total - offset;
+}
+
+bool Elf64::Reject(const char* reason) {
+	Clear();
+	m_error = reason;
+	LOGF("ELF rejected: %s\n", reason);
+	return false;
+}
+
 static std::unique_ptr<SelfHeader> LoadSelf(Common::File& f) {
 	if (f.Remaining() < sizeof(SelfHeader)) {
 		return nullptr;
@@ -241,6 +252,8 @@ Elf64::~Elf64() {
 
 void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 	EXIT_IF(m_f == nullptr);
+	if (size == 0) return;
+	EXIT_IF(size > UINT32_MAX || vaddr > UINT64_MAX - size);
 
 	if (m_self != nullptr) {
 		EXIT_IF(m_self_segments == nullptr);
@@ -251,6 +264,7 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 			if ((seg.type & 0x800u) != 0) {
 				auto phdr_id = ((seg.type >> 20u) & 0xFFFu);
 
+				EXIT_IF(phdr_id >= m_ehdr->e_phnum);
 				const auto& phdr = m_phdr[phdr_id];
 
 				if (file_offset >= phdr.p_offset && file_offset < phdr.p_offset + phdr.p_filesz) {
@@ -259,7 +273,7 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 
 					auto offset = file_offset - phdr.p_offset;
 
-					EXIT_NOT_IMPLEMENTED(offset + size > seg.decompressed_size);
+					EXIT_NOT_IMPLEMENTED(!InRange(offset, size, seg.decompressed_size));
 
 					m_f->Seek(offset + seg.offset);
 					m_f->Read(reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr)), size);
@@ -269,7 +283,7 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 			}
 		}
 
-		if (m_f->Size() - m_self->file_size == size) {
+		if (m_self->file_size <= m_f->Size() && m_f->Size() - m_self->file_size == size) {
 			m_f->Seek(m_self->file_size);
 			m_f->Read(reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr)), size);
 
@@ -278,13 +292,16 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 
 		EXIT("missing self segment\n");
 	} else {
+		EXIT_IF(!InRange(file_offset, size, m_f->Size()));
 		m_f->Seek(file_offset);
 		m_f->Read(reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr)), size);
 	}
 }
 
 const Elf64_Dyn* Elf64::GetDynValue(Elf64_Sxword tag) const {
-	for (const auto* dyn = GetDynamic(); dyn->d_tag != DT_NULL; dyn++) {
+	for (uint64_t i = 0; i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+		const auto* dyn = GetDynamic() + i;
+		if (dyn->d_tag == DT_NULL) break;
 		if (dyn->d_tag == tag) {
 			return dyn;
 		}
@@ -294,7 +311,9 @@ const Elf64_Dyn* Elf64::GetDynValue(Elf64_Sxword tag) const {
 
 std::vector<const Elf64_Dyn*> Elf64::GetDynList(Elf64_Sxword tag) const {
 	std::vector<const Elf64_Dyn*> ret;
-	for (const auto* dyn = GetDynamic(); dyn->d_tag != DT_NULL; dyn++) {
+	for (uint64_t i = 0; i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+		const auto* dyn = GetDynamic() + i;
+		if (dyn->d_tag == DT_NULL) break;
 		if (dyn->d_tag == tag) {
 			ret.push_back(dyn);
 		}
@@ -330,6 +349,9 @@ const char* Elf64::GetSectionName(int index) const {
 }
 
 void Elf64::Clear() {
+	m_error.clear();
+	m_dynamic_size = 0;
+	m_dynamic_data_size = 0;
 	if (m_f != nullptr) {
 		m_f->Close();
 	}
@@ -376,7 +398,7 @@ void Elf64::DbgDump(const std::string& folder) {
 	}
 
 	for (uint16_t i = 0; i < m_ehdr->e_shnum; i++) {
-		if (m_shdr[i].sh_size == 0u) {
+		if (m_shdr[i].sh_size == 0u || m_shdr[i].sh_type == 8) {
 			continue;
 		}
 
@@ -418,7 +440,9 @@ void Elf64::DbgDump(const std::string& folder) {
 	fout.Close();
 
 	fout.Create(folder_str + "dynamic.txt");
-	for (const auto* dyn = GetDynamic(); dyn->d_tag != DT_NULL; dyn++) {
+	for (uint64_t i = 0; i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+		const auto* dyn = GetDynamic() + i;
+		if (dyn->d_tag == DT_NULL) break;
 		DbgPrintDynamic64(dyn, fout);
 	}
 	fout.Close();
@@ -529,6 +553,184 @@ bool Elf64::IsValid() const {
 	return true;
 }
 
+bool Elf64::ValidateDynamic() {
+	if (m_dynamic_size == 0) return true;
+	auto value = [this](Elf64_Sxword tag, uint64_t fallback = 0) {
+		const auto* entry = GetDynValue(tag);
+		return entry == nullptr ? fallback : entry->d_un.d_val;
+	};
+	auto mapped = [this](uint64_t address, uint64_t size, bool file_backed, uint64_t* offset) {
+		for (uint16_t i = 0; i < m_ehdr->e_phnum; ++i) {
+			const auto& p = m_phdr[i];
+			if ((p.p_type == PT_LOAD || p.p_type == PT_OS_RELRO) && address >= p.p_vaddr &&
+			    InRange(address - p.p_vaddr, size, file_backed ? p.p_filesz : p.p_memsz)) {
+				if (offset != nullptr) *offset = p.p_offset + address - p.p_vaddr;
+				return true;
+			}
+		}
+		return false;
+	};
+	auto table = [&](Elf64_Sxword os_tag, Elf64_Sxword tag, uint64_t size, std::vector<uint8_t>& bytes) {
+		const auto* os = GetDynValue(os_tag);
+		const auto* ordinary = GetDynValue(tag);
+		if (os && ordinary) return false;
+		if (!os && !ordinary) return size == 0;
+		if (size > 64 * 1024 * 1024) return false;
+		uint64_t offset = 0;
+		if (os && !InRange(os->d_un.d_ptr, size, m_dynamic_data_size)) return false;
+		if (ordinary && !mapped(ordinary->d_un.d_ptr, size, true, &offset)) return false;
+		bytes.resize(size);
+		if (size != 0) {
+			if (os) std::memcpy(bytes.data(), m_dynamic_data.get() + os->d_un.d_ptr, size);
+			else LoadSegment(reinterpret_cast<uint64_t>(bytes.data()), offset, size);
+		}
+		return true;
+	};
+	const auto strings_size = value(DT_OS_STRSZ, value(DT_STRSZ));
+	const auto symbols_size = value(DT_OS_SYMTABSZ);
+	std::vector<uint8_t> strings, symbols, relocations, jumps, hash;
+	if ((HasDynValue(DT_OS_STRSZ) && HasDynValue(DT_STRSZ)) ||
+	    !table(DT_OS_STRTAB, DT_STRTAB, strings_size, strings) ||
+	    !table(DT_OS_SYMTAB, DT_SYMTAB, symbols_size, symbols) ||
+	    !table(DT_OS_RELA, DT_RELA, value(DT_OS_RELASZ, value(DT_RELASZ)), relocations) ||
+	    !table(DT_OS_JMPREL, DT_JMPREL, value(DT_OS_PLTRELSZ, value(DT_PLTRELSZ)), jumps) ||
+	    !table(DT_OS_HASH, DT_HASH, value(DT_OS_HASHSZ), hash))
+		return Reject("dynamic metadata table is out of bounds or ambiguous");
+	if ((HasDynValue(DT_SYMTAB) || HasDynValue(DT_OS_SYMTAB)) && symbols_size == 0)
+		return Reject("unsupported unsized dynamic symbol table");
+	if (symbols_size % sizeof(Elf64_Sym) != 0 ||
+	    (symbols_size && value(DT_OS_SYMENT, value(DT_SYMENT)) != sizeof(Elf64_Sym)) ||
+	    relocations.size() % sizeof(Elf64_Rela) != 0 || jumps.size() % sizeof(Elf64_Rela) != 0 ||
+	    (!relocations.empty() && value(DT_OS_RELAENT, value(DT_RELAENT)) != sizeof(Elf64_Rela)) ||
+	    (!jumps.empty() && value(DT_OS_PLTREL, value(DT_PLTREL)) != DT_RELA))
+		return Reject("invalid dynamic symbol or relocation entry size");
+	auto string_valid = [&](uint64_t offset) {
+		return offset < strings.size() && std::memchr(strings.data()+offset, 0, strings.size()-offset) != nullptr;
+	};
+	for (size_t offset = 0; offset < symbols.size(); offset += sizeof(Elf64_Sym)) {
+		Elf64_Sym symbol{};
+		std::memcpy(&symbol, symbols.data()+offset, sizeof(symbol));
+		if (!string_valid(symbol.st_name)) return Reject("dynamic symbol string is out of bounds or unterminated");
+		if (symbol.st_shndx != 0 && (symbol.GetType() == STT_FUNC || symbol.GetType() == STT_OBJECT) &&
+		    !mapped(symbol.st_value, symbol.st_size == 0 ? 1 : symbol.st_size, false, nullptr))
+			return Reject("defined symbol is outside mapped segments");
+	}
+	for (const auto* bytes: {&relocations, &jumps}) {
+		for (size_t offset = 0; offset < bytes->size(); offset += sizeof(Elf64_Rela)) {
+			Elf64_Rela relocation{};
+			std::memcpy(&relocation, bytes->data()+offset, sizeof(relocation));
+			if (!mapped(relocation.r_offset, sizeof(uint64_t), false, nullptr))
+				return Reject("relocation destination is outside mapped segments");
+			const auto type = relocation.GetType();
+			if (type != R_X86_64_RELATIVE && type != R_X86_64_DTPMOD64 &&
+			    type != R_X86_64_64 && type != R_X86_64_GLOB_DAT && type != R_X86_64_JUMP_SLOT)
+				return Reject("unsupported relocation type");
+			if (type != R_X86_64_RELATIVE && type != R_X86_64_DTPMOD64 &&
+			    relocation.GetSymbol() >= symbols.size() / sizeof(Elf64_Sym))
+				return Reject("relocation symbol index is out of bounds");
+			if (type != R_X86_64_RELATIVE && type != R_X86_64_DTPMOD64) {
+				Elf64_Sym symbol{};
+				std::memcpy(&symbol,symbols.data()+relocation.GetSymbol()*sizeof(symbol),sizeof(symbol));
+				if (symbol.GetBind() > STB_WEAK || symbol.GetType() > STT_FUNC)
+					return Reject("unsupported relocation symbol type or binding");
+			}
+			if (type == R_X86_64_DTPMOD64 && relocation.GetSymbol() != 0)
+				return Reject("unsupported cross-module TLS relocation");
+		}
+	}
+	for (uint64_t i = 0; i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+		const auto& d = GetDynamic()[i];
+		if (d.d_tag == DT_NULL) break;
+		switch (d.d_tag) {
+			case DT_NEEDED: case DT_SONAME:
+				if (!string_valid(d.d_un.d_val)) return Reject("dynamic dependency string is out of bounds or unterminated");
+				break;
+			case DT_OS_NEEDED_MODULE: case DT_OS_NEEDED_MODULE_1:
+			case DT_OS_MODULE_INFO: case DT_OS_MODULE_INFO_1:
+			case DT_OS_IMPORT_LIB: case DT_OS_IMPORT_LIB_1:
+			case DT_OS_EXPORT_LIB: case DT_OS_EXPORT_LIB_1:
+				if (!string_valid(d.d_un.d_val & 0xffffffff)) return Reject("module or library name is out of bounds or unterminated");
+				break;
+			case DT_INIT: case DT_FINI:
+				if (d.d_un.d_ptr != 0 && !mapped(d.d_un.d_ptr, 1, false, nullptr)) return Reject("module entry is outside mapped segments");
+				break;
+			case DT_PLTGOT: case DT_OS_PLTGOT:
+				if (!mapped(d.d_un.d_ptr, 24, false, nullptr)) return Reject("PLT GOT is outside mapped segments");
+				break;
+			default: break;
+		}
+	}
+	return true;
+}
+
+bool Elf64::ValidateHeaders() {
+	unsigned dynamic_count = 0, data_count = 0, tls_count = 0;
+	if (m_self != nullptr) {
+		for (uint16_t i = 0; i < m_self->segments_num; ++i) {
+			const auto& segment = m_self_segments[i];
+			if (!InRange(segment.offset, segment.compressed_size, m_f->Size()))
+				return Reject("SELF payload is out of bounds");
+			if ((segment.type & 0x800u) != 0) {
+				const auto index = (segment.type >> 20u) & 0xfffu;
+				if (index >= m_ehdr->e_phnum) return Reject("SELF program header index is out of bounds");
+				if (segment.compressed_size != segment.decompressed_size ||
+				    segment.decompressed_size != m_phdr[index].p_filesz)
+					return Reject("unsupported compressed or inconsistent SELF payload");
+			}
+		}
+	}
+	for (uint16_t i = 0; i < m_ehdr->e_phnum; ++i) {
+		const auto& p = m_phdr[i];
+		if (p.p_filesz > UINT32_MAX || p.p_offset > UINT64_MAX - p.p_filesz ||
+		    p.p_vaddr > UINT64_MAX - p.p_memsz ||
+		    (p.p_align != 0 && (p.p_memsz > UINT64_MAX - (p.p_align - 1) ||
+		                       p.p_vaddr > UINT64_MAX - ((p.p_memsz + p.p_align - 1) & ~(p.p_align - 1)))) ||
+		    (p.p_align != 0 && (p.p_align & (p.p_align - 1)) != 0))
+			return Reject("unsupported segment size, overflow or alignment");
+		if ((p.p_type == PT_LOAD || p.p_type == PT_TLS || p.p_type == PT_OS_RELRO) && p.p_filesz > p.p_memsz)
+			return Reject("segment file size exceeds memory size");
+		if (m_self == nullptr && !InRange(p.p_offset, p.p_filesz, m_f->Size()))
+			return Reject("ELF segment payload is out of bounds");
+		if (p.p_type == PT_DYNAMIC) {
+			if (++dynamic_count > 1 || p.p_filesz == 0 || p.p_filesz % sizeof(Elf64_Dyn) != 0)
+				return Reject("invalid ELF dynamic table shape");
+		}
+		if (p.p_type == PT_OS_DYNLIBDATA && ++data_count > 1) return Reject("duplicate dynamic data segment");
+		if (p.p_type == PT_TLS && ++tls_count > 1) return Reject("multiple TLS images in one module");
+		if ((p.p_type == PT_DYNAMIC || p.p_type == PT_OS_DYNLIBDATA) && p.p_filesz > 64 * 1024 * 1024)
+			return Reject("dynamic metadata exceeds supported 64 MiB limit");
+		if (m_self != nullptr && p.p_filesz != 0) {
+			bool represented = false;
+			for (uint16_t j = 0; j < m_self->segments_num; ++j) {
+				const auto& segment = m_self_segments[j];
+				if ((segment.type & 0x800u) == 0) continue;
+				const auto& owner = m_phdr[(segment.type >> 20u) & 0xfffu];
+				if (p.p_offset >= owner.p_offset && InRange(p.p_offset - owner.p_offset, p.p_filesz, owner.p_filesz)) represented = true;
+			}
+			if (!represented && !(p.p_type == PT_OS_DYNLIBDATA && m_f->Size() - m_self->file_size == p.p_filesz))
+				return Reject("SELF segment has no supported payload mapping");
+		}
+	}
+	// TLS initialization is copied from mapped virtual bytes, not directly from
+	// its file offset. Validate that relationship before MapProgram can read it.
+	for (uint16_t i = 0; i < m_ehdr->e_phnum; ++i) {
+		const auto& tls = m_phdr[i];
+		if (tls.p_type != PT_TLS) continue;
+		if (tls.p_align > 0x4000) return Reject("TLS alignment exceeds supported guest page alignment");
+		bool contained = false;
+		for (uint16_t j = 0; j < m_ehdr->e_phnum; ++j) {
+			const auto& owner = m_phdr[j];
+			if ((owner.p_type != PT_LOAD && owner.p_type != PT_OS_RELRO) || tls.p_vaddr < owner.p_vaddr) continue;
+			const auto delta = tls.p_vaddr - owner.p_vaddr;
+			if (InRange(delta, tls.p_memsz, owner.p_memsz) &&
+			    (tls.p_filesz == 0 || (InRange(delta, tls.p_filesz, owner.p_filesz) &&
+			                           tls.p_offset == owner.p_offset + delta))) contained = true;
+		}
+		if (!contained) return Reject("TLS image is outside its mapped payload");
+	}
+	return true;
+}
+
 void Elf64::Open(const std::filesystem::path& file_name) {
 	Clear();
 
@@ -536,7 +738,8 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 	m_f->Open(file_name, Common::File::Mode::Read);
 
 	if (m_f->IsInvalid()) {
-		EXIT("Can't open %s\n", Common::PathToString(file_name).c_str());
+		Reject("cannot open executable");
+		return;
 	}
 
 	m_self = LoadSelf(*m_f);
@@ -545,6 +748,11 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 		m_self.reset();
 		m_f->Seek(0);
 	} else {
+		if (!InRange(sizeof(SelfHeader), uint64_t(m_self->segments_num) * sizeof(SelfSegment), m_f->Size()) ||
+		    m_self->file_size > m_f->Size()) {
+			Reject("SELF segment table or file size is out of bounds");
+			return;
+		}
 		m_self_segments = LoadSelfSegments(*m_f, m_self->segments_num);
 	}
 
@@ -553,16 +761,42 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 	m_ehdr = LoadEhdr64(*m_f);
 
 	if (!IsValid()) {
-		m_ehdr.reset();
+		Reject("unsupported or truncated ELF header");
+		return;
+	}
+	const auto file_size = m_f->Size();
+	if (m_ehdr->e_ehsize != sizeof(Elf64_Ehdr) ||
+	    !InRange(ehdr_pos, m_ehdr->e_phoff, file_size) ||
+	    !InRange(ehdr_pos + m_ehdr->e_phoff, uint64_t(m_ehdr->e_phnum) * sizeof(Elf64_Phdr), file_size)) {
+		Reject("ELF program header table is out of bounds");
+		return;
+	}
+	if (m_self == nullptr && m_ehdr->e_shnum != 0 &&
+	    (m_ehdr->e_shentsize != sizeof(Elf64_Shdr) ||
+	     !InRange(m_ehdr->e_shoff, uint64_t(m_ehdr->e_shnum) * sizeof(Elf64_Shdr), file_size))) {
+		Reject("ELF section table is out of bounds");
+		return;
 	}
 
 	if (m_ehdr != nullptr /*&& m_self == nullptr*/) {
 		m_phdr = LoadPhdr64(*m_f, ehdr_pos + m_ehdr->e_phoff, m_ehdr->e_phnum);
+		if (!ValidateHeaders()) return;
 		if (m_self == nullptr) {
 			m_shdr = LoadShdr64(*m_f, ehdr_pos + m_ehdr->e_shoff, m_ehdr->e_shnum);
 
 			if (m_shdr != nullptr) {
+				for (uint16_t i = 0; i < m_ehdr->e_shnum; ++i) {
+					if (m_shdr[i].sh_type != 8 && !InRange(m_shdr[i].sh_offset, m_shdr[i].sh_size, file_size)) {
+						Reject("ELF section payload is out of bounds");
+						return;
+					}
+				}
 				if (m_ehdr->e_shstrndx < m_ehdr->e_shnum) {
+					if (m_shdr[m_ehdr->e_shstrndx].sh_size > 64 * 1024 * 1024 ||
+					    !InRange(m_shdr[m_ehdr->e_shstrndx].sh_offset, m_shdr[m_ehdr->e_shstrndx].sh_size, file_size)) {
+						Reject("unsupported or truncated section string table");
+						return;
+					}
 					m_str_table_size = static_cast<uint32_t>(m_shdr[m_ehdr->e_shstrndx].sh_size);
 					m_str_table =
 					    LoadStrTable(*m_f, m_shdr[m_ehdr->e_shstrndx].sh_offset, m_str_table_size);
@@ -576,14 +810,24 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 		for (Elf64_Half i = 0; i < m_ehdr->e_phnum; i++) {
 			switch (m_phdr[i].p_type) {
 				case PT_DYNAMIC:
+					m_dynamic_size = m_phdr[i].p_filesz;
 					m_dynamic = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
 					break;
 				case PT_OS_DYNLIBDATA:
+					m_dynamic_data_size = m_phdr[i].p_filesz;
 					m_dynamic_data = LoadDynamic64(this, m_phdr[i].p_offset, m_phdr[i].p_filesz);
 					break;
 				default: break;
 			}
 		}
+		if (m_dynamic_size != 0) {
+			bool terminated = false;
+			for (uint64_t i = 0; i < m_dynamic_size / sizeof(Elf64_Dyn); ++i) {
+				if (GetDynamic()[i].d_tag == DT_NULL) { terminated = true; break; }
+			}
+			if (!terminated) { Reject("unterminated ELF dynamic table"); return; }
+		}
+		if (!ValidateDynamic()) return;
 	}
 }
 
@@ -622,7 +866,7 @@ void Elf64::Save(const std::filesystem::path& file_name) {
 		}
 
 		for (uint16_t i = 0; i < m_ehdr->e_shnum; i++) {
-			if (m_shdr[i].sh_size == 0u) {
+			if (m_shdr[i].sh_size == 0u || m_shdr[i].sh_type == 8) {
 				continue;
 			}
 

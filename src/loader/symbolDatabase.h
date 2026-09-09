@@ -43,6 +43,7 @@ public:
 	void Add(const SymbolResolve& s, uint64_t vaddr, const std::string& dbg_name);
 
 	[[nodiscard]] const SymbolRecord* Find(const SymbolResolve& s) const;
+	[[nodiscard]] const SymbolRecord* FindExact(const std::string& qualified_name) const;
 	[[nodiscard]] const SymbolRecord* FindByNid(const std::string& nid, SymbolType type) const;
 	[[nodiscard]] const SymbolRecord* FindByName(const std::string& name, SymbolType type) const;
 

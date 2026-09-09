@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "failures": [
+    {
+      "id": "P0-WAVE",
+      "test": "phase0_wave_mask",
+      "status": "crash",
+      "returncode": 3221226505,
+      "signature": "BranchVccnzUsesWaveMask failed at readback: expected \\[0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a\\] actual \\[0x0000002a, 0x0000000b, 0x0000000b, 0x0000000b, 0x0000002a, 0x0000000b, 0x0000000b, 0x0000000b\\]",
+      "phase": 4,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/phase0_wave_mask.log"
+    },
+    {
+      "id": "P0-EOP",
+      "test": "phase0_eop_visibility",
+      "status": "fail",
+      "returncode": 1,
+      "signature": "\"label_after_parse\":1,\"label_before_release\":1,\"retired_before_release\":false,\"retired_after_release\":true,\"label_after_retirement\":1,\"gpu_readback\":5265456",
+      "phase": 3,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/phase0_eop_visibility.log"
+    },
+    {
+      "id": "P0-SOCKET",
+      "test": "kernel_file_system",
+      "status": "crash",
+      "returncode": 3221226505,
+      "signature": "KernelFileSystemTests: failed: guest PEEK and WAITALL preserve the wake bytes",
+      "phase": 2,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/kernel_file_system.log"
+    },
+    {
+      "id": "P0-D24-texture_cache_layered_image",
+      "test": "texture_cache_layered_image",
+      "status": "fail",
+      "returncode": 321,
+      "signature": "image format does not support required usage: format=129 type=1 usage=0x23 flags=0x0 samples=1",
+      "phase": 5,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/texture_cache_layered_image.log"
+    },
+    {
+      "id": "P0-D24-texture_cache_image_views",
+      "test": "texture_cache_image_views",
+      "status": "fail",
+      "returncode": 321,
+      "signature": "image format does not support required usage: format=129 type=1 usage=0x23 flags=0x0 samples=1",
+      "phase": 5,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/texture_cache_image_views.log"
+    },
+    {
+      "id": "P0-D24-texture_cache_storage_sampled",
+      "test": "texture_cache_storage_sampled",
+      "status": "fail",
+      "returncode": 321,
+      "signature": "image format does not support required usage: format=129 type=1 usage=0x23 flags=0x0 samples=1",
+      "phase": 5,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/texture_cache_storage_sampled.log"
+    },
+    {
+      "id": "P0-D24-texture_cache_image_overlap",
+      "test": "texture_cache_image_overlap",
+      "status": "fail",
+      "returncode": 321,
+      "signature": "image format does not support required usage: format=129 type=1 usage=0x23 flags=0x0 samples=2",
+      "phase": 5,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/texture_cache_image_overlap.log"
+    },
+    {
+      "id": "P0-D24-texture_cache_htile_clear",
+      "test": "texture_cache_htile_clear",
+      "status": "fail",
+      "returncode": 321,
+      "signature": "image format does not support required usage: format=129 type=1 usage=0x23 flags=0x0 samples=2",
+      "phase": 5,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/texture_cache_htile_clear.log"
+    },
+    {
+      "id": "P0-D24-buffer_cache_ranges",
+      "test": "buffer_cache_ranges",
+      "status": "fail",
+      "returncode": 321,
+      "signature": "image format does not support required usage: format=129 type=1 usage=0x23 flags=0x0 samples=2",
+      "phase": 5,
+      "platform": "windows",
+      "owner": "ProsperoX runtime",
+      "evidence": "_Build/evidence/windows-portability/buffer_cache_ranges.log"
+    }
+  ]
+}

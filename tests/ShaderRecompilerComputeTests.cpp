@@ -11391,6 +11391,10 @@ public:
   }
 
   void CheckRasterization(bool depth_feedback) {
+    if (depth_feedback && !m_feedback_supported) {
+      std::puts("PHASE0_UNAVAILABLE attachment feedback loop dynamic state is unsupported by this device");
+      std::exit(77);
+    }
     const char *name = depth_feedback ? "DepthAttachmentFeedback"
                                      : "PolygonModeRasterization";
     const uint32_t extent = depth_feedback ? 8 : 32;
@@ -11580,7 +11584,7 @@ public:
       cmd.setDepthBiasEnable(false);
       const vk::Bool32 write = true;
       cmd.setColorWriteEnableEXT(1, &write);
-      cmd.setAttachmentFeedbackLoopEnableEXT(
+      if (m_feedback_supported) cmd.setAttachmentFeedbackLoopEnableEXT(
           feedback_enabled ? vk::ImageAspectFlags{vk::ImageAspectFlagBits::eDepth}
                            : vk::ImageAspectFlags{});
       const vk::DeviceSize offset = 0;
@@ -12919,6 +12923,8 @@ public:
                 case_index, format_cases);
   }
 
+#include "Phase0GpuProbes.inc"
+
 private:
   RenderContext &Renderer() {
     EXIT_IF(m_renderer == nullptr);
@@ -12937,7 +12943,7 @@ private:
     m_runtime_context.physical_device_memory_properties = m_memory_properties;
     m_runtime_context.queue_family = m_queue_family;
     m_runtime_context.queue = m_queue;
-    m_runtime_context.attachment_feedback_loop_enabled = true;
+    m_runtime_context.attachment_feedback_loop_enabled = m_feedback_supported;
 
     VmaVulkanFunctions functions{};
     functions.vkGetInstanceProcAddr =
@@ -13082,10 +13088,12 @@ private:
             "vertex layer output is not supported");
     Require("VulkanHarness", "graphics", available_features.fillModeNonSolid &&
                 available_depth_clip.depthClipEnable && available_clip_control.depthClipControl &&
-                available_color_write.colorWriteEnable &&
-                available_feedback_layout.attachmentFeedbackLoopLayout &&
-                available_feedback_dynamic.attachmentFeedbackLoopDynamicState,
+                available_color_write.colorWriteEnable,
             "production rasterization features are not supported");
+    // Production also treats attachment feedback as optional. Unrelated GPU
+    // conformance cases must not require this extension just to create a device.
+    m_feedback_supported = available_feedback_layout.attachmentFeedbackLoopLayout &&
+                           available_feedback_dynamic.attachmentFeedbackLoopDynamicState;
 
     float priority = 1.0f;
     vk::DeviceQueueCreateInfo queue_info{};
@@ -13132,7 +13140,8 @@ private:
     vk::PhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT feedback_dynamic{};
     feedback_dynamic.pNext = &feedback_layout;
     feedback_dynamic.attachmentFeedbackLoopDynamicState = true;
-    device_info.pNext = &feedback_dynamic;
+    device_info.pNext = m_feedback_supported ? static_cast<void*>(&feedback_dynamic)
+                                            : static_cast<void*>(&color_write);
     vk::PhysicalDeviceFeatures device_features{};
     device_features.shaderStorageImageWriteWithoutFormat = true;
     device_features.shaderImageGatherExtended = true;
@@ -13140,17 +13149,19 @@ private:
     device_features.shaderInt64 = true;
     device_features.fillModeNonSolid = true;
     device_info.pEnabledFeatures = &device_features;
-    constexpr const char *device_extensions[] = {
+    std::vector<const char *> device_extensions = {
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
         VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME,
         VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME,
         VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,
         VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
-        VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME,
-        VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME,
-        VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME};
+        VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME};
+    if (m_feedback_supported) {
+      device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
+      device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
+    }
     device_info.enabledExtensionCount = std::size(device_extensions);
-    device_info.ppEnabledExtensionNames = device_extensions;
+    device_info.ppEnabledExtensionNames = device_extensions.data();
     RequireVk("VulkanHarness", "dispatch",
               m_physical_device.createDevice(&device_info, nullptr, &m_device),
               "vkCreateDevice");
@@ -13465,6 +13476,7 @@ private:
     m_device.unmapMemory(buffer.memory);
   }
 
+  bool m_feedback_supported = false;
   vk::Instance m_instance = nullptr;
   vk::PhysicalDevice m_physical_device = nullptr;
   vk::Device m_device = nullptr;
@@ -28061,6 +28073,27 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && std::strcmp(argv[1], "--phase0-spirv") == 0) {
+    auto test = BranchVccnzUsesWaveMask();
+    test.compile_only = true;
+    RunCase(nullptr, test);
+    std::printf("PHASE0 {\"probe\":\"spirv_validation\",\"validated\":true,\"gpu_executed\":false}\n");
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--phase0-eop") == 0) {
+    VulkanHarness vulkan;
+    return vulkan.ProbePhase0EopVisibility();
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--phase0-wave") == 0) {
+    VulkanHarness vulkan;
+    std::printf("PHASE0 {\"probe\":\"wave_mask\",\"seed\":5265456,"
+                "\"fixture\":\"BranchVccnzUsesWaveMask\",\"expected\":[42,42,42,42,42,42,42,42]}\n");
+    // Existing original ISA fixture: only lane zero sets VCC; the scalar branch
+    // must select the same destination for every participating lane.
+    RunCase(&vulkan, BranchVccnzUsesWaveMask());
+    std::printf("PHASE0 {\"probe\":\"wave_mask\",\"actual_matches_expected\":true}\n");
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--error-dialog-only") == 0) {
     CheckErrorDialogLifecycle();
     return 0;

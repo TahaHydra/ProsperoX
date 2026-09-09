@@ -1,0 +1,22 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {"major": 3, "minor": 25, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "phase0-base", "hidden": true, "generator": "Ninja",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "ON", "KYTY_BUILD_LAUNCHER": "OFF", "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF"}
+    },
+    {
+      "name": "phase0-windows", "inherits": "phase0-base", "binaryDir": "${sourceDir}/_Build/phase0-windows",
+      "cacheVariables": {"CMAKE_C_COMPILER": "clang-cl", "CMAKE_CXX_COMPILER": "clang-cl"}
+    },
+    {
+      "name": "phase0-linux", "inherits": "phase0-base", "binaryDir": "${sourceDir}/_Build/phase0-linux",
+      "cacheVariables": {"CMAKE_C_COMPILER": "clang-18", "CMAKE_CXX_COMPILER": "clang++-18"}
+    }
+  ],
+  "buildPresets": [
+    {"name": "phase0-windows", "configurePreset": "phase0-windows", "targets": ["kyty_emulator", "kyty_tests"], "jobs": 6},
+    {"name": "phase0-linux", "configurePreset": "phase0-linux", "targets": ["kyty_emulator", "kyty_tests"], "jobs": 3}
+  ]
+}

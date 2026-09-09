@@ -41,33 +41,18 @@ jobs:
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
 
-      - name: Locate vcpkg
-        id: vcpkg
-        shell: pwsh
-        run: |
-          $vcpkgRoot = Split-Path (Get-Command vcpkg).Source
-          $portHash = (Get-FileHash "$vcpkgRoot\ports\glslang\vcpkg.json" -Algorithm SHA256).Hash
-          "root=$vcpkgRoot" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "port_hash=$($portHash.ToLowerInvariant())" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Cache glslang
-        id: glslang_cache
+      - name: Cache pinned Phase 0 tools
         uses: actions/cache@v4
         with:
-          path: ${{ steps.vcpkg.outputs.root }}\installed\x64-windows
-          key: glslang-${{ runner.os }}-${{ runner.arch }}-${{ steps.vcpkg.outputs.port_hash }}-tools-opt
+          path: _Build/tools
+          key: phase0-tools-windows-${{ hashFiles('scripts/phase0/toolchain-lock.json') }}
 
-      - name: Install glslang
+      - name: Verify portable compiler and shader tools
         shell: pwsh
         run: |
-          $vcpkgRoot = "${{ steps.vcpkg.outputs.root }}"
-          if ("${{ steps.glslang_cache.outputs.cache-hit }}" -ne "true") {
-            vcpkg install glslang[tools,opt]:x64-windows
-          }
-          "$vcpkgRoot\installed\x64-windows\tools\glslang" |
-            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          ./scripts/phase0/bootstrap-windows.ps1
+          "$pwd/_Build/tools/llvm-21.1.8/bin" >> $env:GITHUB_PATH
+          "$pwd/_Build/tools/glslang-16.5.0/bin" >> $env:GITHUB_PATH
 
       - name: Install Qt 6.10.3
         uses: jurplel/install-qt-action@v4
@@ -105,12 +90,22 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          cmake --build _Build/windows --target launcher audio_out2_port_tests ime_dialog_tests virtual_memory_allocation_tests --parallel
+          cmake --build _Build/windows --target launcher kyty_emulator kyty_tests --parallel 3
 
       - name: Test
         shell: cmd
         run: |
-          ctest --test-dir _Build/windows --output-on-failure -R "^(audio_out2_port|ime_dialog|virtual_memory_allocation)$"
+          python -m unittest discover -s scripts/phase0 -p "test_*.py"
+          if errorlevel 1 exit /b 1
+          python scripts/phase0/run.py --build-dir _Build/windows --output-dir _Build/phase0-results-windows --gpu unavailable --gpu-reason "GitHub-hosted Windows runner has no declared supported Vulkan GPU"
+
+      - name: Upload Phase 0 Windows evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phase0-Windows-evidence
+          path: _Build/phase0-results-windows/**
+          if-no-files-found: warn
 
       - name: Install
         shell: cmd
@@ -125,6 +120,8 @@ jobs:
           if-no-files-found: error
 
   macos:
+    # Deferred until gameplay works on the designated Windows 11 / Radeon PC.
+    if: ${{ false }}
     name: Build KytyPS5 (macOS)
     needs: metadata
     runs-on: macos-15
@@ -271,6 +268,8 @@ jobs:
           if-no-files-found: error
 
   linux:
+    # Deferred until gameplay works on the designated Windows 11 / Radeon PC.
+    if: ${{ false }}
     name: Build KytyPS5 (Linux)
     needs: metadata
     runs-on: ubuntu-24.04
@@ -360,15 +359,22 @@ jobs:
         shell: bash
         run: |
           cmake --build _Build/linux \
-            --target launcher page_manager_tests memory_tracker_tests \
-              audio_out2_port_tests ime_dialog_tests virtual_memory_allocation_tests \
-            --parallel
+            --target launcher kyty_emulator kyty_tests \
+            --parallel 3
 
       - name: Test
         shell: bash
         run: |
-          ctest --test-dir _Build/linux --output-on-failure \
-            -R '^(audio_out2_port|ime_dialog|page_manager|memory_tracker|virtual_memory_allocation)$'
+          python3 -m unittest discover -s scripts/phase0 -p 'test_*.py'
+          python3 scripts/phase0/run.py --build-dir _Build/linux --output-dir _Build/phase0-results-linux --gpu unavailable --gpu-reason 'GitHub-hosted Linux runner has no declared supported Vulkan GPU'
+
+      - name: Upload Phase 0 Linux evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phase0-Linux-evidence
+          path: _Build/phase0-results-linux/**
+          if-no-files-found: warn
 
       - name: Install
         shell: bash

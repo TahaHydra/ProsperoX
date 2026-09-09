@@ -286,57 +286,64 @@ static bool HasWindowsForbiddenFilenameCharacter(const std::string& relative_pat
 
 std::filesystem::path MountPoints::GetRealFilename(const std::string& mounted_file_name) {
 	Common::LockGuard lock(m_mutex);
-
-	auto mounted_path =
-	    Common::DirectoryWithoutFilename(Common::FixFilenameSlash(mounted_file_name));
-
-	const auto it = std::find_if(
-	    m_mount_pairs.begin(), m_mount_pairs.end(),
-	    [&mounted_path](const MountPair& p) { return Common::StartsWith(mounted_path, p.point); });
-	if (it != m_mount_pairs.end()) {
-		const auto& p = *it;
-		auto        rel_path =
-		    Common::RemoveFirst(Common::FixFilenameSlash(mounted_file_name), p.point.size());
-		while (Common::StartsWith(rel_path, '/')) {
-			rel_path = Common::RemoveFirst(rel_path, 1);
-		}
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		if (HasWindowsForbiddenFilenameCharacter(rel_path)) {
-			::printf("FileSystem: Windows-incompatible guest filename: %s\n",
-			         mounted_file_name.c_str());
-		}
-		return p.dir / rel_path;
-#else
-		return ResolvePathIgnoringCase(p.dir / rel_path);
-#endif
+	if (mounted_file_name.empty() || mounted_file_name.front() != '/' ||
+	    mounted_file_name.find('\0') != std::string::npos) {
+		return {};
 	}
-
-	return mounted_file_name;
+	const auto path = Common::FixFilenameSlash(mounted_file_name);
+	// Choose the most specific mount, independent of registration order.
+	const MountPair* mount = nullptr;
+	for (const auto& candidate: m_mount_pairs) {
+		const auto point = candidate.point.substr(0, candidate.point.size() - 1);
+		if ((path == point || Common::StartsWith(path, candidate.point)) &&
+		    (mount == nullptr || candidate.point.size() > mount->point.size())) {
+			mount = &candidate;
+		}
+	}
+	if (mount == nullptr) {
+		return {};
+	}
+	const auto relative = path.size() < mount->point.size() ? std::string{} : path.substr(mount->point.size());
+	std::filesystem::path suffix;
+	// Reject climbing above this mount even if a later component re-enters it.
+	for (const auto& component: std::filesystem::path(relative)) {
+		if (component == "." || component.empty()) continue;
+		if (component == "..") {
+			if (suffix.empty()) return {};
+			suffix = suffix.parent_path();
+		} else {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+			const auto name = component.string();
+			if (HasWindowsForbiddenFilenameCharacter(name) || name.back() == '.' || name.back() == ' ' ||
+			    component.has_root_path()) return {};
+			const auto base = Common::ToLower(name.substr(0, name.find('.')));
+			if (base == "con" || base == "prn" || base == "aux" || base == "nul" ||
+			    (base.size() == 4 && (base.starts_with("com") || base.starts_with("lpt")) &&
+			     base[3] >= '1' && base[3] <= '9')) return {};
+#endif
+			suffix /= component;
+		}
+	}
+	std::error_code error;
+	const auto root = std::filesystem::weakly_canonical(mount->dir, error);
+	if (error) return {};
+	auto candidate = root / suffix;
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+	candidate = ResolvePathIgnoringCase(candidate);
+#endif
+	candidate = std::filesystem::weakly_canonical(candidate, error);
+	if (error) return {};
+	// Component comparison also excludes sibling paths sharing a textual prefix.
+	auto child = candidate.begin();
+	for (const auto& component: root) {
+		if (child == candidate.end() || *child != component) return {};
+		++child;
+	}
+	return candidate;
 }
 
 std::filesystem::path MountPoints::GetRealDirectory(const std::string& mounted_directory) {
-	Common::LockGuard lock(m_mutex);
-
-	auto mounted_path = Common::FixDirectorySlash(mounted_directory);
-
-	const auto it = std::find_if(
-	    m_mount_pairs.begin(), m_mount_pairs.end(),
-	    [&mounted_path](const MountPair& p) { return Common::StartsWith(mounted_path, p.point); });
-	if (it != m_mount_pairs.end()) {
-		const auto& p = *it;
-		auto        rel_path =
-		    Common::RemoveFirst(Common::FixDirectorySlash(mounted_directory), p.point.size());
-		while (Common::StartsWith(rel_path, '/')) {
-			rel_path = Common::RemoveFirst(rel_path, 1);
-		}
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		return p.dir / rel_path;
-#else
-		return ResolvePathIgnoringCase(p.dir / rel_path);
-#endif
-	}
-
-	return mounted_directory;
+	return GetRealFilename(mounted_directory);
 }
 
 void Initialize() {
@@ -439,6 +446,10 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 
 	file->real_name = (directory ? g_mount_points->GetRealDirectory(file->name)
 	                             : g_mount_points->GetRealFilename(file->name));
+	if (file->real_name.empty()) {
+		g_files->DeleteDescriptor(descriptor);
+		return KERNEL_ERROR_ENOENT;
+	}
 
 	if (trunc && rw_mode == Common::File::Mode::Read) {
 		return KERNEL_ERROR_EACCES;

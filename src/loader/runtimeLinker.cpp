@@ -31,6 +31,8 @@
 #include <fmt/format.h>
 #include <memory>
 #include <vector>
+#include <stdexcept>
+#include <Zydis/Zydis.h>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #ifndef NOMINMAX
@@ -298,18 +300,18 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 }
 
 static KYTY_SYSV_ABI uint64_t ResolveImportStubWithId(uint64_t record_id) {
+	return Common::Singleton<RuntimeLinker>::Instance()->ResolveImport(record_id);
+}
+
+uint64_t RuntimeLinker::ResolveImport(uint64_t record_id) {
+	// Loading/unloading may grow or invalidate records. Keep lookup and GOT patch
+	// under the same loader lock rather than retaining a vector reference across it.
+	Common::LockGuard lock(m_mutex);
 	if (record_id < g_stubbed_imports.size()) {
 		auto& record = g_stubbed_imports[record_id];
-		auto  nid    = record.name;
-		auto  pos    = Common::FindIndex(nid, "[");
-		if (Common::IndexValid(nid, pos)) {
-			nid = Common::Left(nid, pos);
-		}
-
 		SymbolRecord resolved {};
-		if (!nid.empty() &&
-		    Common::Singleton<RuntimeLinker>::Instance()->ResolveLoadedSymbolByNid(nid, record.type,
-		                                                                           &resolved) &&
+		if (!record.name.empty() &&
+		    ResolveLoadedSymbol(record.name, &resolved) &&
 		    resolved.vaddr != 0 && resolved.vaddr != record.thunk_vaddr) {
 			LOGF("Late-resolved import: %s -> %s [0x%016" PRIx64 "]\n", record.name.c_str(),
 			     resolved.name.c_str(), resolved.vaddr);
@@ -338,7 +340,16 @@ static KYTY_SYSV_ABI uint64_t ResolveImportStubWithId(uint64_t record_id) {
 			     log_index, record_id);
 		}
 	}
-	return 0;
+	if (record_id < g_stubbed_imports.size()) {
+		const auto& record = g_stubbed_imports[record_id];
+		std::fprintf(stderr, "UNRESOLVED_STRONG_IMPORT symbol=%s program=%s relocation=%u patch=0x%016" PRIx64 "\n",
+		             record.name.c_str(), record.program.c_str(), record.index, record.patch_vaddr);
+	} else {
+		std::fprintf(stderr, "UNRESOLVED_STRONG_IMPORT invalid_record=%" PRIu64 "\n", record_id);
+	}
+	std::fflush(stderr);
+	// This is a defined diagnostic termination, never a fabricated guest return value.
+	std::quick_exit(86);
 }
 
 constexpr uint64_t SYSTEM_RESERVED  = 0x800000000u;
@@ -805,6 +816,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 	     " access=%u address=0x%016" PRIx64 "\n",
 	     static_cast<unsigned>(info->type), info->native_code, info->exception_address,
 	     static_cast<unsigned>(info->access_violation_type), info->access_violation_vaddr);
+	return false;
 }
 
 static void EncodeId64(uint16_t in_id, std::string* out_id) {
@@ -935,7 +947,7 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program) {
 			}
 			switch (bind) {
 				case STB_LOCAL:
-					symbol_vaddr = ret.base_vaddr + sym.st_value;
+					symbol_vaddr = sym.st_shndx == 0 ? 0 : ret.base_vaddr + sym.st_value;
 					ret.bind     = BindType::Local;
 					break;
 				case STB_GLOBAL: ret.bind = BindType::Global; [[fallthrough]];
@@ -944,11 +956,15 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program) {
 					ret.name = names + sym.st_name;
 					program->rt->Resolve(ret.name, ret.type, program, &sr, &ret.bind_self);
 					symbol_vaddr = sr.vaddr;
+					if (symbol_vaddr == 0 && sym.st_shndx != 0) {
+						symbol_vaddr = ret.base_vaddr + sym.st_value;
+						ret.bind_self = true;
+					}
 				} break;
 				default: EXIT("unknown bind: %d\n", (int)bind);
 			}
-			ret.resolved = (symbol_vaddr != 0);
-			ret.value    = (ret.resolved ? symbol_vaddr + addend : 0);
+			ret.resolved = (symbol_vaddr != 0 || bind == STB_LOCAL);
+			ret.value    = symbol_vaddr + addend;
 			ret.name     = sr.name;
 			ret.dbg_name = sr.dbg_name;
 		} break;
@@ -990,8 +1006,18 @@ static void RelocateRecord(uint32_t index, Elf64_Rela* r, Program* program, bool
 
 	if (ri.resolved) {
 		patched = PatchGuestMemory64(ri.vaddr, ri.value);
+	} else if (ri.bind == BindType::Weak) {
+		// ELF weak absence is S=0 (plus the relocation addend), not a callable
+		// success stub or a fabricated inaccessible object address.
+		patched = PatchGuestMemory64(ri.vaddr, ri.value);
 	} else {
 		uint64_t value = 0;
+		if (ri.type == SymbolType::Object || ri.type == SymbolType::NoType) {
+			std::fprintf(stderr, "UNRESOLVED_STRONG_DATA symbol=%s program=%s relocation=%u\n",
+			             ri.name.c_str(), Common::PathToString(program->file_name).c_str(), index);
+			std::fflush(stderr);
+			std::quick_exit(86);
+		}
 		bool     weak  = (ri.bind == BindType::Weak || !program->fail_if_global_not_resolved);
 		if (ri.type == SymbolType::Object && weak) {
 			value = g_invalid_memory;
@@ -1068,6 +1094,8 @@ static void RelocateRecords(Elf64_Rela* records, uint64_t size, Program* program
                             bool jmprela_table, bool imports_only,
                             std::vector<std::string>* unresolved) {
 	KYTY_PROFILER_FUNCTION();
+	if (size == 0) return;
+	EXIT_IF(records == nullptr || size % sizeof(Elf64_Rela) != 0);
 
 	uint32_t index = 0;
 	for (auto* r = records;
@@ -1076,30 +1104,28 @@ static void RelocateRecords(Elf64_Rela* records, uint64_t size, Program* program
 	}
 }
 
-__attribute__((naked)) static KYTY_SYSV_ABI void RelocateHandlerReturnStub() {
-	asm volatile("addq $8, %rsp\n\t"
-	             "retq\n");
+static KYTY_SYSV_ABI uint64_t RelocateHandler(RelocateHandlerStack s) {
+	// The guest PLT pushes the program identity in the resolver's return slot.
+	// Validate that identity in the registry before dereferencing it.
+	auto* program = reinterpret_cast<Program*>(__builtin_return_address(0));
+	Common::Singleton<RuntimeLinker>::Instance()->RejectLegacyImport(program,s.stack[0],s.stack[1]);
 }
 
-static KYTY_SYSV_ABI uint64_t RelocateHandler(RelocateHandlerStack s) {
-	auto*       stack     = s.stack;
-	auto*       program   = reinterpret_cast<Program*>(stack[-1]);
-	auto        rel_index = stack[0];
+[[noreturn]] void RuntimeLinker::RejectLegacyImport(Program* program, uint64_t rel_index, uint64_t caller) {
+	Common::LockGuard lock(m_mutex);
 	std::string name      = "<unknown function>";
-
-	if (program != nullptr && program->dynamic_info != nullptr &&
-	    program->dynamic_info->jmprela_table != nullptr) {
+	std::string file = "<unregistered>";
+	if (std::find(m_programs.begin(),m_programs.end(),program) != m_programs.end() &&
+	    program->dynamic_info != nullptr && program->dynamic_info->jmprela_table != nullptr &&
+	    rel_index < program->dynamic_info->jmprela_table_size / sizeof(Elf64_Rela)) {
 		auto ri = GetRelocationInfo(program->dynamic_info->jmprela_table + rel_index, program);
-
 		name = ri.name.c_str();
+		file = Common::PathToString(program->file_name);
 	}
-
-	// Restore return address (for stack trace)
-	stack[-1] = reinterpret_cast<uint64_t>(RelocateHandlerReturnStub);
-
-	LOGF("=== Stubbed function, returning OK ===\n[%d]\t%s\n", Common::Thread::GetThreadIdUnique(),
-	     name.c_str());
-	return 0;
+	std::fprintf(stderr,"UNRESOLVED_STRONG_IMPORT legacy_plt index=%" PRIu64 " symbol=%s program=%s caller=0x%016" PRIx64 "\n",
+	             rel_index,name.c_str(),file.c_str(),caller);
+	std::fflush(stderr);
+	std::quick_exit(86);
 }
 
 static KYTY_MS_ABI uint8_t* TlsMainGetAddr() {
@@ -1119,48 +1145,55 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size) {
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->elf == nullptr);
 
-	if (size >= 12) {
-		// Replace guest stack-canary/errno stores through fs:[0x28] with nops.
-		// Windows x64 cannot host guest FS directly, and an unpatched shared-library access faults
-		// at address 0x28.
+	ZydisDecoder decoder{};
+	EXIT_IF(!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)));
+	std::vector<std::pair<uint64_t,uint8_t>> instructions;
+	for (uint64_t offset = 0; offset < size;) {
+		ZydisDecodedInstruction instruction{};
+		ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
+		if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<void*>(address+offset),
+		                                      size-offset, &instruction, operands))) {
+			LOGF("TLS patch scan stopped at undecodable offset 0x%" PRIx64 "\n", offset);
+			break;
+		}
+		instructions.emplace_back(offset,instruction.length);
+		offset += instruction.length;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (size >= 12 && program->tls.handler_vaddr != 0) {
+		// Preserve the actual 32-bit TLS store; never erase a store or a following trap.
 		const uint8_t fs_store_pattern[8] = {0x64, 0xc7, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00};
 		auto*         start_ptr           = reinterpret_cast<uint8_t*>(address);
-		auto*         end_ptr             = start_ptr + size - 12;
-
-		for (auto* ptr = start_ptr; ptr <= end_ptr; ptr++) {
+		for (const auto& [offset,length]: instructions) {
+			if (length != 12) continue;
+			auto* ptr = start_ptr + offset;
 			if (memcmp(ptr, fs_store_pattern, sizeof(fs_store_pattern)) == 0) {
 				LOGF("Patch fs:[0x28] store at addr: [%016" PRIx64 "]\n",
 				     reinterpret_cast<uint64_t>(ptr));
-				if (ptr + 16 < start_ptr + size && ptr[12] == 0xcd && ptr[13] == 0x45 &&
-				    ptr[14] == 0x90 && ptr[15] == 0x0f && ptr[16] == 0x0b) {
-					ptr[0] = 0x5d; // pop rbp
-					ptr[1] = 0xc3; // ret
-					std::memset(ptr + 2, 0x90, 15);
-				} else {
-					std::memset(ptr, 0x90, 12);
-				}
+				uint32_t immediate = 0;
+				std::memcpy(&immediate, ptr + 8, sizeof(immediate));
+				if (!PatchTlsInstruction(address + offset, length, program->tls.handler_vaddr, 0, true, immediate))
+					throw std::runtime_error("cannot emit TLS store trampoline");
 			}
 		}
 	}
-
-	if (!program->elf->IsShared() && program->tls.handler_vaddr != 0 &&
+#endif
+	if (program->tls.handler_vaddr != 0 &&
 	    size >= Jit::Call9::GetSize()) {
 		// Replace:
 		//   66 66 66
 		//   mov <reg>, qword ptr fs:[0x00]
-		// with:
-		//   call <handler>
-		//   mov <reg>,rax
-		//   nop ...
+		// Windows uses a per-site jump trampoline so the replacement itself does
+		// not overwrite the guest red zone. Other hosts retain the legacy helper.
 		const uint8_t tls_pattern[5]       = {0x64, 0x48, 0x8B, 0x00, 0x25};
 		const uint8_t zero_displacement[4] = {};
 
 		EXIT_IF(Jit::Call9::GetSize() != 9);
 
 		auto* start_ptr = reinterpret_cast<uint8_t*>(address);
-		auto* end_ptr   = start_ptr + size - Jit::Call9::GetSize();
-
-		for (auto* ptr = start_ptr; ptr <= end_ptr; ptr++) {
+		for (const auto& [offset,length]: instructions) {
+			if (length < Jit::Call9::GetSize()) continue;
+			auto* ptr = start_ptr+offset;
 			auto*  inst_ptr     = ptr;
 			size_t prefix_count = 0;
 			while (prefix_count < 3 && inst_ptr < start_ptr + size && *inst_ptr == 0x66) {
@@ -1173,22 +1206,23 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size) {
 			}
 
 			const uint8_t modrm = inst_ptr[3];
-			if (memcmp(inst_ptr, tls_pattern, 3) == 0 && (modrm & 0xc7u) == 0x04u &&
+			if (length == prefix_count + Jit::Call9::GetSize() &&
+			    memcmp(inst_ptr, tls_pattern, 3) == 0 && (modrm & 0xc7u) == 0x04u &&
 			    inst_ptr[4] == tls_pattern[4] &&
 			    memcmp(inst_ptr + 5, zero_displacement, sizeof(zero_displacement)) == 0) {
 				LOGF("Patch tls at addr: [%016" PRIx64 "]\n", reinterpret_cast<uint64_t>(inst_ptr));
 
 				const auto reg = (modrm >> 3u) & 7u;
-				EXIT_NOT_IMPLEMENTED(reg == 4u);
-
-				// A raw scan can encounter a 0x66 in the preceding instruction, so do not
-				// overwrite it. Call9 starts with REX.W to neutralize genuine 0x66
-				// prefixes on AMD processors (before it could turn E8 into callw 16bit).
+				if (reg == 4u) throw std::runtime_error("unsupported TLS load into stack pointer");
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+				if (!PatchTlsInstruction(address + offset, length, program->tls.handler_vaddr, reg, false, 0))
+					throw std::runtime_error("cannot emit TLS load trampoline");
+#else
 				auto* code = new (inst_ptr) Jit::Call9;
 				code->SetFunc(reg == 0
 				                  ? program->tls.handler_vaddr
 				                  : program->tls.handler_vaddr + Jit::TlsRegStub::GetOffset(reg));
-				ptr += prefix_count + Jit::Call9::GetSize() - 1;
+#endif
 			}
 		}
 	}
@@ -1301,6 +1335,7 @@ void RuntimeLinker::UnloadProgram(Program* program) {
 
 	if (auto it = std::find(m_programs.begin(), m_programs.end(), program);
 	    it != m_programs.end()) {
+		std::erase(m_started_modules,program);
 		DeleteProgram(*it);
 		m_programs.erase(it);
 	} else {
@@ -1326,6 +1361,8 @@ Program* RuntimeLinker::LoadProgram(const std::filesystem::path& elf_name) {
 	Common::LockGuard lock(m_mutex);
 
 	static int32_t id_seq = 0;
+	m_last_load_error.clear();
+	const auto previous_base = g_desired_base_addr;
 
 	LOGF("Loading: %s\n", Common::PathToString(elf_name).c_str());
 
@@ -1339,12 +1376,17 @@ Program* RuntimeLinker::LoadProgram(const std::filesystem::path& elf_name) {
 	program->elf = std::make_unique<Elf64>();
 	program->elf->Open(elf_name);
 
-	if (program->elf->IsValid()) {
+	try {
+		if (!program->elf->IsValid()) throw std::runtime_error(program->elf->GetError());
 		LoadProgramToMemory(program);
 		ParseProgramDynamicInfo(program);
 		CreateSymbolDatabase(program);
-	} else {
-		EXIT("elf is not valid: %s\n", Common::PathToString(elf_name).c_str());
+	} catch (const std::exception& error) {
+		m_last_load_error = error.what();
+		LOGF("Executable load rejected: %s: %s\n", Common::PathToString(elf_name).c_str(), m_last_load_error.c_str());
+		if (program->base_vaddr != 0) DeleteProgram(program_owner.release());
+		g_desired_base_addr = previous_base;
+		return nullptr;
 	}
 
 	m_programs.push_back(program_owner.release());
@@ -1448,6 +1490,7 @@ void RuntimeLinker::Clear() {
 		DeleteProgram(p);
 	}
 	m_programs.clear();
+	m_started_modules.clear();
 	for (const auto page: g_unresolved_stub_thunk_pages) {
 		EXIT_IF(!Libs::LibKernel::Memory::FreeGuestMemory(page, UNRESOLVED_STUB_PAGE_SIZE));
 	}
@@ -1485,28 +1528,6 @@ void RuntimeLinker::Resolve(const std::string& name, SymbolType type, Program* p
 		const LibraryId* l = FindLibrary(*program, ids.at(1));
 		const ModuleId*  m = FindModule(*program, ids.at(2));
 
-		auto resolve_by_nid = [this, type](const std::string& nid, SymbolRecord* out) -> bool {
-			EXIT_IF(out == nullptr);
-
-			if (m_symbols != nullptr) {
-				if (const auto* rec = m_symbols->FindByNid(nid, type); rec != nullptr) {
-					*out = *rec;
-					return true;
-				}
-			}
-
-			for (auto* p: m_programs) {
-				if (p != nullptr && p->export_symbols != nullptr) {
-					if (const auto* rec = p->export_symbols->FindByNid(nid, type); rec != nullptr) {
-						*out = *rec;
-						return true;
-					}
-				}
-			}
-
-			return false;
-		};
-
 		if (l != nullptr && m != nullptr) {
 			SymbolResolve sr {};
 			sr.name                 = ids.at(0);
@@ -1532,13 +1553,6 @@ void RuntimeLinker::Resolve(const std::string& name, SymbolType type, Program* p
 				}
 			}
 
-			if (rec == nullptr) {
-				if (resolve_by_nid(sr.name, out_info)) {
-					LOGF("PS5 NID fallback: %s -> %s\n", sr.name.c_str(), out_info->name.c_str());
-					return;
-				}
-			}
-
 			if (rec != nullptr) {
 				//*out_vaddr = rec->vaddr;
 				*out_info = *rec;
@@ -1548,13 +1562,9 @@ void RuntimeLinker::Resolve(const std::string& name, SymbolType type, Program* p
 				out_info->dbg_name = "";
 			}
 		} else {
-			if (resolve_by_nid(ids.at(0), out_info)) {
-				LOGF("PS5 NID fallback: %s -> %s (missing lib/module metadata)\n",
-				     ids.at(0).c_str(), out_info->name.c_str());
-				return;
-			}
-
-			EXIT("l == nullptr || m == nullptr");
+			*out_info = {};
+			out_info->name = name;
+			LOGF("Unresolved import metadata: %s\n", name.c_str());
 		}
 	} else {
 		out_info->vaddr    = 0;
@@ -1563,7 +1573,7 @@ void RuntimeLinker::Resolve(const std::string& name, SymbolType type, Program* p
 	}
 }
 
-bool RuntimeLinker::ResolveLoadedSymbolByNid(const std::string& nid, SymbolType type,
+bool RuntimeLinker::ResolveLoadedSymbol(const std::string& qualified_name,
                                              SymbolRecord* out_info) {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1571,19 +1581,20 @@ bool RuntimeLinker::ResolveLoadedSymbolByNid(const std::string& nid, SymbolType 
 
 	EXIT_IF(out_info == nullptr);
 
+	// Match the initial resolution policy: explicit HLE registration wins, then
+	// an exact guest export. Never discard module, library, version or symbol type.
+	if (m_symbols != nullptr) {
+		if (const auto* rec = m_symbols->FindExact(qualified_name); rec != nullptr) {
+			*out_info = *rec;
+			return true;
+		}
+	}
 	for (auto* p: m_programs) {
 		if (p != nullptr && p->export_symbols != nullptr) {
-			if (const auto* rec = p->export_symbols->FindByNid(nid, type); rec != nullptr) {
+			if (const auto* rec = p->export_symbols->FindExact(qualified_name); rec != nullptr) {
 				*out_info = *rec;
 				return true;
 			}
-		}
-	}
-
-	if (m_symbols != nullptr) {
-		if (const auto* rec = m_symbols->FindByNid(nid, type); rec != nullptr) {
-			*out_info = *rec;
-			return true;
 		}
 	}
 
@@ -1703,69 +1714,53 @@ static std::string GetProgramModuleName(const Program* program) {
 	return Common::FilenameWithoutDirectory(Common::PathToGenericString(program->file_name));
 }
 
-static bool ModuleStartDependenciesSatisfied(const Program*               program,
-                                             const std::vector<Program*>& programs,
-                                             const std::vector<Program*>& started) {
-	EXIT_IF(program == nullptr);
-	EXIT_IF(program->dynamic_info == nullptr);
-
-	for (const auto* needed: program->dynamic_info->needed) {
-		if (needed == nullptr || needed[0] == '\0') {
-			continue;
-		}
-
-		const auto needed_name = std::string(needed);
-
-		for (auto* dependency: programs) {
-			if (dependency == nullptr || dependency == program || dependency->elf == nullptr ||
-			    !dependency->elf->IsShared()) {
-				continue;
-			}
-
-			const auto dependency_name = GetProgramModuleName(dependency);
-			if (Common::EqualNoCase(dependency_name, needed_name) ||
-			    Common::EqualNoCase(Common::FilenameWithoutDirectory(
-			                            Common::PathToGenericString(dependency->file_name)),
-			                        needed_name)) {
-				if (std::find(started.begin(), started.end(), dependency) == started.end()) {
-					return false;
-				}
-				break;
-			}
-		}
-	}
-
-	return true;
-}
-
 void RuntimeLinker::StartAllModules() {
 	Common::LockGuard lock(m_mutex);
-
-	std::vector<Program*> started;
-
-	for (;;) {
-		bool progressed = false;
-
-		for (auto* p: m_programs) {
-			if (p->elf->IsShared() && p->dynamic_info->init_vaddr != 0 &&
-			    std::find(started.begin(), started.end(), p) == started.end() &&
-			    ModuleStartDependenciesSatisfied(p, m_programs, started)) {
-				StartModule(p, 0, nullptr, nullptr);
-				started.push_back(p);
-				progressed = true;
+	std::vector<Program*> ordered;
+	std::vector<Program*> stack;
+	std::unordered_map<Program*,unsigned> index, low;
+	std::unordered_map<Program*,bool> active;
+	unsigned next = 1;
+	// Tarjan components are emitted dependency-first. Within a cycle, retain
+	// load order explicitly; no topological ordering exists inside that cycle.
+	auto visit = [&](auto&& self, Program* p, unsigned depth) -> void {
+		if (index.contains(p)) return;
+		EXIT_IF(depth > 256);
+		index[p] = low[p] = next++;
+		stack.push_back(p); active[p] = true;
+		for (const auto* needed: p->dynamic_info->needed) {
+			if (needed == nullptr || *needed == '\0') continue;
+			for (auto* dependency: m_programs) {
+				if (dependency->elf->IsShared() &&
+				    (Common::EqualNoCase(GetProgramModuleName(dependency),needed) ||
+				     Common::EqualNoCase(dependency->file_name.filename().string(),needed))) {
+					if (!index.contains(dependency)) {
+						self(self,dependency,depth+1);
+						low[p] = std::min(low[p],low[dependency]);
+					} else if (active[dependency]) low[p] = std::min(low[p],index[dependency]);
+					break;
+				}
 			}
 		}
-
-		if (!progressed) {
-			break;
+		if (low[p] == index[p]) {
+			std::vector<Program*> component;
+			for (;;) {
+				auto* member = stack.back(); stack.pop_back(); active[member] = false;
+				component.push_back(member);
+				if (member == p) break;
+			}
+			std::sort(component.begin(),component.end(),[&](Program* a, Program* b) {
+				return std::find(m_programs.begin(),m_programs.end(),a) < std::find(m_programs.begin(),m_programs.end(),b);
+			});
+			if (component.size() > 1) LOGF("Module dependency cycle: %zu modules, stable load order\n", component.size());
+			ordered.insert(ordered.end(),component.begin(),component.end());
 		}
-	}
-
-	for (auto* p: m_programs) {
-		if (p->elf->IsShared() && p->dynamic_info->init_vaddr != 0 &&
-		    std::find(started.begin(), started.end(), p) == started.end()) {
-			StartModule(p, 0, nullptr, nullptr);
-			started.push_back(p);
+	};
+	for (auto* p: m_programs) if (p->elf->IsShared()) visit(visit,p,0);
+	for (auto* p: ordered) {
+		if (std::find(m_started_modules.begin(),m_started_modules.end(),p) == m_started_modules.end()) {
+			const auto result = StartModule(p,0,nullptr,nullptr);
+			if (result != 0) EXIT("Module initialization failed: %s: %d\n", GetProgramModuleName(p).c_str(),result);
 		}
 	}
 }
@@ -1773,11 +1768,8 @@ void RuntimeLinker::StartAllModules() {
 void RuntimeLinker::StopAllModules() {
 	Common::LockGuard lock(m_mutex);
 
-	for (auto* p: m_programs) {
-		if (p->elf->IsShared() && p->dynamic_info->fini_vaddr != 0) {
-			StopModule(p, 0, nullptr, nullptr);
-		}
-	}
+	const auto started = m_started_modules;
+	for (auto it = started.rbegin(); it != started.rend(); ++it) StopModule(*it,0,nullptr,nullptr);
 }
 
 static bool IsAdjacentModuleFile(const std::string& name) {
@@ -1845,12 +1837,14 @@ void RuntimeLinker::PreloadAdjacentPrograms() {
 
 	for (const auto& path: module_paths) {
 		auto* program                        = LoadProgram(path);
+		if (program == nullptr) EXIT("Adjacent module load failed: %s\n", m_last_load_error.c_str());
 		program->fail_if_global_not_resolved = false;
 	}
 }
 
 int RuntimeLinker::StartModule(Program* program, size_t args, const void* argp,
                                module_func_t func) {
+	Common::LockGuard lock(m_mutex);
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->dynamic_info == nullptr);
 	EXIT_IF(program->elf == nullptr);
@@ -1861,11 +1855,15 @@ int RuntimeLinker::StartModule(Program* program, size_t args, const void* argp,
 	LOGF_COLOR(Log::Color::BrightYellow, "---\n--- Start module: %s\n---\n",
 	           Common::PathToString(program->file_name).c_str());
 
-	return reinterpret_cast<module_ini_fini_func_t>(program->dynamic_info->init_vaddr +
-	                                                program->base_vaddr)(args, argp, func);
+	const auto result = program->dynamic_info->init_vaddr == 0 ? 0 :
+	    reinterpret_cast<module_ini_fini_func_t>(program->dynamic_info->init_vaddr + program->base_vaddr)(args,argp,func);
+	if (result == 0 && std::find(m_started_modules.begin(),m_started_modules.end(),program) == m_started_modules.end())
+		m_started_modules.push_back(program);
+	return result;
 }
 
 int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, module_func_t func) {
+	Common::LockGuard lock(m_mutex);
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->dynamic_info == nullptr);
 	EXIT_IF(program->elf == nullptr);
@@ -1876,10 +1874,12 @@ int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, m
 	LOGF_COLOR(Log::Color::BrightYellow, "---\n--- Stop module: %s\n---\n",
 	           Common::PathToString(program->file_name).c_str());
 
-	int result = reinterpret_cast<module_ini_fini_func_t>(program->dynamic_info->fini_vaddr +
-	                                                      program->base_vaddr)(args, argp, func);
-
-	Libs::LibKernel::PthreadDeleteStaticObjects(program);
+	int result = program->dynamic_info->fini_vaddr == 0 ? 0 :
+	    reinterpret_cast<module_ini_fini_func_t>(program->dynamic_info->fini_vaddr + program->base_vaddr)(args,argp,func);
+	if (result == 0) {
+		Libs::LibKernel::PthreadDeleteStaticObjects(program);
+		std::erase(m_started_modules,program);
+	}
 
 	return result;
 }
@@ -1975,14 +1975,14 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	EXIT_IF(program->base_size > UINT64_MAX - (GUEST_PAGE_SIZE - 1));
 	program->base_size_aligned = AlignUp(program->base_size, GUEST_PAGE_SIZE);
 
-	uint64_t tls_handler_size = is_shared ? 0 : Jit::SafeCall::GetSize();
+	uint64_t tls_handler_size = Jit::SafeCall::GetSize();
 	EXIT_IF(tls_handler_size > UINT64_MAX - program->base_size_aligned);
 	program->mapped_size = program->base_size_aligned + tls_handler_size;
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	const bool         use_red_zone_protection  = Config::RedZoneProtectionEnabled();
 	constexpr uint64_t RED_ZONE_TRAMPOLINE_SIZE = 8u * 1024u * 1024u;
-	if (use_red_zone_protection) {
+	{ // TLS instruction trampolines also require this pool when fault patching is disabled.
 		EXIT_IF(RED_ZONE_TRAMPOLINE_SIZE > UINT64_MAX - program->mapped_size);
 		program->mapped_size += RED_ZONE_TRAMPOLINE_SIZE;
 	}
@@ -1991,10 +1991,10 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	program->base_vaddr = Libs::LibKernel::Memory::AllocateProgramMemory(
 	    g_desired_base_addr, program->mapped_size, Common::VirtualMemory::Mode::ExecuteReadWrite,
 	    Common::PathToString(program->file_name.filename()).c_str());
-	EXIT_IF(program->base_vaddr == 0);
+	if (program->base_vaddr == 0) throw std::runtime_error("guest program mapping allocation failed");
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	if (use_red_zone_protection) {
+	{
 		program->red_zone_trampoline_vaddr = program->base_vaddr + program->base_size_aligned;
 		program->red_zone_trampoline_size  = RED_ZONE_TRAMPOLINE_SIZE;
 		RegisterRedZonePatchModule(reinterpret_cast<void*>(program->base_vaddr),
@@ -2003,7 +2003,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		                           program->red_zone_trampoline_size);
 	}
 #endif
-	if (!is_shared) {
+	{
 		program->tls.handler_vaddr = program->base_vaddr + program->base_size_aligned;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		program->tls.handler_vaddr += program->red_zone_trampoline_size;
@@ -2053,7 +2053,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			                     mode == Common::VirtualMemory::Mode::NoAccess);
 
 			if (Common::VirtualMemory::IsExecute(mode)) {
-				PatchProgram(program, segment_addr, segment_memory_size);
+				PatchProgram(program, segment_addr, segment_file_size);
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 				if (use_red_zone_protection) {
 					executable_segments.emplace_back(segment_addr, segment_file_size);
@@ -2077,7 +2077,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			program->tls.image_vaddr = phdr[i].p_vaddr + program->base_vaddr;
 			program->tls.init_size   = std::min(phdr[i].p_filesz, GetAlignedSize(phdr + i));
 			program->tls.image_size  = GetAlignedSize(phdr + i);
-			program->tls.tcb_offset  = program->tls.image_size;
+			program->tls.tcb_offset  = AlignUp(program->tls.image_size, uint64_t{0x20});
 
 			LOGF("tls addr = 0x%016" PRIx64 "\n"
 			     "tls init   = %" PRIu64 "\n"
@@ -2124,14 +2124,12 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			     result.unrelocatable_memory_instruction_count);
 			Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
 		}
-		Common::VirtualMemory::FlushInstructionCache(program->red_zone_trampoline_vaddr,
-		                                             program->red_zone_trampoline_size);
 	}
+	Common::VirtualMemory::FlushInstructionCache(program->red_zone_trampoline_vaddr,
+	                                             program->red_zone_trampoline_size);
 #endif
 
-	if (!is_shared) {
-		SetupTlsHandler(program);
-	}
+	SetupTlsHandler(program);
 
 	LOGF("entry = 0x%016" PRIx64 "\n", program->elf->GetEntry() + program->base_vaddr);
 }
@@ -2180,20 +2178,20 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program) {
 
 	auto* elf = program->elf.get();
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_HASH) && elf->HasDynValue(DT_HASH));
+	if (elf->HasDynValue(DT_OS_HASH) && elf->HasDynValue(DT_HASH)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 	GetDynDataOs(elf, &program->dynamic_info->hash_table, DT_OS_HASH);
 	GetDynData(elf, program->base_vaddr, &program->dynamic_info->hash_table, DT_HASH);
 	GetDynValue(elf, &program->dynamic_info->hash_table_size, DT_OS_HASHSZ);
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_STRTAB) && elf->HasDynValue(DT_STRTAB));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_STRSZ) && elf->HasDynValue(DT_STRSZ));
+	if (elf->HasDynValue(DT_OS_STRTAB) && elf->HasDynValue(DT_STRTAB)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
+	if (elf->HasDynValue(DT_OS_STRSZ) && elf->HasDynValue(DT_STRSZ)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 	GetDynDataOs(elf, &program->dynamic_info->str_table, DT_OS_STRTAB);
 	GetDynData(elf, program->base_vaddr, &program->dynamic_info->str_table, DT_STRTAB);
 	GetDynValue(elf, &program->dynamic_info->str_table_size, DT_OS_STRSZ);
 	GetDynValue(elf, &program->dynamic_info->str_table_size, DT_STRSZ);
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_SYMTAB) && elf->HasDynValue(DT_SYMTAB));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_SYMENT) && elf->HasDynValue(DT_SYMENT));
+	if (elf->HasDynValue(DT_OS_SYMTAB) && elf->HasDynValue(DT_SYMTAB)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
+	if (elf->HasDynValue(DT_OS_SYMENT) && elf->HasDynValue(DT_SYMENT)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 	GetDynDataOs(elf, &program->dynamic_info->symbol_table, DT_OS_SYMTAB);
 	GetDynData(elf, program->base_vaddr, &program->dynamic_info->symbol_table, DT_SYMTAB);
 	GetDynValue(elf, &program->dynamic_info->symbol_table_total_size, DT_OS_SYMTABSZ);
@@ -2209,26 +2207,26 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program) {
 	GetDynValue(elf, &program->dynamic_info->fini_array_size, DT_FINI_ARRAYSZ);
 	GetDynValue(elf, &program->dynamic_info->preinit_array_size, DT_PREINIT_ARRAYSZ);
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_PLTGOT) && elf->HasDynValue(DT_PLTGOT));
+	if (elf->HasDynValue(DT_OS_PLTGOT) && elf->HasDynValue(DT_PLTGOT)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 	GetDynPtr(elf, &program->dynamic_info->pltgot_vaddr, DT_OS_PLTGOT);
 	GetDynPtr(elf, &program->dynamic_info->pltgot_vaddr, DT_PLTGOT);
 
 	Elf64_Sxword jmprel_type = 0;
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_PLTREL) && elf->HasDynValue(DT_PLTREL));
+	if (elf->HasDynValue(DT_OS_PLTREL) && elf->HasDynValue(DT_PLTREL)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 	GetDynValue(elf, &jmprel_type, DT_OS_PLTREL);
 	GetDynValue(elf, &jmprel_type, DT_PLTREL);
 
-	EXIT_NOT_IMPLEMENTED(jmprel_type != DT_RELA);
+	if (jmprel_type != 0 && jmprel_type != DT_RELA) throw std::runtime_error("unsupported PLT relocation format");
 	if (jmprel_type == DT_RELA) {
-		EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_JMPREL) && elf->HasDynValue(DT_JMPREL));
-		EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_PLTRELSZ) && elf->HasDynValue(DT_PLTRELSZ));
+		if (elf->HasDynValue(DT_OS_JMPREL) && elf->HasDynValue(DT_JMPREL)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
+		if (elf->HasDynValue(DT_OS_PLTRELSZ) && elf->HasDynValue(DT_PLTRELSZ)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 		GetDynDataOs(elf, &program->dynamic_info->jmprela_table, DT_OS_JMPREL);
 		GetDynData(elf, program->base_vaddr, &program->dynamic_info->jmprela_table, DT_JMPREL);
 		GetDynValue(elf, &program->dynamic_info->jmprela_table_size, DT_OS_PLTRELSZ);
 		GetDynValue(elf, &program->dynamic_info->jmprela_table_size, DT_PLTRELSZ);
 	}
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_RELA) && elf->HasDynValue(DT_RELA));
+	if (elf->HasDynValue(DT_OS_RELA) && elf->HasDynValue(DT_RELA)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 	GetDynDataOs(elf, &program->dynamic_info->rela_table, DT_OS_RELA);
 	GetDynData(elf, program->base_vaddr, &program->dynamic_info->rela_table, DT_RELA);
 	GetDynValue(elf, &program->dynamic_info->rela_table_total_size, DT_OS_RELASZ);
@@ -2242,8 +2240,8 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program) {
 	GetDynValue(elf, &program->dynamic_info->flags, DT_FLAGS);
 	GetDynValue(elf, &program->dynamic_info->textrel, DT_TEXTREL);
 
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->debug != 0);
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->textrel != 0);
+	if (program->dynamic_info->debug != 0) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
+	if (program->dynamic_info->textrel != 0) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 
 	std::vector<uint64_t> needed;
 	GetDynValues(elf, &needed, DT_NEEDED);
@@ -2253,16 +2251,16 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program) {
 
 	uint64_t so_name = 0;
 	GetDynValue(elf, &so_name, DT_SONAME);
-	program->dynamic_info->so_name = program->dynamic_info->str_table + so_name;
+	program->dynamic_info->so_name = elf->HasDynValue(DT_SONAME) ? program->dynamic_info->str_table + so_name : nullptr;
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_NEEDED_MODULE) &&
-	                     elf->HasDynValue(DT_OS_NEEDED_MODULE_1));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_MODULE_INFO) &&
-	                     elf->HasDynValue(DT_OS_MODULE_INFO_1));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_IMPORT_LIB) &&
-	                     elf->HasDynValue(DT_OS_IMPORT_LIB_1));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_EXPORT_LIB) &&
-	                     elf->HasDynValue(DT_OS_EXPORT_LIB_1));
+	if (elf->HasDynValue(DT_OS_NEEDED_MODULE) &&
+	                     elf->HasDynValue(DT_OS_NEEDED_MODULE_1)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
+	if (elf->HasDynValue(DT_OS_MODULE_INFO) &&
+	                     elf->HasDynValue(DT_OS_MODULE_INFO_1)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
+	if (elf->HasDynValue(DT_OS_IMPORT_LIB) &&
+	                     elf->HasDynValue(DT_OS_IMPORT_LIB_1)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
+	if (elf->HasDynValue(DT_OS_EXPORT_LIB) &&
+	                     elf->HasDynValue(DT_OS_EXPORT_LIB_1)) throw std::runtime_error("unsupported or ambiguous dynamic metadata");
 	GetDynModules(elf, &program->dynamic_info->import_modules, program->dynamic_info->str_table,
 	              DT_OS_NEEDED_MODULE);
 	GetDynModules(elf, &program->dynamic_info->import_modules, program->dynamic_info->str_table,
@@ -2332,14 +2330,14 @@ void RuntimeLinker::Relocate(Program* program) {
 	LOGF_COLOR(Log::Color::White, "--- Relocate program: %s ---\n",
 	           Common::PathToString(program->file_name).c_str());
 
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->symbol_table_entry_size != sizeof(Elf64_Sym));
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table_entry_size != sizeof(Elf64_Rela));
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->jmprela_table == nullptr);
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table == nullptr);
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->symbol_table == nullptr);
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->pltgot_vaddr == 0);
-
-	InstallRelocateHandler(program);
+	EXIT_NOT_IMPLEMENTED(program->dynamic_info->symbol_table_total_size != 0 &&
+	                     program->dynamic_info->symbol_table_entry_size != sizeof(Elf64_Sym));
+	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table_total_size != 0 &&
+	                     program->dynamic_info->rela_table_entry_size != sizeof(Elf64_Rela));
+	if (program->dynamic_info->jmprela_table_size != 0) {
+		EXIT_NOT_IMPLEMENTED(program->dynamic_info->pltgot_vaddr == 0);
+		InstallRelocateHandler(program);
+	}
 
 	std::vector<std::string> unresolved;
 	const bool               imports_only = program->relocated;
@@ -2451,7 +2449,7 @@ void RuntimeLinker::CreateSymbolDatabase(Program* program) {
 
 				if (l != nullptr && m != nullptr && (bind == STB_GLOBAL || bind == STB_WEAK) &&
 				    (type == STT_FUNC || type == STT_OBJECT || type == STT_NOTYPE) &&
-				    is_export == (sym->st_value != 0)) {
+				    is_export == (sym->st_shndx != 0)) {
 					SymbolResolve sr {};
 					sr.name                 = ids.at(0);
 					sr.library              = l->name;
@@ -2477,17 +2475,18 @@ void RuntimeLinker::CreateSymbolDatabase(Program* program) {
 
 void RuntimeLinker::SetupTlsHandler(Program* program) {
 	EXIT_IF(program == nullptr);
-	EXIT_IF(g_tls_main_program != nullptr);
 	EXIT_IF(program->elf == nullptr);
-	EXIT_IF(program->elf->IsShared());
 	EXIT_IF(program->tls.handler_vaddr == 0);
 
-	g_tls_main_program = program;
+	if (!program->elf->IsShared()) {
+		EXIT_IF(g_tls_main_program != nullptr);
+		g_tls_main_program = program;
+	}
 
 	auto* code = new (reinterpret_cast<void*>(program->tls.handler_vaddr)) Jit::SafeCall;
 
 	code->SetFunc(TlsMainGetAddr);
-
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
 	for (uint8_t reg = 1; reg < 8; reg++) {
 		if (reg == 4) {
 			continue;
@@ -2498,6 +2497,7 @@ void RuntimeLinker::SetupTlsHandler(Program* program) {
 		stub->SetFunc(program->tls.handler_vaddr);
 		stub->SetOutputReg(reg);
 	}
+#endif
 
 	EXIT_IF(!Libs::LibKernel::Memory::ProtectGuestMemory(program->tls.handler_vaddr,
 	                                                     Jit::SafeCall::GetSize(),

@@ -263,6 +263,7 @@ public:
 	[[nodiscard]] bool IsValid() const;
 	[[nodiscard]] bool IsShared() const;
 	[[nodiscard]] bool IsNextGen() const;
+	[[nodiscard]] const std::string& GetError() const { return m_error; }
 
 	void LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size);
 
@@ -284,12 +285,18 @@ public:
 
 	template <class T>
 	[[nodiscard]] T GetDynamicData(uint64_t offset) const {
-		return (m_dynamic_data == nullptr ? nullptr
+		return (m_dynamic_data == nullptr || offset >= m_dynamic_data_size ? nullptr
 		                                  : reinterpret_cast<T>(m_dynamic_data.get() + offset));
 	}
 
 private:
 	void Clear();
+	bool ValidateHeaders();
+	bool ValidateDynamic();
+	bool Reject(const char* reason);
+	std::string m_error;
+	uint64_t m_dynamic_size = 0;
+	uint64_t m_dynamic_data_size = 0;
 
 	std::unique_ptr<Common::File>  m_f;
 	std::unique_ptr<SelfHeader>    m_self;

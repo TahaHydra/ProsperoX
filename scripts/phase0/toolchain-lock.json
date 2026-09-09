@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "windows": {
+    "llvm": {
+      "version": "21.1.8",
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-win64.exe",
+      "sha256": "7a5386c26497db1691f320121e5b113364dd0274b98e55f15f4dbc00c0450113"
+    },
+    "glslang": {
+      "version": "16.5.0",
+      "url": "https://github.com/KhronosGroup/glslang/releases/download/16.5.0/glslang-16.5.0-windows-x86_64-release.zip",
+      "sha256": "06b71298b750268c127f2ee7ae0ef7525e2068120c6c8a3a08b2f58ca6f325ce"
+    }
+  },
+  "linux": {"distribution": "Ubuntu 24.04", "compiler": "clang-18", "linker": "lld-18"}
+}

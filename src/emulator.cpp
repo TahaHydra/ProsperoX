@@ -157,6 +157,7 @@ static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = fal
 
 	auto* program = rt->LoadProgram(
 	    Libs::LibKernel::FileSystem::GetRealFilename(Common::PathToGenericString(elf)));
+	if (program == nullptr) EXIT("Executable load failed: %s\n", rt->LastLoadError().c_str());
 
 	if (dbg_print_reloc) {
 		program->dbg_print_reloc = true;

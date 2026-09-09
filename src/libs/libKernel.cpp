@@ -1238,6 +1238,10 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 	}
 
 	program = rt->LoadProgram(module_path);
+	if (program == nullptr) {
+		if (res != nullptr) *res = KERNEL_ERROR_ENOEXEC;
+		return KERNEL_ERROR_ENOEXEC;
+	}
 
 	auto handle = program->unique_id;
 

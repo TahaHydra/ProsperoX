@@ -149,6 +149,7 @@ public:
 	void DbgDump(const std::string& folder);
 
 	Program* LoadProgram(const std::filesystem::path& elf_name);
+	[[nodiscard]] const std::string& LastLoadError() const { return m_last_load_error; }
 	void     SaveMainProgram(const std::filesystem::path& elf_name);
 	void     SaveProgram(Program* program, const std::filesystem::path& elf_name);
 	void     UnloadProgram(Program* program);
@@ -171,7 +172,9 @@ public:
 
 	void Resolve(const std::string& name, SymbolType type, Program* program, SymbolRecord* out_info,
 	             bool* bind_self);
-	bool ResolveLoadedSymbolByNid(const std::string& nid, SymbolType type, SymbolRecord* out_info);
+	bool ResolveLoadedSymbol(const std::string& qualified_name, SymbolRecord* out_info);
+	uint64_t ResolveImport(uint64_t record_id);
+	[[noreturn]] void RejectLegacyImport(Program* program, uint64_t index, uint64_t caller);
 
 	SymbolDatabase* Symbols() { return m_symbols.get(); }
 
@@ -200,6 +203,8 @@ private:
 	static const LibraryId* FindLibrary(const Program& program, const std::string& id);
 
 	std::vector<Program*>           m_programs;
+	std::vector<Program*>           m_started_modules;
+	std::string m_last_load_error;
 	std::unique_ptr<SymbolDatabase> m_symbols;
 	bool                            m_relocated = false;
 	Common::Mutex                   m_mutex;

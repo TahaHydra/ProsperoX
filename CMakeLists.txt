@@ -523,6 +523,28 @@ if(NOT KYTY_CLANG_CL)
 endif()
 
 if(BUILD_TESTING)
+	# A test-local translation unit includes the real linker implementation to
+	# exercise its private generated thunk without adding a production test API.
+	set(phase0_emulator_src "${kyty_emulator_src}")
+	list(REMOVE_ITEM kyty_emulator_src "${KYTY_SOURCE_DIR}/loader/runtimeLinker.cpp")
+	add_kyty_full_emulator_test(phase0_runtime_probes "${KYTY_TESTS_DIR}/Phase0RuntimeProbes.cpp")
+	set(kyty_emulator_src "${phase0_emulator_src}")
+	unset(phase0_emulator_src)
+	add_test(NAME phase0_unresolved_import COMMAND ${CMAKE_COMMAND} -DPROBE=$<TARGET_FILE:phase0_runtime_probes> -P "${KYTY_TESTS_DIR}/ExpectUnresolvedImport.cmake")
+	add_test(NAME phase1_imports COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase1-imports)
+	add_test(NAME phase1_paths COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase1-paths)
+	add_test(NAME phase1_tls COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase1-tls)
+	add_test(NAME phase1_executables COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase1-executables)
+	add_test(NAME phase1_native_state COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase1-native-state)
+	add_test(NAME phase1_patching COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase1-patching)
+	add_test(NAME phase1_load_rollback COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase1-load-rollback)
+	add_test(NAME phase1_modules COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase1-modules)
+	add_test(NAME phase1_strong_data COMMAND ${CMAKE_COMMAND} -DPROBE=$<TARGET_FILE:phase0_runtime_probes> -P "${KYTY_TESTS_DIR}/ExpectUnresolvedData.cmake")
+	add_test(NAME phase1_legacy_plt COMMAND ${CMAKE_COMMAND} -DPROBE=$<TARGET_FILE:phase0_runtime_probes> -P "${KYTY_TESTS_DIR}/ExpectLegacyPlt.cmake")
+	add_test(NAME phase0_path_containment COMMAND $<TARGET_FILE:phase0_runtime_probes> --path-containment)
+	add_test(NAME phase0_wave_mask COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase0-wave)
+	add_test(NAME phase0_eop_visibility COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase0-eop)
+	add_test(NAME phase0_spirv_validation COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase0-spirv)
 	add_test(NAME emulator_user_name_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --user-name 1234567890123456)
 	add_test(NAME emulator_user_name_too_long
@@ -589,6 +611,7 @@ if(BUILD_TESTING)
 	endif()
 
 	add_custom_target(kyty_tests DEPENDS
+		phase0_runtime_probes
 		ime_dialog_tests
 		shader_cfg_tests
 		scalar_provenance_tests
@@ -606,6 +629,7 @@ if(BUILD_TESTING)
 		virtual_memory_allocation_tests
 		audio_out2_port_tests
 	)
+	include("${CMAKE_CURRENT_SOURCE_DIR}/scripts/phase0/test-labels.cmake")
 endif()
 
 

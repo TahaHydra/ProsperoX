@@ -58,6 +58,7 @@ struct PatchModule {
 	u8*                  start = nullptr;
 	u8*                  end   = nullptr;
 	std::set<u8*>        patched;
+	std::map<uintptr_t, uint8_t> tls_continuations;
 	Xbyak::CodeGenerator patch_gen;
 	Xbyak::CodeGenerator trampoline_gen;
 	bool                 trampoline_exhausted = false;
@@ -128,6 +129,7 @@ struct DecodedCodeInstruction {
 	bool                                                     has_unmodeled_red_zone_operand {};
 	bool                                                     changes_stack_pointer {};
 	bool                                                     replaces_stack_pointer {};
+	bool                                                     tls_trampoline {};
 	std::optional<s64>                                       stack_pointer_delta;
 };
 
@@ -175,6 +177,17 @@ uintptr_t GetRelativeTarget(const DecodedCodeInstruction& decoded) {
 
 DecodedCodeInstruction DecodeCodeInstruction(uintptr_t address, uintptr_t end) {
 	DecodedCodeInstruction decoded {.address = address};
+	if (auto* module = GetContainingModule(reinterpret_cast<void*>(address))) {
+		if (auto tls = module->tls_continuations.find(address); tls != module->tls_continuations.end()) {
+			// For stack liveness this already-protected operation falls through and
+			// preserves RSP. Its external jump must not hide the rest of the function.
+			uint8_t nop = 0x90;
+			DecodeInstruction(decoded.instruction, decoded.operands.data(), &nop, 1);
+			decoded.instruction.length = tls->second;
+			decoded.tls_trampoline = true;
+			return decoded;
+		}
+	}
 	const auto status = DecodeInstruction(decoded.instruction, decoded.operands.data(),
 	                                      reinterpret_cast<void*>(address), end - address);
 	if (!ZYAN_SUCCESS(status)) {
@@ -824,6 +837,8 @@ RedZonePatchResult PatchRedZoneMemoryInstructions(u64 segment_addr, u64 segment_
 		};
 
 		const auto emit_span = [&](const RelocationSpan& span) -> std::optional<size_t> {
+			if (std::any_of(span.instructions.begin(), span.instructions.end(),
+			                [](const auto* decoded) { return decoded->tls_trampoline; })) return std::nullopt;
 			const size_t trampoline_offset = module->trampoline_gen.getSize();
 			if (module->trampoline_exhausted) {
 				return std::nullopt;
@@ -1439,6 +1454,48 @@ void UnregisterRedZonePatchModule(void* module_ptr) {
 	g_patch_modules.erase(reinterpret_cast<u64>(module_ptr));
 #else
 	(void)module_ptr;
+#endif
+}
+
+bool PatchTlsInstruction(uint64_t address, uint8_t length, uint64_t helper,
+                         uint8_t output_register, bool store, uint32_t immediate) {
+#if defined(_WIN32)
+	auto* module = GetContainingModule(reinterpret_cast<void*>(address));
+	if (module == nullptr || length < NearJumpSize || output_register > 7 || output_register == 4 ||
+	    length > reinterpret_cast<uint64_t>(module->end) - address) return false;
+	std::unique_lock lock{module->mutex};
+	auto& generator = module->trampoline_gen;
+	const auto saved_size = generator.getSize();
+	const auto target = reinterpret_cast<uint64_t>(generator.getCurr());
+	const auto displacement = static_cast<int64_t>(target) - static_cast<int64_t>(address + NearJumpSize);
+	if (displacement < INT32_MIN || displacement > INT32_MAX) return false;
+	try {
+		generator.lea(rsp, ptr[rsp - 128]);
+		const bool preserve_rax = store || output_register != 0;
+		if (preserve_rax) generator.push(rax);
+		generator.mov(rax, helper);
+		generator.call(rax);
+		if (store) generator.mov(generator.dword[rax + 0x28], immediate);
+		else if (output_register != 0) generator.mov(Xbyak::Reg64(output_register), rax);
+		if (preserve_rax) generator.pop(rax);
+		generator.lea(rsp, ptr[rsp + 128]);
+		generator.jmp(reinterpret_cast<void*>(address + length), Xbyak::CodeGenerator::T_NEAR);
+	} catch (const Xbyak::Error& error) {
+		generator.setSize(saved_size);
+		HandleTrampolineError(module, error);
+		return false;
+	}
+	auto* instruction = reinterpret_cast<uint8_t*>(address);
+	const auto relative = static_cast<int32_t>(displacement);
+	instruction[0] = 0xe9;
+	std::memcpy(instruction + 1, &relative, sizeof(relative));
+	std::memset(instruction + NearJumpSize, 0x90, length - NearJumpSize);
+	module->patched.insert(instruction);
+	module->tls_continuations[address] = length;
+	return true;
+#else
+	(void)address; (void)length; (void)helper; (void)output_register; (void)store; (void)immediate;
+	return false;
 #endif
 }
 
