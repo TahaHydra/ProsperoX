@@ -13,17 +13,6 @@
       "evidence": "_Build/evidence/windows-portability/phase0_wave_mask.log"
     },
     {
-      "id": "P0-EOP",
-      "test": "phase0_eop_visibility",
-      "status": "fail",
-      "returncode": 1,
-      "signature": "\"label_after_parse\":1,\"label_before_release\":1,\"retired_before_release\":false,\"retired_after_release\":true,\"label_after_retirement\":1,\"gpu_readback\":5265456",
-      "phase": 3,
-      "platform": "windows",
-      "owner": "ProsperoX runtime",
-      "evidence": "_Build/evidence/windows-portability/phase0_eop_visibility.log"
-    },
-    {
       "id": "P0-SOCKET",
       "test": "kernel_file_system",
       "status": "crash",

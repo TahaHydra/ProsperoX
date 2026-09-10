@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <map>
+#include <atomic>
 #include <span>
 #include <utility>
 #include <vector>
@@ -69,6 +70,11 @@ public:
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
+	// GPU thread: snapshot exact dirty bytes at a release boundary. Publication
+	// is queued ahead of its label/event and never enters fault handling.
+	void               RecordReleaseWriteback();
+	void               RecordCompletionValue(uint64_t address, uint64_t value, uint32_t width);
+	void               ReadCommandMemory(uint64_t address, void* output, uint64_t size);
 	void               RunGarbageCollector();
 
 private:
@@ -129,6 +135,7 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+	std::atomic<uint64_t> m_release_staging_bytes{0};
 };
 
 } // namespace Libs::Graphics

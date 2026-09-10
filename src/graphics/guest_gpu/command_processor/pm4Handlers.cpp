@@ -1480,7 +1480,9 @@ KYTY_CP_OP_PARSER(CpOpBranch) {
 	EXIT_NOT_IMPLEMENTED(function > 6);
 	EXIT_NOT_IMPLEMENTED(then_buffer == nullptr || then_num_dw == 0);
 
-	const bool take_then = TestWaitRegMemValue(*compare_addr, reference, mask, function);
+	uint64_t compare_value{};
+	cp.ReadCommandMemory(reinterpret_cast<uint64_t>(compare_addr), &compare_value, sizeof(compare_value));
+	const bool take_then = TestWaitRegMemValue(compare_value, reference, mask, function);
 	LOGF("\t branch: take=%u then=0x%016" PRIx64 "/%" PRIu32 " else=0x%016" PRIx64 "/%" PRIu32 "\n",
 	     take_then ? 1u : 0u, reinterpret_cast<uint64_t>(then_buffer), then_num_dw,
 	     reinterpret_cast<uint64_t>(else_buffer), else_num_dw);
@@ -2280,6 +2282,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 	};
 
 	if (data_sel == 0 || interrupt_selector == 4) {
+		if (gl2_writeback) cp.RecordReleaseWriteback();
 		if (eop_event_type != 0x28 || gcr_cntl != 0) {
 			cp.EmitGlobalBarrier();
 		}
@@ -2290,6 +2293,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 	}
 
 	if (release_dst == ReleaseMemDstMemory && dst_gpu_addr == nullptr) {
+		if (gl2_writeback) cp.RecordReleaseWriteback();
 		if (eop_event_type != 0x28 || gcr_cntl != 0) {
 			cp.EmitGlobalBarrier();
 		}

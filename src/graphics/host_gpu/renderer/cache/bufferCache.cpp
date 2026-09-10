@@ -49,6 +49,63 @@ struct BufferCache::DownloadCopy {
 	uint64_t size          = 0;
 };
 
+void BufferCache::RecordCompletionValue(uint64_t address, uint64_t value, uint32_t width) {
+	if (!IsRegionRegistered(address, width)) return;
+	auto [buffer, offset] = ObtainBuffer(address, width, true);
+	(void)offset;
+	WriteDataBuffer(*buffer, address, &value, width);
+}
+
+void BufferCache::ReadCommandMemory(uint64_t address, void* output, uint64_t size) {
+	EXIT_IF(output == nullptr || size == 0 || size > UINT64_MAX - address);
+	if (IsRegionRegistered(address, size) && HasGpuDirtyBytes(address, size)) {
+		ReadMemory(address, size);
+	}
+	if (!LibKernel::Memory::TryReadBacking(address, output, size)) {
+		std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	}
+}
+
+void BufferCache::RecordReleaseWriteback() {
+	// Keep dirty ownership until an ordinary GPU-thread readback/invalidation.
+	// Clearing it here would let a CPU read overtake this pending submission.
+	// Dedicated staging allocations cannot wrap or be overwritten by later work.
+	for (const auto& [base, id]: m_buffers) {
+		auto& source = m_slot_buffers[id];
+		for (const auto range: m_gpu_modified_ranges.Intersections(base, source.Size())) {
+			uint64_t address = range.address;
+			uint64_t remaining = range.size;
+			while (remaining != 0) {
+				const auto bytes = std::min<uint64_t>(remaining, 4 * MiB);
+				DownloadCopy copy {&source, source.Offset(address), address, bytes};
+				const auto [begin, size] = DownloadEnvelope(copy);
+				// Bounded backpressure only when staging is exhausted; no idle per
+				// release packet. Retirement callbacks return the reserved bytes.
+				if (m_release_staging_bytes.load() + size > 64 * MiB) {
+					const auto tick = m_scheduler.CurrentTick();
+					m_scheduler.Finish();
+					m_scheduler.WaitPriorityOperations(tick);
+				}
+				m_release_staging_bytes.fetch_add(size);
+				auto staging = std::make_shared<Buffer>(m_graphics, m_scheduler,
+				    MemoryUsage::Download, 0, vk::BufferUsageFlagBits::eTransferDst, size);
+				staging->CopyFrom(m_scheduler.Current(), source, begin, 0, size,
+				    vk::AccessFlagBits::eMemoryWrite, {},
+				    vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
+				    vk::AccessFlagBits::eHostRead);
+				const auto prefix = copy.source_offset - begin;
+				m_scheduler.DeferPriorityOperation([this, staging, address, bytes, prefix] {
+					staging->Invalidate(0, staging->Size());
+					LibKernel::Memory::WriteBacking(address, staging->Mapped().data() + prefix, bytes);
+					m_release_staging_bytes.fetch_sub(staging->Size());
+				});
+				address += bytes;
+				remaining -= bytes;
+			}
+		}
+	}
+}
+
 void BufferCache::Register(BufferId id) {
 	ChangeRegister<true>(id);
 }

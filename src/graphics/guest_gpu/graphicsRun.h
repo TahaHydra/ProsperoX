@@ -28,6 +28,7 @@ public:
 
 	void               Shutdown();
 	[[nodiscard]] bool IsStopping();
+	[[nodiscard]] uint64_t CanceledSubmissions() const noexcept { return m_canceled_submissions.load(); }
 	void               SendCommand(Common::UniqueFunction<void>&& command);
 	void               SendCommandSync(Common::UniqueFunction<void>&& command);
 
@@ -93,6 +94,7 @@ private:
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;
 
 	uint64_t        m_submit_id = 0;
+	std::atomic<uint64_t> m_canceled_submissions{0};
 	std::atomic_int m_done_num  = 0;
 	std::jthread    m_thread;
 

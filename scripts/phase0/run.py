@@ -43,7 +43,7 @@ def properties(test):
 
 def expected_names(is_windows):
     data = json.loads((HERE / "inventory.json").read_text())
-    return set(data["original"] + data["phase0"] + data.get("phase1", []) + data.get("phase2", []) + (data["windows_only"] if is_windows else []))
+    return set(data["original"] + data["phase0"] + data.get("phase1", []) + data.get("phase2", []) + data.get("phase3", []) + (data["windows_only"] if is_windows else []))
 
 
 def verify_inventory(tests, is_windows):
@@ -170,6 +170,12 @@ def main():
     known = json.loads(args.known_failures.read_text())["failures"]
     env = os.environ.copy()
     env.update(VK_LOADER_LAYERS_DISABLE="~implicit~", SDL_AUDIODRIVER="dummy")
+    # Keep filesystem fixtures within the run's writable, canonical workspace.
+    # A host TEMP path may have different access/reparse behavior under a
+    # restricted test token. Preserve this choice in the evidence manifest.
+    temporary = output / "tmp"
+    temporary.mkdir()
+    env.update(TEMP=str(temporary), TMP=str(temporary), TMPDIR=str(temporary))
     if os.name == "nt":
         import ctypes
         ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
@@ -184,7 +190,7 @@ def main():
                 "submodules": query(["git", "submodule", "status", "--recursive"]),
                 "gitlinks": query(["git", "ls-files", "--stage", "3rdparty"]),
                 "tools": tools, "gpu_mode": args.gpu, "gpu_reason": args.gpu_reason,
-                "environment_overrides": {key: env[key] for key in ("VK_LOADER_LAYERS_DISABLE", "SDL_AUDIODRIVER")},
+                "environment_overrides": {key: env.get(key) for key in ("TEMP", "TMP", "TMPDIR", "VK_LOADER_LAYERS_DISABLE", "SDL_AUDIODRIVER", "VK_LAYER_PATH", "VK_LAYER_VALIDATE_SYNC", "PROSPEROX_VULKAN_DEVICE", "PROSPEROX_VULKAN_VALIDATION")},
                 "seed": "0x505830", "known_failures_sha256": hashlib.sha256(args.known_failures.read_bytes()).hexdigest()}
     if os.name == "nt":
         manifest["hardware"] = query(["powershell", "-NoProfile", "-Command",

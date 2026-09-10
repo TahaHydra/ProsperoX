@@ -378,6 +378,10 @@ struct TextureCacheTestAccess {
 };
 
 struct RenderExecutorTestAccess {
+  static std::array<uint32_t, 5> CommandArguments(const CommandBuffer& buffer) {
+    return {buffer.m_debug_op, buffer.m_debug_arg0, buffer.m_debug_arg1,
+            buffer.m_debug_arg2, buffer.m_debug_arg3};
+  }
   static bool TryConsumeComputeImageClear(RenderExecutor &executor,
       const ShaderComputeInputInfo &input, CommandBuffer &command,
       uint32_t x, uint32_t y, uint32_t z, uint32_t mode) {
@@ -1720,6 +1724,16 @@ std::vector<u32> MakePassthroughVertexSpirv(bool layered, float clip_w = 1.0f) {
 
 class VulkanHarness {
 public:
+  static VKAPI_ATTR VkBool32 VKAPI_CALL ValidationMessage(
+      VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT type,
+      const VkDebugUtilsMessengerCallbackDataEXT* data, void* user) {
+    auto* harness = static_cast<VulkanHarness*>(user);
+    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) &&
+        (type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT))
+      harness->m_validation_errors.fetch_add(1);
+    std::fprintf(stderr, "VULKAN_VALIDATION %s\n", data->pMessage);
+    return VK_FALSE;
+  }
   VulkanHarness() { Init(); }
   ~VulkanHarness() { Destroy(); }
 
@@ -2329,7 +2343,7 @@ public:
               processor->Process(cb_db_execution, cb_db_release);
           const bool cb_db_release_did_not_submit =
               cb_db_result == Pm4ProcessResult::Complete &&
-              cb_db_release_label == 0 &&
+              cb_db_release_label == UINT64_MAX &&
               gpu_scheduler.CurrentTick() == cb_db_tick;
 
           auto gds_interrupt_only =
@@ -12924,6 +12938,7 @@ public:
   }
 
 #include "Phase0GpuProbes.inc"
+#include "Phase3GpuTests.inc"
 
 private:
   RenderContext &Renderer() {
@@ -12982,10 +12997,33 @@ private:
     vk::InstanceCreateInfo instance_info{};
     instance_info.sType = vk::StructureType::eInstanceCreateInfo;
     instance_info.pApplicationInfo = &app;
+    const char* validation_layer = "VK_LAYER_KHRONOS_validation";
+    const char* debug_extension = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    m_validation_enabled = std::getenv("PROSPEROX_VULKAN_VALIDATION") != nullptr;
+    VkDebugUtilsMessengerCreateInfoEXT debug_info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+    debug_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                                VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+    debug_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                            VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    debug_info.pfnUserCallback = ValidationMessage;
+    debug_info.pUserData = this;
+    if (m_validation_enabled) {
+      instance_info.enabledLayerCount = 1;
+      instance_info.ppEnabledLayerNames = &validation_layer;
+      instance_info.enabledExtensionCount = 1;
+      instance_info.ppEnabledExtensionNames = &debug_extension;
+      instance_info.pNext = &debug_info;
+    }
     RequireVk("VulkanHarness", "dispatch",
               vk::createInstance(&instance_info, nullptr, &m_instance),
               "vkCreateInstance");
     VULKAN_HPP_DEFAULT_DISPATCHER.init(m_instance);
+    if (m_validation_enabled) {
+      RequireVk("VulkanHarness", "validation messenger",
+        static_cast<vk::Result>(VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDebugUtilsMessengerEXT(
+          m_instance, &debug_info, nullptr, &m_validation_messenger)), "createDebugUtilsMessenger");
+    }
 
     u32 physical_count = 0;
     RequireVk("VulkanHarness", "dispatch",
@@ -13000,6 +13038,10 @@ private:
               "vkEnumeratePhysicalDevices");
 
     for (auto physical : physical_devices) {
+      if (const char* required = std::getenv("PROSPEROX_VULKAN_DEVICE")) {
+        const auto properties = physical.getProperties();
+        if (std::strstr(properties.deviceName.data(), required) == nullptr) continue;
+      }
       u32 queue_count = 0;
       physical.getQueueFamilyProperties(&queue_count, nullptr);
       std::vector<vk::QueueFamilyProperties> queues(queue_count);
@@ -13034,6 +13076,10 @@ private:
     Require("VulkanHarness", "dispatch", m_physical_device != nullptr,
             "no Vulkan graphics+compute device with fragment barycentrics");
     m_physical_device.getMemoryProperties(&m_memory_properties);
+    const auto selected = m_physical_device.getProperties();
+    std::printf("VULKAN_DEVICE name=%s vendor=%04x device=%04x driver=%u validation=%s\n",
+        selected.deviceName.data(), selected.vendorID, selected.deviceID, selected.driverVersion,
+        m_validation_enabled ? "enabled" : "disabled");
 
     vk::PhysicalDeviceFeatures available_features{};
     m_physical_device.getFeatures(&available_features);
@@ -13193,7 +13239,14 @@ private:
       m_device.destroy(nullptr);
     }
     if (m_instance != nullptr) {
+      if (m_validation_messenger != VK_NULL_HANDLE)
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyDebugUtilsMessengerEXT(m_instance, m_validation_messenger, nullptr);
       m_instance.destroy(nullptr);
+    }
+    if (m_validation_enabled) {
+      std::printf("VULKAN_VALIDATION errors=%u\n", m_validation_errors.load());
+      Require("VulkanHarness", "validation", m_validation_errors.load() == 0,
+              "Vulkan validation reported errors");
     }
   }
 
@@ -13478,6 +13531,9 @@ private:
 
   bool m_feedback_supported = false;
   vk::Instance m_instance = nullptr;
+  bool m_validation_enabled = false;
+  VkDebugUtilsMessengerEXT m_validation_messenger = VK_NULL_HANDLE;
+  std::atomic<uint32_t> m_validation_errors{0};
   vk::PhysicalDevice m_physical_device = nullptr;
   vk::Device m_device = nullptr;
   vk::Queue m_queue = nullptr;
@@ -28083,6 +28139,22 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--phase0-eop") == 0) {
     VulkanHarness vulkan;
     return vulkan.ProbePhase0EopVisibility();
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--phase3-completion") == 0) {
+    VulkanHarness vulkan;
+    return vulkan.CheckPhase3Completion(10000);
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--phase3-ownership") == 0) {
+    VulkanHarness vulkan;
+    return vulkan.CheckPhase3Ownership();
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--phase3-flip") == 0) {
+    VulkanHarness vulkan;
+    return vulkan.CheckPhase3FlipBoundary();
+  }
+  if (argc == 2 && std::strncmp(argv[1], "--phase3-short-", 15) == 0) {
+    VulkanHarness vulkan;
+    return vulkan.RejectPhase3Packet(argv[1]);
   }
   if (argc == 2 && std::strcmp(argv[1], "--phase0-wave") == 0) {
     VulkanHarness vulkan;

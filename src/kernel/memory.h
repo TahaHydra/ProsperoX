@@ -184,6 +184,7 @@ bool     ProtectGuestMemory(uint64_t vaddr, uint64_t size, Common::VirtualMemory
 // Transient PageManager watch state; does not change the guest mapping's semantic protection.
 bool ProtectGuestHostMemory(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode);
 bool FreeGuestMemory(uint64_t vaddr, uint64_t size);
+bool IsGuestAddressRangeOwned(uint64_t vaddr, uint64_t size);
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 void     TestFailNextPhysicalMemoryUnmap();

@@ -39,3 +39,9 @@ Windows TLS sites now use per-site jumps in the shared module patch pool,
 including continuation metadata for red-zone analysis. Port that interaction
 and its live-red-zone regressions before enabling another native backend.
 Host CPUID remains visible on the 7800X3D; a portable guest CPU profile is deferred.
+
+Phase 3 adaptations deferred: replace the Windows `VirtualAlloc`/`VirtualProtect`
+guard-page fixture on other hosts; obtain matching Vulkan validation binaries;
+repeat timeline, dirty-backing, indirect-argument, callback and staging-pressure
+tests on each host/GPU. The completion implementation uses the existing Vulkan
+and backing-store interfaces, but only Windows 11 / RX 7800 XT is validated.

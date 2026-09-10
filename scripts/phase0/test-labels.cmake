@@ -22,3 +22,4 @@ set_tests_properties(phase1_imports phase1_tls phase1_native_state phase1_patchi
     phase1_load_rollback phase1_modules PROPERTIES LABELS "host;native" TIMEOUT 60)
 set_tests_properties(phase1_paths phase1_executables PROPERTIES TIMEOUT 60)
 set_tests_properties(phase2_kernel phase2_kernel_stress PROPERTIES LABELS "host;native" TIMEOUT 120)
+set_tests_properties(phase3_completion phase3_ownership phase3_flip_boundary phase3_packet_bounds PROPERTIES LABELS "gpu;phase3" RUN_SERIAL TRUE TIMEOUT 120)

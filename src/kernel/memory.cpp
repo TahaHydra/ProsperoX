@@ -3424,6 +3424,10 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 	return OK;
 }
 
+bool IsGuestAddressRangeOwned(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->Owns(vaddr, size);
+}
+
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 void TestFailNextPhysicalMemoryUnmap() {
 	TestFailPhysicalMemoryUnmapAfter(0);
@@ -3446,7 +3450,7 @@ bool TestPlaceholderRangeIsFree(uint64_t vaddr, uint64_t size) {
 }
 
 bool TestGuestAddressRangeIsOwned(uint64_t vaddr, uint64_t size) {
-	return g_guest_address_space->Owns(vaddr, size);
+	return IsGuestAddressRangeOwned(vaddr, size);
 }
 
 bool TestGuestBackingOutsideAddressSpace() {

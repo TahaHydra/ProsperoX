@@ -96,6 +96,8 @@ public:
 	void SynchronizeGpu();
 	void EmitGlobalBarrier();
 	void TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id);
+	void RecordReleaseWriteback();
+	void ReadCommandMemory(uint64_t address, void* output, uint64_t size);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
 	                    uint32_t mode);
 	void DispatchIndirect(uint32_t data_offset, uint32_t mode);

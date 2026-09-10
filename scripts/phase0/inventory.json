@@ -13,5 +13,6 @@
   "windows_only": ["texture_cache_image_overlap", "texture_cache_htile_clear", "buffer_cache_ranges"],
   "phase0": ["phase0_unresolved_import", "phase0_path_containment", "phase0_wave_mask", "phase0_eop_visibility", "phase0_spirv_validation"],
   "phase1": ["phase1_imports", "phase1_paths", "phase1_tls", "phase1_executables", "phase1_native_state", "phase1_patching", "phase1_load_rollback", "phase1_modules", "phase1_strong_data", "phase1_legacy_plt"],
-  "phase2": ["phase2_kernel", "phase2_kernel_stress"]
+  "phase2": ["phase2_kernel", "phase2_kernel_stress"],
+  "phase3": ["phase3_completion", "phase3_ownership", "phase3_flip_boundary", "phase3_packet_bounds"]
 }

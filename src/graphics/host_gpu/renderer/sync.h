@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_SYNC_H_
 
 #include "kernel/eventQueue.h"
+#include "common/uniqueFunction.h"
 
 #include <cstdint>
 
@@ -16,8 +17,12 @@ namespace Sync {
 [[nodiscard]] bool     ScaleReferenceClock(uint64_t host_ticks, uint64_t host_frequency,
                                            uint64_t& value);
 [[nodiscard]] uint64_t ReadReferenceClock();
+void WriteCompletionClock(CommandBuffer& buffer, uint64_t* destination,
+                          bool writeback, bool interrupt, int event_id, uint32_t context_id);
 
 void TriggerEopEventAtEndOfPipe(CommandBuffer& buffer, int event_id, uint32_t context_id);
+void CompleteFlipAtEndOfPipe(CommandBuffer& buffer, uint32_t* label, uint32_t value,
+                             Common::UniqueFunction<void>&& complete);
 
 void WriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer& buffer, uint32_t* dst_gpu_addr,
                         uint32_t value);

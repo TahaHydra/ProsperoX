@@ -11,6 +11,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "kernel/eventQueue.h"
 #include "kernel/pthread.h"
+#include "kernel/memory.h"
 #include "libs/errno.h"
 
 #include <cstring>
@@ -72,6 +73,18 @@ static bool TriggersInterrupt(EndOfPipeWriteAction action) {
 	       action == EndOfPipeWriteAction::InterruptWriteBack;
 }
 
+// The completion runner must bypass GPU page-fault callbacks: those callbacks
+// would synchronously enter the GPU thread while it can be draining this runner.
+static void PublishCompletion(uint64_t destination, uint64_t value, uint32_t width, bool guest_backed) {
+	if (guest_backed) {
+		LibKernel::Memory::WriteBacking(destination, &value, width);
+	} else {
+		// Native allocations are valid in the native execution harness. Never
+		// fall back to them if a recorded guest mapping has disappeared.
+		std::memcpy(reinterpret_cast<void*>(destination), &value, width);
+	}
+}
+
 static void RecordEndOfPipeWrite(uint64_t submit_id, CommandBuffer& buffer, uint64_t destination,
                                  uint64_t value, EndOfPipeWriteSize size,
                                  EndOfPipeWriteAction action, int interrupt_event_id = 0,
@@ -80,16 +93,29 @@ static void RecordEndOfPipeWrite(uint64_t submit_id, CommandBuffer& buffer, uint
 	(void)buffer.Handle();
 
 	const auto width      = static_cast<uint32_t>(size);
+	const bool guest_backed = LibKernel::Memory::IsGuestAddressRangeOwned(destination, width);
 	const auto value_low  = static_cast<uint32_t>(value);
 	const auto value_high = static_cast<uint32_t>(value >> 32u);
 	const auto operation  = static_cast<uint32_t>(DebugOperation(action));
 	if (TriggersInterrupt(action)) {
 		buffer.SetDebugInfo(operation, submit_id, width, context_id, value_low, value_high,
 		                    destination);
-		TriggerEopEventAtEndOfPipe(buffer, interrupt_event_id, context_id);
 	} else {
 		buffer.SetDebugInfo(operation, submit_id, width, value_low, value_high, 0, destination);
 	}
+	auto& renderer = buffer.GetContext();
+	auto& scheduler = renderer.GetCommandScheduler();
+	EXIT_IF(!scheduler.Active() || &buffer != &scheduler.Current());
+	renderer.GetBufferCache().RecordCompletionValue(destination, value, width);
+	if (action == EndOfPipeWriteAction::WriteBack ||
+	    action == EndOfPipeWriteAction::InterruptWriteBack) {
+		renderer.GetBufferCache().RecordReleaseWriteback();
+	}
+	scheduler.DeferPriorityOperation([&renderer, destination, value, width, action,
+	                                  interrupt_event_id, context_id, guest_backed] {
+		PublishCompletion(destination, value, width, guest_backed);
+		if (TriggersInterrupt(action)) renderer.TriggerInterrupt(interrupt_event_id, context_id);
+	});
 }
 
 void WriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer& buffer, uint32_t* dst_gpu_addr,
@@ -114,22 +140,57 @@ void WriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer& buffer, uint64_t* dst
 
 void WriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer& buffer, uint64_t* dst_gpu_addr,
                                   uint64_t value) {
-	RecordEndOfPipeWrite(submit_id, buffer, reinterpret_cast<uint64_t>(dst_gpu_addr), 0,
-	                     EndOfPipeWriteSize::Qword, EndOfPipeWriteAction::Write);
+	(void)submit_id; (void)value;
+	WriteCompletionClock(buffer, dst_gpu_addr, false, false, 0, 0);
+}
 
-	LOGF_COLOR(Log::Color::BrightGreen,
-	           "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n",
-	           reinterpret_cast<uint64_t>(dst_gpu_addr), value);
+void WriteCompletionClock(CommandBuffer& buffer, uint64_t* destination,
+                          bool writeback, bool interrupt, int event_id, uint32_t context_id) {
+	auto& renderer = buffer.GetContext();
+	const bool guest_backed = LibKernel::Memory::IsGuestAddressRangeOwned(reinterpret_cast<uint64_t>(destination), 8);
+	if (renderer.GetBufferCache().IsRegionRegistered(reinterpret_cast<uint64_t>(destination), 8)) {
+		// A host-domain timestamp cannot be embedded in a GPU update until the
+		// represented work retires. Drain this boundary, then publish the same
+		// value to the device mirror and guest backing through the ordinary path.
+		// This conservative cost is restricted to cached clock destinations.
+		auto& scheduler = renderer.GetCommandScheduler();
+		const auto tick = scheduler.CurrentTick();
+		scheduler.Finish();
+		scheduler.WaitPriorityOperations(tick);
+		const auto action = interrupt ? (writeback ? EndOfPipeWriteAction::InterruptWriteBack : EndOfPipeWriteAction::Interrupt)
+		                              : (writeback ? EndOfPipeWriteAction::WriteBack : EndOfPipeWriteAction::Write);
+		RecordEndOfPipeWrite(0, scheduler.Current(), reinterpret_cast<uint64_t>(destination),
+		                     ReadReferenceClock(), EndOfPipeWriteSize::Qword, action, event_id, context_id);
+		return;
+	}
+	if (writeback) renderer.GetBufferCache().RecordReleaseWriteback();
+	renderer.GetCommandScheduler().DeferPriorityOperation(
+	    [&renderer, destination, interrupt, event_id, context_id, guest_backed] {
+		    // Host reference clock in 100 MHz units, sampled at retirement/publication.
+		    PublishCompletion(reinterpret_cast<uint64_t>(destination), ReadReferenceClock(), 8, guest_backed);
+		    if (interrupt) renderer.TriggerInterrupt(event_id, context_id);
+	    });
 }
 
 void WriteAtEndOfPipeClockCounterWithWriteBack(uint64_t submit_id, CommandBuffer& buffer,
                                                uint64_t* dst_gpu_addr, uint64_t value) {
-	RecordEndOfPipeWrite(submit_id, buffer, reinterpret_cast<uint64_t>(dst_gpu_addr), 0,
-	                     EndOfPipeWriteSize::Qword, EndOfPipeWriteAction::WriteBack);
+	(void)submit_id; (void)value;
+	WriteCompletionClock(buffer, dst_gpu_addr, true, false, 0, 0);
+}
 
-	LOGF_COLOR(Log::Color::BrightGreen,
-	           "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n",
-	           reinterpret_cast<uint64_t>(dst_gpu_addr), value);
+void CompleteFlipAtEndOfPipe(CommandBuffer& buffer, uint32_t* label, uint32_t value,
+                             Common::UniqueFunction<void>&& complete) {
+	auto& renderer = buffer.GetContext();
+	auto& scheduler = renderer.GetCommandScheduler();
+	const bool guest_backed = label != nullptr && LibKernel::Memory::IsGuestAddressRangeOwned(reinterpret_cast<uint64_t>(label), 4);
+	if (label != nullptr) {
+		renderer.GetBufferCache().RecordCompletionValue(reinterpret_cast<uint64_t>(label), value, 4);
+		renderer.GetBufferCache().RecordReleaseWriteback();
+	}
+	scheduler.DeferPriorityOperation([label, value, guest_backed, complete = std::move(complete)]() mutable {
+		if (label != nullptr) PublishCompletion(reinterpret_cast<uint64_t>(label), value, 4, guest_backed);
+		complete();
+	});
 }
 
 void WriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBuffer& buffer,
@@ -210,7 +271,7 @@ void WriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t submit_id, CommandBuf
 	auto& renderer  = buffer.GetContext();
 	auto& scheduler = renderer.GetCommandScheduler();
 	EXIT_IF(!scheduler.Active() || &buffer != &scheduler.Current());
-	scheduler.DeferPriorityOperation([&renderer, event_id, request_id] {
+	CompleteFlipAtEndOfPipe(buffer, dst_gpu_addr, value, [&renderer, event_id, request_id] {
 		renderer.GetVideoOut().CompleteFlip(request_id);
 		renderer.TriggerInterrupt(event_id, 0);
 	});
@@ -228,8 +289,9 @@ void WriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer& buffer, uint3
 	auto& renderer  = buffer.GetContext();
 	auto& scheduler = renderer.GetCommandScheduler();
 	EXIT_IF(!scheduler.Active() || &buffer != &scheduler.Current());
-	scheduler.DeferPriorityOperation(
-	    [&renderer, request_id] { renderer.GetVideoOut().CompleteFlip(request_id); });
+	CompleteFlipAtEndOfPipe(buffer, dst_gpu_addr, value, [&renderer, request_id] {
+		renderer.GetVideoOut().CompleteFlip(request_id);
+	});
 }
 
 void WriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer& buffer, int handle, int index,
@@ -242,7 +304,7 @@ void WriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer& buffer, int han
 	auto& renderer  = buffer.GetContext();
 	auto& scheduler = renderer.GetCommandScheduler();
 	EXIT_IF(!scheduler.Active() || &buffer != &scheduler.Current());
-	scheduler.DeferPriorityOperation(
+	CompleteFlipAtEndOfPipe(buffer, nullptr, 0,
 	    [&renderer, request_id] { renderer.GetVideoOut().CompleteFlip(request_id); });
 }
 
