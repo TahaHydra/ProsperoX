@@ -4,16 +4,6 @@
 namespace Libs::Graphics::ShaderRecompiler::Frontend {
 namespace {
 
-bool IsExecOrVcc(const Decoder::Operand& operand) {
-	switch (operand.kind) {
-		case Decoder::OperandKind::ExecLo:
-		case Decoder::OperandKind::ExecHi:
-		case Decoder::OperandKind::VccLo:
-		case Decoder::OperandKind::VccHi: return true;
-		default: return false;
-	}
-}
-
 Decoder::Operand ConditionOperand(Decoder::OperandKind kind) {
 	Decoder::Operand operand;
 	operand.kind = kind;
@@ -24,27 +14,28 @@ Decoder::Operand ConditionOperand(Decoder::OperandKind kind) {
 
 void Translator::S_SAVEEXEC(const Decoder::Instruction& inst, IR::ValueOpcode operation,
                             bool negate_exec, bool negate_source, bool write_64) {
-	const auto old    = ir.GetExec();
-	const auto src    = ReadMask(inst.src0);
-	const auto lhs    = negate_exec ? ir.LogicalNot(old) : old;
-	const auto rhs    = negate_source ? ir.LogicalNot(src) : src;
-	auto       result = IR::U1(ir.Emit(operation, {lhs, rhs}));
-	if (write_64) {
-		WriteMask(inst.dst, old, true);
-	} else {
-		WriteRawU32(inst.dst, ir.GetExecLo());
-		if (current_wave_size == 64u) {
-			const auto low_half =
-			    ir.ULessThan(IR::U32(ir.Emit(IR::ValueOpcode::LaneId)), IR::U32(IR::Value(32u)));
-			result = IR::U1(ir.Emit(IR::ValueOpcode::SelectU1, {low_half, result, old}));
-		}
+	// SAVEEXEC is scalar arithmetic, even with EXEC=0 or a partial wave.
+	// Read both operands before writing the destination (which can alias src0).
+	const std::array<IR::U32, 2> old {ir.GetExecLo(), ir.GetExecHi()};
+	const auto src = write_64 ? ReadU32Pair(inst.src0)
+	                          : std::array<IR::U32, 2>{ReadU32(inst.src0), old[1]};
+	auto result = old;
+	for (unsigned i = 0; i < (write_64 ? 2u : 1u); ++i) {
+		const auto lhs = negate_exec ? ir.BitwiseNot(old[i]) : old[i];
+		const auto rhs = negate_source ? ir.BitwiseNot(src[i]) : src[i];
+		result[i] = operation == IR::ValueOpcode::LogicalAnd ? ir.BitwiseAnd(lhs, rhs)
+		                                                    : ir.BitwiseOr(lhs, rhs);
 	}
-	const auto mask = BallotMask(result);
-	ir.SetExec(result);
-	ir.SetExecLo(mask[0]);
-	ir.SetExecHi(mask[1]);
+	if (write_64) {
+		WriteU32Pair(inst.dst, old);
+	} else {
+		WriteRawU32(inst.dst, old[0]);
+	}
+	ir.SetExecLo(result[0]);
+	if (write_64) ir.SetExecHi(result[1]);
+	ir.SetExec(ThreadBit({ir.GetExecLo(), ir.GetExecHi()}));
 	ir.SetScc(
-	    ir.INotEqual(write_64 ? ir.BitwiseOr(mask[0], mask[1]) : mask[0], IR::U32(IR::Value(0u))));
+	    ir.INotEqual(write_64 ? ir.BitwiseOr(result[0], result[1]) : result[0], IR::U32(IR::Value(0u))));
 }
 
 void Translator::ADD_U32(const Decoder::Instruction& inst, bool vector, bool use_carry_in) {
@@ -218,10 +209,6 @@ void Translator::ScalarSelect64(const Decoder::Instruction& inst,
 	const auto selected_mask_valid =
 	    IR::U1(ir.Emit(IR::ValueOpcode::SelectU1,
 	                   {condition, ReadMaskValid(inst.src0), ReadMaskValid(false_source)}));
-	if (IsExecOrVcc(inst.dst)) {
-		WriteMask(inst.dst, selected_mask, true);
-		return;
-	}
 	WriteU32Pair(inst.dst,
 	             {ir.Select(condition, lhs[0], rhs[0]), ir.Select(condition, lhs[1], rhs[1])});
 	if (inst.dst.kind == Decoder::OperandKind::Sgpr) {

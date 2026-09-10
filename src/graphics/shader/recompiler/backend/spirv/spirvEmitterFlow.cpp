@@ -592,7 +592,17 @@ bool EmitValueFlow(ValueEmitContext& ctx, const IR::Inst& inst) {
 		case IR::ValueOpcode::Ballot: ctx.Define(inst, ctx.Ballot(inst.Arg(0))); return true;
 		case IR::ValueOpcode::ReadFirstLane: {
 			const auto ballot = ctx.Ballot(inst.Arg(1));
-			const auto lane   = ctx.FirstLane(ballot);
+			const auto first = ctx.FirstLane(ballot);
+			const auto low = state.builder.AllocateId();
+			const auto high = state.builder.AllocateId();
+			const auto empty = state.builder.AllocateId();
+			const auto lane = state.builder.AllocateId();
+			state.builder.AddFunction({OpCompositeExtract, TypeU32(state), low, ballot, 0});
+			state.builder.AddFunction({OpCompositeExtract, TypeU32(state), high, ballot, 1});
+			state.builder.AddFunction({OpIEqual, TypeBool(state), empty,
+			    EmitBinaryU32(state, OpBitwiseOr, low, high), ConstantU32(state, 0)});
+			// RDNA2 V_READFIRSTLANE reads lane zero when EXEC is zero.
+			state.builder.AddFunction({OpSelect, TypeU32(state), lane, empty, ConstantU32(state, 0), first});
 			ctx.Define(inst, ctx.Shuffle(inst, 0, lane));
 			return true;
 		}

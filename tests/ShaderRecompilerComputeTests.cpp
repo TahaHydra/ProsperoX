@@ -1734,7 +1734,7 @@ public:
     std::fprintf(stderr, "VULKAN_VALIDATION %s\n", data->pMessage);
     return VK_FALSE;
   }
-  VulkanHarness() { Init(); }
+  explicit VulkanHarness(u32 subgroup_size = 0) : m_requested_subgroup_size(subgroup_size) { Init(); }
   ~VulkanHarness() { Destroy(); }
 
   VulkanHarness(const VulkanHarness &) = delete;
@@ -1763,6 +1763,7 @@ public:
 
   [[nodiscard]] vk::Device Device() const { return m_device; }
   [[nodiscard]] u32 SubgroupSize() const {
+    if (m_requested_subgroup_size != 0) return m_requested_subgroup_size;
     vk::PhysicalDeviceSubgroupProperties subgroup{};
     vk::PhysicalDeviceProperties2 properties{};
     properties.pNext = &subgroup;
@@ -11047,6 +11048,12 @@ public:
     stage.module = module;
     stage.pName = "main";
 
+    vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size{};
+    if (m_requested_subgroup_size != 0) {
+      subgroup_size.requiredSubgroupSize = m_requested_subgroup_size;
+      stage.pNext = &subgroup_size;
+    }
+
     vk::ComputePipelineCreateInfo pipeline_info{};
     pipeline_info.sType = vk::StructureType::eComputePipelineCreateInfo;
     pipeline_info.stage = stage;
@@ -13106,6 +13113,18 @@ private:
     available_features2.sType = vk::StructureType::ePhysicalDeviceFeatures2;
     available_features2.pNext = &available_feedback_dynamic;
     m_physical_device.getFeatures2(&available_features2);
+    if (m_requested_subgroup_size != 0) {
+      vk::PhysicalDeviceSubgroupSizeControlProperties limits{};
+      vk::PhysicalDeviceProperties2 properties{}; properties.pNext=&limits;
+      m_physical_device.getProperties2(&properties);
+      Require("VulkanHarness", "subgroup size control",
+        available_features13.subgroupSizeControl &&
+        m_requested_subgroup_size>=limits.minSubgroupSize &&
+        m_requested_subgroup_size<=limits.maxSubgroupSize &&
+        bool(limits.requiredSubgroupSizeStages & vk::ShaderStageFlagBits::eCompute),
+        "requested compute subgroup width is unsupported");
+      std::printf("VULKAN_REQUIRED_SUBGROUP_SIZE %u\n",m_requested_subgroup_size);
+    }
     Require("VulkanHarness", "dispatch",
             available_features.shaderStorageImageWriteWithoutFormat == true,
             "shaderStorageImageWriteWithoutFormat is not supported");
@@ -13168,6 +13187,7 @@ private:
     device_features13.pNext = &barycentric;
     device_features13.dynamicRendering = true;
     device_features13.synchronization2 = true;
+    device_features13.subgroupSizeControl = m_requested_subgroup_size != 0;
     vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives{};
     derivatives.pNext = &device_features13;
     derivatives.computeDerivativeGroupQuads = true;
@@ -13530,6 +13550,7 @@ private:
   }
 
   bool m_feedback_supported = false;
+  u32 m_requested_subgroup_size = 0;
   vk::Instance m_instance = nullptr;
   bool m_validation_enabled = false;
   VkDebugUtilsMessengerEXT m_validation_messenger = VK_NULL_HANDLE;
@@ -28123,12 +28144,24 @@ void CheckPm4CeCompletion(RenderContext &renderer) {
 } // namespace
 } // namespace Libs::Graphics
 
+namespace Libs::Graphics {
+namespace {
+#include "Phase4AWaveTests.inc"
+}
+}
+
 int main(int argc, char **argv) {
   using namespace Libs::Graphics;
 
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && (std::strcmp(argv[1], "--phase4a-contracts") == 0 ||
+                   std::strcmp(argv[1], "--phase4a-contracts-32") == 0)) {
+    VulkanHarness vulkan(std::strcmp(argv[1], "--phase4a-contracts-32") == 0 ? 32 : 64);
+    RunPhase4AContracts(vulkan);
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--phase0-spirv") == 0) {
     auto test = BranchVccnzUsesWaveMask();
     test.compile_only = true;
@@ -28182,8 +28215,9 @@ int main(int argc, char **argv) {
     return 0;
   }
 #endif
-  if (argc == 2 && std::strcmp(argv[1], "--wave64-only") == 0) {
-    VulkanHarness vulkan;
+  if (argc == 2 && (std::strcmp(argv[1], "--wave64-only") == 0 ||
+                   std::strcmp(argv[1], "--phase4a-regressions-32") == 0)) {
+    VulkanHarness vulkan(std::strcmp(argv[1], "--phase4a-regressions-32") == 0 ? 32 : 0);
     RunCase(&vulkan, Wave32VccMasksPreserveOtherHalf());
     RunCase(&vulkan, DsBpermuteWave64UsesIndependentHalves());
     RunCase(&vulkan, Wave64CrossHalfLaneAndLds());

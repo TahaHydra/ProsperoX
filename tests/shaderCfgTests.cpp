@@ -10873,10 +10873,11 @@ void TestNewShaderRecompilerPerInvocationU64Complement() {
   auto result = RecompileForTest(shader, options);
   CheckSpirvBinaryValidates(result.spirv);
   const auto source = DisassembleSpirvBinary(result.spirv);
-  Check(Common::ContainsStr(source, "OpLogicalNot"),
-        "per-invocation s_not_b64 did not complement the lane predicate");
-  Check(!Common::ContainsStr(source, "OpNot %uint"),
-        "per-invocation s_not_b64 emitted raw complemented mask words");
+  // S_NOT_B64 complements scalar words, including bits outside live lanes.
+  // Exact values and inactive-lane preservation are exercised on the GPU by
+  // phase4a_wave_regressions; this host check guards the lowering category.
+  Check(Common::ContainsStr(source, "OpNot %uint"),
+        "scalar s_not_b64 lost the raw mask complement");
 }
 
 void TestNewShaderRecompilerExpPixelOutputs() {

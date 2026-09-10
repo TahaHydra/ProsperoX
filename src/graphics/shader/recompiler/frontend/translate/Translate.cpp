@@ -115,6 +115,16 @@ std::array<IR::U32, 2> Translator::BallotMask(IR::U1 value) {
 	        current_wave_size == 64u ? ir.CompositeExtract(mask, 1) : IR::U32(IR::Value(0u))};
 }
 
+// Scalar flags summarize architectural words, including bits belonging to
+// inactive lanes. A ballot of the current predicate cannot recover those bits.
+IR::U1 Translator::WaveMaskNonZero(bool vcc) {
+	auto word = vcc ? ir.GetVccLo() : ir.GetExecLo();
+	if (current_wave_size == 64u) {
+		word = ir.BitwiseOr(word, vcc ? ir.GetVccHi() : ir.GetExecHi());
+	}
+	return ir.INotEqual(word, IR::U32(IR::Value(0u)));
+}
+
 IR::U32 Translator::ReadRawU32(const Decoder::Operand& operand) {
 	switch (operand.kind) {
 		case Decoder::OperandKind::LiteralConstant:
@@ -134,10 +144,10 @@ IR::U32 Translator::ReadRawU32(const Decoder::Operand& operand) {
 		case Decoder::OperandKind::Scc:
 			return ir.Select(ir.GetScc(), IR::U32(IR::Value(1u)), IR::U32(IR::Value(0u)));
 		case Decoder::OperandKind::VccZ:
-			return ir.Select(ir.LogicalNot(ir.GetVcc()), IR::U32(IR::Value(1u)),
+			return ir.Select(ir.LogicalNot(WaveMaskNonZero(true)), IR::U32(IR::Value(1u)),
 			                 IR::U32(IR::Value(0u)));
 		case Decoder::OperandKind::ExecZ:
-			return ir.Select(ir.LogicalNot(ir.GetExec()), IR::U32(IR::Value(1u)),
+			return ir.Select(ir.LogicalNot(WaveMaskNonZero(false)), IR::U32(IR::Value(1u)),
 			                 IR::U32(IR::Value(0u)));
 		default: EXIT("invalid decoded operand used as a raw U32 source");
 	}
@@ -208,8 +218,8 @@ IR::Value Translator::ReadOperand(const Decoder::Operand& operand, IR::Type type
 			case Decoder::OperandKind::ExecHi: return ir.GetExec();
 			case Decoder::OperandKind::VccLo:
 			case Decoder::OperandKind::VccHi: return ir.GetVcc();
-			case Decoder::OperandKind::VccZ: return ir.LogicalNot(ir.GetVcc());
-			case Decoder::OperandKind::ExecZ: return ir.LogicalNot(ir.GetExec());
+			case Decoder::OperandKind::VccZ: return ir.LogicalNot(WaveMaskNonZero(true));
+			case Decoder::OperandKind::ExecZ: return ir.LogicalNot(WaveMaskNonZero(false));
 			default: break;
 		}
 		return ir.INotEqual(ReadRawU32(operand), IR::U32(IR::Value(0u)));
@@ -373,7 +383,7 @@ void Translator::WriteOperand(const Decoder::Operand& operand, IR::Value value) 
 				const auto mask = BallotMask(IR::U1(value));
 				ir.SetExec(IR::U1(value));
 				ir.SetExecLo(mask[0]);
-				ir.SetExecHi(mask[1]);
+				if (current_wave_size == 64u) ir.SetExecHi(mask[1]);
 				return;
 			}
 			case Decoder::OperandKind::VccLo:
@@ -381,7 +391,7 @@ void Translator::WriteOperand(const Decoder::Operand& operand, IR::Value value) 
 				const auto mask = BallotMask(IR::U1(value));
 				ir.SetVcc(IR::U1(value));
 				ir.SetVccLo(mask[0]);
-				ir.SetVccHi(mask[1]);
+				if (current_wave_size == 64u) ir.SetVccHi(mask[1]);
 				return;
 			}
 			default:
@@ -636,8 +646,8 @@ IR::U1 Translator::ReadMask(const Decoder::Operand& operand) {
 			           ? ThreadBit({ReadRawU32(operand), IR::U32(IR::Value(0u))})
 			           : ir.GetVcc();
 		case Decoder::OperandKind::Scc: return ir.GetScc();
-		case Decoder::OperandKind::VccZ: return ir.LogicalNot(ir.GetVcc());
-		case Decoder::OperandKind::ExecZ: return ir.LogicalNot(ir.GetExec());
+		case Decoder::OperandKind::VccZ: return ir.LogicalNot(WaveMaskNonZero(true));
+		case Decoder::OperandKind::ExecZ: return ir.LogicalNot(WaveMaskNonZero(false));
 		default: return ir.INotEqual(ReadRawU32(operand), IR::U32(IR::Value(0u)));
 	}
 }
@@ -693,6 +703,10 @@ std::array<IR::U32, 2> Translator::WriteMask(const Decoder::Operand& operand, IR
 		}
 		case Decoder::OperandKind::ExecLo:
 		case Decoder::OperandKind::ExecHi: {
+			if (!write_64 && current_wave_size == 32u) {
+				WriteRawU32(operand, mask[0]);
+				return mask;
+			}
 			ir.SetExec(value);
 			ir.SetExecLo(mask[0]);
 			ir.SetExecHi(mask[1]);
@@ -751,17 +765,17 @@ void Translator::AddBranchCondition(const CFG::BasicBlock& source, IR::BlockInfo
 	if (source.terminator.kind != CFG::TerminatorKind::ConditionalBranch) {
 		return;
 	}
-	// EXEC and VCC are invocation-local Boolean masks. Branching on that Boolean lets inactive
-	// invocations leave the region without reconstructing a host-subgroup mask.
+	// Guest scalar branches execute for the whole wave. Keep host invocations
+	// together so inactive guest lanes retain their registers for later restore/shuffle.
 	IR::U1 condition;
 	switch (source.terminator.condition) {
 		case CFG::BranchCondition::Always: condition = IR::U1(IR::Value(true)); break;
 		case CFG::BranchCondition::SccZero: condition = ir.LogicalNot(ir.GetScc()); break;
 		case CFG::BranchCondition::SccNonZero: condition = ir.GetScc(); break;
-		case CFG::BranchCondition::VccZero: condition = ir.LogicalNot(ir.GetVcc()); break;
-		case CFG::BranchCondition::VccNonZero: condition = ir.GetVcc(); break;
-		case CFG::BranchCondition::ExecZero: condition = ir.LogicalNot(ir.GetExec()); break;
-		case CFG::BranchCondition::ExecNonZero: condition = ir.GetExec(); break;
+		case CFG::BranchCondition::VccZero: condition = ir.LogicalNot(WaveMaskNonZero(true)); break;
+		case CFG::BranchCondition::VccNonZero: condition = WaveMaskNonZero(true); break;
+		case CFG::BranchCondition::ExecZero: condition = ir.LogicalNot(WaveMaskNonZero(false)); break;
+		case CFG::BranchCondition::ExecNonZero: condition = WaveMaskNonZero(false); break;
 		case CFG::BranchCondition::GotoVariable:
 			if (source.terminator.goto_variable == UINT32_MAX) {
 				EXIT("block %u reads an invalid goto variable", source.id);

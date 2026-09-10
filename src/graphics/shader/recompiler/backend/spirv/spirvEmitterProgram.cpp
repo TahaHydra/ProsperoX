@@ -96,24 +96,10 @@ void EmitReturn(ValueEmitContext& ctx) {
 }
 
 uint32_t BranchCondition(ValueEmitContext& ctx, const IR::BlockInfo& info) {
-	if (ctx.other_half == nullptr ||
-	    info.terminator.condition == CFG::BranchCondition::GotoVariable) {
-		return ctx.Def(info.condition);
-	}
-	const auto ballot = ctx.Ballot(info.condition);
-	const auto low    = ctx.state.builder.AllocateId();
-	const auto high   = ctx.state.builder.AllocateId();
-	const auto result = ctx.state.builder.AllocateId();
-	ctx.state.builder.AddFunction({OpCompositeExtract, TypeU32(ctx.state), low, ballot, 0});
-	ctx.state.builder.AddFunction({OpCompositeExtract, TypeU32(ctx.state), high, ballot, 1});
-	const auto kind     = info.terminator.condition;
-	const bool zero     = kind == CFG::BranchCondition::ExecZero ||
-	                      kind == CFG::BranchCondition::VccZero ||
-	                      kind == CFG::BranchCondition::SccZero;
-	const auto combined = EmitBinaryU32(ctx.state, zero ? OpBitwiseAnd : OpBitwiseOr, low, high);
-	ctx.state.builder.AddFunction({zero ? OpIEqual : OpINotEqual, TypeBool(ctx.state), result,
-	                               combined, ConstantU32(ctx.state, zero ? ~0u : 0u)});
-	return result;
+	// Translation already supplies the scalar wave condition, also for a
+	// guest wave64 represented by paired wave32 values. Re-balloting loses
+	// partial-wave bits and confuses architectural flags with host participation.
+	return ctx.Def(info.condition);
 }
 
 void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block,

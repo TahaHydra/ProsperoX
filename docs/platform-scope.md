@@ -45,3 +45,11 @@ guard-page fixture on other hosts; obtain matching Vulkan validation binaries;
 repeat timeline, dirty-backing, indirect-argument, callback and staging-pressure
 tests on each host/GPU. The completion implementation uses the existing Vulkan
 and backing-store interfaces, but only Windows 11 / RX 7800 XT is validated.
+
+Phase 4A adaptations deferred: rerun the raw wave-control and inactive-lane
+matrix on each driver/device before enabling it as a supported host. Required
+subgroup32/64 test pipelines currently require both sizes and compute-stage
+subgroup-size control on the RX 7800 XT. Other devices need explicit capability
+classification; their absence must not silently count as a pass. Graphics
+helper invocations and multiple guest waves per larger host subgroup need
+additional fixtures. No production subgroup-size policy changed in Phase 4A.

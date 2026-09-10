@@ -25,6 +25,7 @@ private:
 	Decoder::Operand ScalarDestinationOperand(const Decoder::Operand& operand, uint32_t offset);
 	Decoder::Operand PlainOperand(const Decoder::Operand& operand);
 	std::array<IR::U32, 2> BallotMask(IR::U1 value);
+	IR::U1                 WaveMaskNonZero(bool vcc);
 	IR::U32                ReadRawU32(const Decoder::Operand& operand);
 	IR::U32                ReadScalarCode(uint32_t code);
 	IR::U32                ApplyBitSourceModifiers(const Decoder::Operand& operand, IR::U32 value);

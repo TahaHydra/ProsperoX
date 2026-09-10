@@ -2,17 +2,6 @@
   "schema": 1,
   "failures": [
     {
-      "id": "P0-WAVE",
-      "test": "phase0_wave_mask",
-      "status": "crash",
-      "returncode": 3221226505,
-      "signature": "BranchVccnzUsesWaveMask failed at readback: expected \\[0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a, 0x0000002a\\] actual \\[0x0000002a, 0x0000000b, 0x0000000b, 0x0000000b, 0x0000002a, 0x0000000b, 0x0000000b, 0x0000000b\\]",
-      "phase": 4,
-      "platform": "windows",
-      "owner": "ProsperoX runtime",
-      "evidence": "_Build/evidence/windows-portability/phase0_wave_mask.log"
-    },
-    {
       "id": "P0-SOCKET",
       "test": "kernel_file_system",
       "status": "crash",
