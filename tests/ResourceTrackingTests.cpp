@@ -256,6 +256,81 @@ MakeIndirectImageFixture(bool malformed, uint32_t material_immediate = 0,
   return fixture;
 }
 
+void TestPhase4LargeMixedTable() {
+  auto fixture = MakeIndirectImageFixture(false);
+  fixture->PlanAndTrack();
+  auto plan = ExtractResourcePlan(fixture->program);
+  constexpr uint32_t count = 40;
+  std::array<uint32_t, 9> user_data{0x1000,    224u << 16, count, 0, 0x8000,
+                                    16u << 16, count * 2,  0,     7};
+  LinearTestMemory memory;
+  memory.words.resize(0xa000 / 4);
+  for (uint32_t i = 0; i < count; ++i) {
+    memory.words[(i * 224 + 4) / 4] = i;
+    const auto pos = (0x8000 - memory.base + i * 32) / 4;
+    memory.words[pos] = 0x10000 + i;
+    const auto format =
+        i % 2 ? Libs::Graphics::Prospero::BufferFormat::k32UInt
+              : Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float;
+    memory.words[pos + 1] = static_cast<uint32_t>(format) << 20;
+    memory.words[pos + 2] = 3 | (3 << 14);
+    memory.words[pos + 3] =
+        Libs::Graphics::DstSel(4, 5, 6, 7) |
+        (static_cast<uint32_t>(
+             i % 3 ? Libs::Graphics::Prospero::ImageType::kColor2D
+                   : Libs::Graphics::Prospero::ImageType::kColor1D)
+         << 28);
+  }
+  SrtRuntime runtime{.user_data = user_data,
+                     .userdata = &memory,
+                     .read_specialization_memory = ReadLinearTestMemory,
+                     .max_images = count};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == count,
+        "40 mixed candidates failed to materialize");
+  Check(specialization.images[0].numeric_class !=
+                specialization.images[1].numeric_class &&
+            specialization.images[0].dimension !=
+                specialization.images[1].dimension,
+        "mixed candidates were coerced to the root type");
+  const auto previous_snapshot = snapshot;
+  const auto previous_specialization = specialization;
+  runtime.max_images = count - 1;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization) &&
+            SameResourceSnapshot(snapshot, previous_snapshot) &&
+            specialization == previous_specialization,
+        "device image limit did not reject transactionally");
+  runtime.max_images = count;
+  plan.info.buffers[0].written = true;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization) &&
+            SameResourceSnapshot(snapshot, previous_snapshot),
+        "mutable material table was specialized");
+  plan.info.buffers[0].written = false;
+  const auto descriptor_word1 = (0x8000 - memory.base + 39 * 32) / 4 + 1;
+  const auto valid_word1 = memory.words[descriptor_word1];
+  memory.words[descriptor_word1] = 0;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization) &&
+            SameResourceSnapshot(snapshot, previous_snapshot),
+        "invalid non-null candidate became a null descriptor");
+  memory.words[descriptor_word1] = valid_word1;
+  memory.words[(0x8000 - memory.base + 39 * 32) / 4] += 0x100;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            specialization == previous_specialization &&
+            !SameResourceSnapshot(snapshot, previous_snapshot),
+        "changed descriptor address did not remain runtime data");
+  ApplyResourceSpecialization(fixture->program, specialization);
+  Check(fixture->program.info.images[0].indirect_resources.size() == count,
+        "expanded candidate list was truncated");
+  memory.words[descriptor_word1] =
+      static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32SInt)
+      << 20;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.samplers.size() == 2,
+        "mixed native/point image table did not split sampler state");
+}
+
 void TestInvariantIndirectImageMaterialization() {
   auto fixture = MakeIndirectImageFixture(false);
   fixture->PlanAndTrack();
@@ -1877,6 +1952,7 @@ int main() {
     Run("image binding ABI", TestImageBindingAbi);
     Run("graphics push constants", TestGraphicsPushConstantLayout);
     Run("resource limit", TestResourceLimitIsTransactional);
+    Run("Phase 4 large mixed image table", TestPhase4LargeMixedTable);
     Run("malformed memory kinds", TestMalformedMemoryKindsRejected);
   } catch (const std::exception &exception) {
     std::cerr << "resource tracking test failed: " << exception.what() << '\n';

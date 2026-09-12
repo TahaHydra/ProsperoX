@@ -53,3 +53,11 @@ subgroup-size control on the RX 7800 XT. Other devices need explicit capability
 classification; their absence must not silently count as a pass. Graphics
 helper invocations and multiple guest waves per larger host subgroup need
 additional fixtures. No production subgroup-size policy changed in Phase 4A.
+
+Phase 4 completed the target-PC subgroup32/64 corpus, multiwave LDS/lane tests,
+heterogeneous sampled-image selection and F16 RNE oracle. Repeat those gates
+on each additional host before enabling support. Materialization must receive
+the actual device's descriptor limits; the standalone 128-image test budget is
+not a Vulkan minimum or a portable device requirement. Broader fragment-helper
+and float-control-mode permutations remain future conformance work. Keep the
+test harness's queried image capabilities consistent with the production context.

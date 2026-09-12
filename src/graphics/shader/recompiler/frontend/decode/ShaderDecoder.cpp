@@ -33,7 +33,9 @@ bool IsControlFlowBranch(Opcode opcode) {
 		case Opcode::S_CBRANCH_VCCZ:
 		case Opcode::S_CBRANCH_VCCNZ:
 		case Opcode::S_CBRANCH_EXECZ:
-		case Opcode::S_CBRANCH_EXECNZ: return true;
+		case Opcode::S_CBRANCH_EXECNZ:
+		case Opcode::S_SUBVECTOR_LOOP_BEGIN:
+		case Opcode::S_SUBVECTOR_LOOP_END: return true;
 		default: return false;
 	}
 }
@@ -531,6 +533,12 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::S_CBRANCH_EXECNZ:
 			return WithUnsupportedReason(inst, fmt::format("0x{:08x}: {} 0x{:08x}", inst.pc,
 			                                               magic_enum::enum_name(inst.opcode),
+			                                               inst.branch_target));
+		case Opcode::S_SUBVECTOR_LOOP_BEGIN:
+		case Opcode::S_SUBVECTOR_LOOP_END:
+			return WithUnsupportedReason(inst, fmt::format("0x{:08x}: {} {}, 0x{:08x}", inst.pc,
+			                                               magic_enum::enum_name(inst.opcode),
+			                                               OperandToString(inst.dst),
 			                                               inst.branch_target));
 		case Opcode::EXP: return WithUnsupportedReason(inst, FormatExp(inst));
 		case Opcode::IMAGE_SAMPLE:

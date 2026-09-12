@@ -173,6 +173,7 @@ enum : uint32_t {
 	OpVectorShuffle                = 79,
 	OpCompositeConstruct           = 80,
 	OpCompositeExtract             = 81,
+	OpVectorExtractDynamic         = 77,
 	OpCopyObject                   = 83,
 	OpSampledImage                 = 86,
 	OpImageSampleImplicitLod       = 87,
@@ -527,6 +528,7 @@ uint32_t OutputVariableForExport(const EmitterState& state, const IR::ExportInfo
 uint32_t ConstantU32(EmitterState& state, uint32_t value);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
+uint32_t EmitHostSubgroupLocalInvocationId(EmitterState& state);
 
 [[noreturn]] void ExitDescriptorBindingFailure(const EmitterState&       state,
                                                IR::DescriptorBindingKind kind, uint32_t resource,
@@ -659,8 +661,7 @@ MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::
 
 MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState& state,
                                                          const IR::MemoryInfo& mem,
-                                                         uint32_t variable,
-                                                         uint32_t pointer_type);
+                                                        uint32_t variable, uint32_t pointer_type);
 
 uint32_t EmitMemoryElementIndex(EmitterState& state, const MemoryResourceAccess& access,
                                 uint32_t raw_index);
@@ -671,9 +672,8 @@ uint32_t EmitMemoryElementInBounds(EmitterState& state, const MemoryResourceAcce
 uint32_t EmitMemoryElementPointer(EmitterState& state, const MemoryResourceAccess& access,
                                   uint32_t index);
 
-uint32_t EmitStorageBufferElementPointer(EmitterState& state,
-                                         const MemoryResourceAccess& access, uint32_t index,
-                                         uint32_t pointer_type);
+uint32_t EmitStorageBufferElementPointer(EmitterState& state, const MemoryResourceAccess& access,
+                                         uint32_t index, uint32_t pointer_type);
 
 uint32_t EmitTBufferBitcastF32ToU32(EmitterState& state, uint32_t value);
 
@@ -724,6 +724,8 @@ uint32_t EmitCompareU32Constant(EmitterState& state, uint32_t opcode, uint32_t v
 uint32_t EmitSubConstantMinusU32(EmitterState& state, uint32_t constant, uint32_t value);
 
 uint32_t EmitF32ToF16RtzBits(EmitterState& state, uint32_t f32);
+
+uint32_t EmitF32ToF16RneBits(EmitterState& state, uint32_t f32);
 
 uint32_t EmitMinMaxU32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value);
 

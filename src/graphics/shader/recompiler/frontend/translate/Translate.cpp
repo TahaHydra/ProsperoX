@@ -782,6 +782,10 @@ void Translator::AddBranchCondition(const CFG::BasicBlock& source, IR::BlockInfo
 			}
 			condition = ir.GetGotoVariable(source.terminator.goto_variable);
 			break;
+		case CFG::BranchCondition::ScalarInstruction:
+			EXIT_IF(instruction_branch_condition.IsEmpty());
+			condition = instruction_branch_condition;
+			break;
 		case CFG::BranchCondition::Unknown:
 			EXIT("block %u has an unknown branch condition", source.id);
 	}
@@ -1125,8 +1129,8 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			                                                     vertex_count)));
 			// GS adjacency addresses local ES records in LDS. Strip winding alternates
 			// with the global primitive number, including across subgroup boundaries.
-			const auto parity = mesh.input_primitive ==
-			                            static_cast<uint32_t>(Prospero::PrimitiveType::kTriStrip)
+			const auto parity =
+			    mesh.input_primitive == static_cast<uint32_t>(Prospero::PrimitiveType::kTriStrip)
 			                        ? entry_ir.BitwiseAnd(entry_ir.IAdd(primitive_chunk, local), u32(1))
 			                        : u32(0);
 			const auto vertex = entry_ir.IMul(local, step);
@@ -1134,9 +1138,8 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			const auto second = mesh.InputPrimitiveSize() == 3u
 			                        ? entry_ir.ISub(entry_ir.IAdd(vertex, u32(1)), parity)
 			                        : u32(0);
-			const auto third = mesh.InputPrimitiveSize() == 3u
-			                       ? entry_ir.IAdd(vertex, u32(2))
-			                       : u32(0);
+			const auto third =
+			    mesh.InputPrimitiveSize() == 3u ? entry_ir.IAdd(vertex, u32(2)) : u32(0);
 			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(0),
 			                      entry_ir.BitwiseOr(entry_ir.ShiftLeftLogical(first, u32(2)),
 			                                         entry_ir.ShiftLeftLogical(second, u32(18))));
@@ -1148,13 +1151,13 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			const auto index_low    = draw(4);
 			const auto byte_offset  = entry_ir.IAdd(entry_ir.BitwiseAnd(index_low, u32(3)),
 			                                           entry_ir.IMul(input_vertex, index_bytes));
-			const auto index_resource = entry_ir.Emit(
-			    IR::ValueOpcode::GetAddressResource,
+			const auto index_resource =
+			    entry_ir.Emit(IR::ValueOpcode::GetAddressResource,
 			    {entry_ir.BitwiseAnd(index_low, u32(~3u)), draw(5)});
 			const auto memory_index = static_cast<uint32_t>(result.memory_info.size());
 			result.memory_info.push_back({.kind = IR::ResourceKind::Global});
-			const auto packed_index = entry_ir.Emit(
-			    IR::ValueOpcode::LoadAddressU32,
+			const auto packed_index =
+			    entry_ir.Emit(IR::ValueOpcode::LoadAddressU32,
 			    {index_resource, entry_ir.BitwiseAnd(byte_offset, u32(~3u)), u32(0),
 			     entry_ir.LogicalAnd(indexed, entry_ir.ULessThan(local, vertices))},
 			    IR::MemoryFlags {.index = memory_index});
@@ -1162,7 +1165,8 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			    IR::ValueOpcode::BitFieldUExtract,
 			    {packed_index, entry_ir.IMul(entry_ir.BitwiseAnd(byte_offset, u32(3)), u32(8)),
 			     entry_ir.IMul(index_bytes, u32(8))}));
-			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(5),
+			entry_ir.SetVectorReg(
+			    static_cast<IR::VectorReg>(5),
 			                      entry_ir.IAdd(draw(1), entry_ir.Select(indexed, index, input_vertex)));
 			entry_ir.SetVectorReg(
 			    static_cast<IR::VectorReg>(8),
@@ -1190,10 +1194,10 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 				                      builtin(IR::StageInputKind::FragCoord, 2));
 			}
 			if (ps->ps_pos_w) {
-				const auto reciprocal_w = entry_ir.BitCastF32(builtin(IR::StageInputKind::FragCoord, 3));
+				const auto reciprocal_w =
+				    entry_ir.BitCastF32(builtin(IR::StageInputKind::FragCoord, 3));
 				const auto w = IR::F32(entry_ir.Emit(IR::ValueOpcode::FPRecip32, {reciprocal_w}));
-				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(reg++),
-				                      entry_ir.BitCastU32(w));
+				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(reg++), entry_ir.BitCastU32(w));
 			}
 			if (ps->ps_front_face) {
 				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(reg++),

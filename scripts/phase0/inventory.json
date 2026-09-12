@@ -15,5 +15,6 @@
   "phase1": ["phase1_imports", "phase1_paths", "phase1_tls", "phase1_executables", "phase1_native_state", "phase1_patching", "phase1_load_rollback", "phase1_modules", "phase1_strong_data", "phase1_legacy_plt"],
   "phase2": ["phase2_kernel", "phase2_kernel_stress"],
   "phase3": ["phase3_completion", "phase3_ownership", "phase3_flip_boundary", "phase3_packet_bounds"],
-  "phase4a": ["phase4a_wave_contracts", "phase4a_wave_regressions", "phase4a_wave_contracts_32", "phase4a_wave_regressions_32"]
+  "phase4a": ["phase4a_wave_contracts", "phase4a_wave_regressions", "phase4a_wave_contracts_32", "phase4a_wave_regressions_32"],
+  "phase4": ["phase4_shader_corpus", "phase4_shader_corpus_32", "phase4_indirect_images"]
 }

@@ -12,6 +12,32 @@ Decoder::Operand ConditionOperand(Decoder::OperandKind kind) {
 
 } // namespace
 
+// Adapted from KytyPS5 c913951f7b; AMD RDNA2 ISA section 12.2.
+void Translator::S_SUBVECTOR_LOOP(const Decoder::Instruction& inst, bool begin) {
+	const auto zero  = IR::U32(IR::Value(0u));
+	const auto lo    = ir.GetExecLo();
+	const auto hi    = ir.GetExecHi();
+	const auto saved = ReadU32(inst.dst);
+	if (begin) {
+		const auto low_active        = ir.INotEqual(lo, zero);
+		instruction_branch_condition = ir.IEqual(ir.BitwiseOr(lo, hi), zero);
+		WriteRawU32(inst.dst,
+		            ir.Select(instruction_branch_condition, saved, ir.Select(low_active, hi, lo)));
+		WriteRawU32(ConditionOperand(Decoder::OperandKind::ExecHi),
+		            ir.Select(low_active, zero, ir.GetExecHi()));
+	} else {
+		const auto high_active = ir.INotEqual(hi, zero);
+		instruction_branch_condition =
+		    ir.LogicalAnd(ir.LogicalNot(high_active), ir.INotEqual(saved, zero));
+		WriteRawU32(ConditionOperand(Decoder::OperandKind::ExecHi),
+		            ir.Select(instruction_branch_condition, saved, hi));
+		WriteRawU32(inst.dst, ir.Select(instruction_branch_condition, lo, ReadU32(inst.dst)));
+		WriteRawU32(ConditionOperand(Decoder::OperandKind::ExecLo),
+		            ir.Select(high_active, saved,
+		                      ir.Select(instruction_branch_condition, zero, ir.GetExecLo())));
+	}
+}
+
 void Translator::S_SAVEEXEC(const Decoder::Instruction& inst, IR::ValueOpcode operation,
                             bool negate_exec, bool negate_source, bool write_64) {
 	// SAVEEXEC is scalar arithmetic, even with EXEC=0 or a partial wave.
@@ -204,8 +230,8 @@ void Translator::ScalarSelect64(const Decoder::Instruction& inst,
 	const auto condition     = ir.GetScc();
 	const auto lhs           = ReadU32Pair(inst.src0);
 	const auto rhs           = ReadU32Pair(false_source);
-	const auto selected_mask = IR::U1(
-	    ir.Emit(IR::ValueOpcode::SelectU1, {condition, ReadMask(inst.src0), ReadMask(false_source)}));
+	const auto selected_mask = IR::U1(ir.Emit(
+	    IR::ValueOpcode::SelectU1, {condition, ReadMask(inst.src0), ReadMask(false_source)}));
 	const auto selected_mask_valid =
 	    IR::U1(ir.Emit(IR::ValueOpcode::SelectU1,
 	                   {condition, ReadMaskValid(inst.src0), ReadMaskValid(false_source)}));
@@ -235,8 +261,8 @@ void Translator::S_MOV_B64(const Decoder::Instruction& inst) {
 	if (mask_source) {
 		// A full VCC copy carries its predicate even in wave32; ReadMask also handles
 		// individual 32-bit VCC halves, which cannot preserve that provenance.
-		source_mask = inst.src0.kind == Decoder::OperandKind::VccLo ? ir.GetVcc()
-		                                                          : ReadMask(inst.src0);
+		source_mask =
+		    inst.src0.kind == Decoder::OperandKind::VccLo ? ir.GetVcc() : ReadMask(inst.src0);
 		source_mask_valid = ReadMaskValid(inst.src0);
 	}
 	// Preserve all 64 scalar bits independently of the per-thread predicate.

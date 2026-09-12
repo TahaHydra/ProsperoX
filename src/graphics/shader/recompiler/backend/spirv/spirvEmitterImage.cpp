@@ -716,36 +716,50 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		} else if (dref) {
 			opcode = OpImageSampleDrefImplicitLod;
 		}
-		uint32_t result_type = ImageVectorType(state, numeric_class, 4);
-		uint32_t dref_value  = 0;
-		if (dref) {
-			result_type = TypeF32(state);
-			dref_value  = ZeroF32(state);
-			if (layout.dref != NoImageComponent) {
-				dref_value = AddressF32(ctx, mem, *address, layout.dref);
-			}
-		}
-		uint32_t              operand_mask = 0;
-		std::vector<uint32_t> operands;
-		if (HasFlag(mem, Decoder::ImageSampleFlagDerivative)) {
-			operand_mask |= ImageOperandsGradMask;
-			operands.push_back(
-			    CoordF32(ctx, mem, *address, layout.grad_x, dimension_info.spatial_components));
-			operands.push_back(
-			    CoordF32(ctx, mem, *address, layout.grad_y, dimension_info.spatial_components));
-		} else if (explicit_lod) {
-			operand_mask |= ImageOperandsLodMask;
-			auto lod = ZeroF32(state);
-			if (HasFlag(mem, Decoder::ImageSampleFlagLod) && layout.lod != NoImageComponent) {
-				lod = AddressF32(ctx, mem, *address, layout.lod);
-			}
-			operands.push_back(lod);
-		} else if (layout.bias != NoImageComponent) {
-			operand_mask |= ImageOperandsBiasMask;
-			operands.push_back(AddressF32(ctx, mem, *address, layout.bias));
-		}
+		// Adapted from KytyPS5 PR #383: type each selected image operation
+		// independently and merge architectural register bits, not image types.
 		const auto EmitSample = [&](uint32_t resource) {
-			const auto            sampled = MakeSampledImage(state, resource, mem.sampler);
+			auto selected         = mem;
+			selected.resource     = resource;
+			const auto& candidate = state.program.info.images[resource];
+			if ((candidate.conversion_format != Prospero::BufferFormat::kInvalid ||
+			     candidate.numeric_class == Prospero::TextureNumericClass::Sint) &&
+			    mem.point_sampler != UINT32_MAX)
+				selected.sampler = mem.point_sampler;
+			const auto  numeric_class  = candidate.numeric_class;
+			const auto& dimension_info = ImageDimensionInfoFor(candidate.dimension);
+			const auto  layout         = Layout(selected, candidate.dimension);
+			const auto  coord          = CoordF32(ctx, selected, *address, layout.coord,
+			                                      dimension_info.coordinate_components);
+			uint32_t    result_type    = ImageVectorType(state, numeric_class, 4);
+			uint32_t    dref_value     = 0;
+			if (dref) {
+				result_type = TypeF32(state);
+				dref_value  = ZeroF32(state);
+				if (layout.dref != NoImageComponent) {
+					dref_value = AddressF32(ctx, mem, *address, layout.dref);
+				}
+			}
+			uint32_t              operand_mask = 0;
+			std::vector<uint32_t> operands;
+			if (HasFlag(mem, Decoder::ImageSampleFlagDerivative)) {
+				operand_mask |= ImageOperandsGradMask;
+				operands.push_back(
+				    CoordF32(ctx, mem, *address, layout.grad_x, dimension_info.spatial_components));
+				operands.push_back(
+				    CoordF32(ctx, mem, *address, layout.grad_y, dimension_info.spatial_components));
+			} else if (explicit_lod) {
+				operand_mask |= ImageOperandsLodMask;
+				auto lod = ZeroF32(state);
+				if (HasFlag(mem, Decoder::ImageSampleFlagLod) && layout.lod != NoImageComponent) {
+					lod = AddressF32(ctx, mem, *address, layout.lod);
+				}
+				operands.push_back(lod);
+			} else if (layout.bias != NoImageComponent) {
+				operand_mask |= ImageOperandsBiasMask;
+				operands.push_back(AddressF32(ctx, mem, *address, layout.bias));
+			}
+			const auto            sampled = MakeSampledImage(state, resource, selected.sampler);
 			const auto            sample  = state.builder.AllocateId();
 			std::vector<uint32_t> words {opcode, result_type, sample, sampled, coord};
 			if (dref) {
@@ -756,15 +770,11 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				words.insert(words.end(), operands.begin(), operands.end());
 			}
 			state.builder.AddFunction(words);
-			return sample;
+			return ResultVector(ctx, dref ? sample : UnpackImageTexel(ctx, selected, sample),
+			                    numeric_class, dref, selected);
 		};
 		if (image.indirect_root != mem.resource) {
-			const auto sample = EmitSample(mem.resource);
-			auto       result = sample;
-			if (!dref) {
-				result = UnpackImageTexel(ctx, mem, sample);
-			}
-			ctx.Define(inst, ResultVector(ctx, result, numeric_class, dref, mem));
+			ctx.Define(inst, EmitSample(mem.resource));
 			return true;
 		}
 		const auto* handle = image_arg.ResolveInstruction();
@@ -795,8 +805,7 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		auto       low      = ConstantU32(state, 0u);
 		auto       high     = LoadMapping(mapping);
 		auto       selected = ConstantU32(state, 0u);
-		for (uint32_t iteration = 0; iteration < image.indirect_search_iterations;
-		     iteration++) {
+		for (uint32_t iteration = 0; iteration < image.indirect_search_iterations; iteration++) {
 			const auto active = Binary(state, OpULessThan, TypeBool(state), low, high);
 			const auto mid =
 			    Binary(state, OpShiftRightLogical, TypeU32(state),
@@ -842,7 +851,8 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		}
 		state.builder.AddFunction({OpSelectionMerge, merge_label, SelectionControlNone});
 		state.builder.AddFunction(switch_words);
-		std::vector<uint32_t> phi_words {OpPhi, result_type, state.builder.AllocateId()};
+		std::vector<uint32_t> phi_words {OpPhi, TypeU32Vector(state, 4),
+		                                 state.builder.AllocateId()};
 		EmitLabel(state, default_label);
 		phi_words.push_back(EmitSample(image.indirect_resources[0]));
 		phi_words.push_back(default_label);
@@ -855,11 +865,7 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		}
 		EmitLabel(state, merge_label);
 		state.builder.AddFunction(phi_words);
-		auto result = phi_words[2];
-		if (!dref) {
-			result = UnpackImageTexel(ctx, mem, result);
-		}
-		ctx.Define(inst, ResultVector(ctx, result, numeric_class, dref, mem));
+		ctx.Define(inst, phi_words[2]);
 		return true;
 	}
 	const auto atomic_opcode = ImageAtomicOpcode(op);

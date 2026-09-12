@@ -291,7 +291,7 @@ public:
 
 	void                 Create();
 	void                 Recreate(bool surface_lost = false);
-	[[nodiscard]] Status AcquireNextImage();
+	[[nodiscard]] Status AcquireNextImage(CommandScheduler& scheduler);
 	[[nodiscard]] bool   PrepareSystemOverlay();
 	void                 RecordPresentCommands(CommandBuffer& command, VulkanImage& source,
 	                                           bool draw_system_overlay);
@@ -314,6 +314,9 @@ private:
 	std::vector<vk::ImageView>  m_image_views;
 	std::vector<vk::Semaphore>  m_image_acquired;
 	std::vector<vk::Semaphore>  m_render_complete;
+	std::vector<uint64_t> m_acquire_ticks;
+	std::vector<vk::Fence> m_present_fences;
+	std::vector<bool> m_present_pending;
 	std::unique_ptr<SystemOverlay> m_system_overlay;
 	uint32_t                    m_image_index = static_cast<uint32_t>(-1);
 	uint32_t                    m_frame_index = 0;
@@ -477,6 +480,9 @@ void Swapchain::Create() {
 	semaphore_info.sType = vk::StructureType::eSemaphoreCreateInfo;
 	m_image_acquired.resize(m_images.size());
 	m_render_complete.resize(m_images.size());
+	m_acquire_ticks.assign(m_images.size(), 0);
+	m_present_pending.assign(m_images.size(), false);
+	if (graphics.swapchain_maintenance_enabled) m_present_fences.resize(m_images.size());
 	for (size_t i = 0; i < m_images.size(); i++) {
 		RequireVulkanSuccess(
 		    graphics.device.createSemaphore(&semaphore_info, nullptr, &m_image_acquired[i]),
@@ -484,6 +490,11 @@ void Swapchain::Create() {
 		RequireVulkanSuccess(
 		    graphics.device.createSemaphore(&semaphore_info, nullptr, &m_render_complete[i]),
 		    "create swapchain render-complete semaphore");
+		if (graphics.swapchain_maintenance_enabled) {
+			vk::FenceCreateInfo fence {};
+			RequireVulkanSuccess(graphics.device.createFence(&fence, nullptr, &m_present_fences[i]),
+			                     "create presentation completion fence");
+		}
 	}
 	m_image_index = static_cast<uint32_t>(-1);
 	m_frame_index = 0;
@@ -500,6 +511,13 @@ void Swapchain::Destroy() {
 	}
 	auto& graphics = m_window.graphic_ctx;
 
+	// Queue-idle alone does not prove that the presentation engine released a swapchain.
+	for (size_t i = 0; i < m_present_fences.size(); ++i) {
+		if (m_present_pending[i]) {
+			RequireVulkanSuccess(graphics.device.waitForFences(1, &m_present_fences[i], true, UINT64_MAX),
+			                     "wait for presentation engine retirement");
+		}
+	}
 	{
 		Common::LockGuard queue_lock(graphics.queue_mutex);
 		RequireVulkanSuccess(graphics.queue.waitIdle(), "wait for swapchain queue");
@@ -536,6 +554,8 @@ void Swapchain::Destroy() {
 	m_image_views.clear();
 	m_image_acquired.clear();
 	m_render_complete.clear();
+	for (const auto fence : m_present_fences) graphics.device.destroyFence(fence, nullptr);
+	m_present_fences.clear(); m_present_pending.clear(); m_acquire_ticks.clear();
 }
 
 void Swapchain::Recreate(bool surface_lost) {
@@ -553,8 +573,10 @@ void Swapchain::Recreate(bool surface_lost) {
 	Create();
 }
 
-Swapchain::Status Swapchain::AcquireNextImage() {
+Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
+	// This semaphore is indexed by CPU slot, independent of the prepared-frame pool order.
+	scheduler.Wait(m_acquire_ticks[m_frame_index]);
 	m_image_index     = static_cast<uint32_t>(-1);
 	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
 	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
@@ -563,7 +585,7 @@ Swapchain::Status Swapchain::AcquireNextImage() {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eSuboptimalKHR:
 			LOGF("vkAcquireNextImageKHR returned vk::Result::eSuboptimalKHR\n");
-			return Status::Recreate;
+			break; // Suboptimal acquisition succeeded: consume its semaphore and present it.
 		case vk::Result::eErrorOutOfDateKHR:
 			LOGF("vkAcquireNextImageKHR returned vk::Result::eErrorOutOfDateKHR\n");
 			return Status::Recreate;
@@ -672,7 +694,9 @@ uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
 	SubmitInfo submit;
 	submit.AddWait(m_image_acquired[m_frame_index], 1, vk::PipelineStageFlagBits::eTransfer);
 	submit.AddSignal(m_render_complete[m_image_index]);
-	return scheduler.Submit(submit);
+	const auto tick = scheduler.Submit(submit);
+	m_acquire_ticks[m_frame_index] = tick;
+	return tick;
 }
 
 Swapchain::Status Swapchain::Present() {
@@ -685,12 +709,24 @@ Swapchain::Status Swapchain::Present() {
 	present.pImageIndices      = &m_image_index;
 	present.pWaitSemaphores    = &ready;
 	present.waitSemaphoreCount = 1;
+	vk::SwapchainPresentFenceInfoEXT fences {};
+	if (!m_present_fences.empty()) {
+		auto& device = m_window.graphic_ctx.device;
+		auto& fence = m_present_fences[m_image_index];
+		if (m_present_pending[m_image_index]) {
+			RequireVulkanSuccess(device.waitForFences(1, &fence, true, UINT64_MAX), "reuse present fence");
+			RequireVulkanSuccess(device.resetFences(1, &fence), "reset present fence");
+		}
+		fences.swapchainCount = 1; fences.pFences = &fence;
+		present.pNext = &fences;
+	}
 
 	vk::Result result;
 	{
 		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
 		result = m_window.graphic_ctx.queue.presentKHR(&present);
 	}
+	if (!m_present_fences.empty()) m_present_pending[m_image_index] = true;
 	switch (result) {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eSuboptimalKHR:
@@ -775,11 +811,17 @@ RenderContext& Presenter::Renderer() const noexcept {
 void Presenter::Present(Frame& frame, bool reuse) {
 	KYTY_PROFILER_FUNCTION();
 	m_impl->frames.ValidateForPresent(&frame, reuse);
+	// A minimized Win32 surface can have zero extent. Drop this presentation request;
+	// guest flip retirement is still allowed and the last frame remains available on restore.
+	if (SDL_GetWindowFlags(m_impl->window.window) & SDL_WINDOW_MINIMIZED) {
+		m_impl->frames.Release(&frame, true);
+		return;
+	}
 
 	const auto overlay_visual = GetSystemOverlayVisualState();
 	auto&      swapchain  = m_impl->swapchain;
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
-		auto status = swapchain.AcquireNextImage();
+		auto status = swapchain.AcquireNextImage(m_impl->present_scheduler);
 		if (status != Swapchain::Status::Success) {
 			m_impl->RecoverSwapchain(status);
 			continue;

@@ -1,6 +1,5 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
-
 #include "common/assert.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
 #include <algorithm>
 #include <bit>
@@ -447,6 +446,19 @@ uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
 	    {OpGroupNonUniformBallot, ballot_type, low, scope,
 	     other_half == nullptr || half == 0 ? Def(predicate) : other_half->Def(predicate)});
 	if (other_half == nullptr) {
+		if (program.wave_size == 32u) {
+			const auto word_index =
+			    EmitBinaryU32(state, OpShiftRightLogical, EmitHostSubgroupLocalInvocationId(state),
+			                  ConstantU32(state, 5));
+			const auto word   = state.builder.AllocateId();
+			const auto ballot = state.builder.AllocateId();
+			state.builder.AddFunction(
+			    {OpVectorExtractDynamic, TypeU32(state), word, low, word_index});
+			state.builder.AddFunction({OpCompositeConstruct, ballot_type, ballot, word,
+			                           ConstantU32(state, 0), ConstantU32(state, 0),
+			                           ConstantU32(state, 0)});
+			return ballot;
+		}
 		return low;
 	}
 	const auto high      = state.builder.AllocateId();
@@ -493,6 +505,13 @@ uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t 
 	const auto scope = ConstantU32(state, ScopeSubgroup);
 	const auto low   = state.builder.AllocateId();
 	if (other_half == nullptr) {
+		if (program.wave_size == 32u) {
+			const auto base =
+			    EmitBinaryU32(state, OpBitwiseAnd, EmitHostSubgroupLocalInvocationId(state),
+			                  ConstantU32(state, ~31u));
+			lane = EmitBinaryU32(state, OpBitwiseOr, base,
+			                     EmitBinaryU32(state, OpBitwiseAnd, lane, ConstantU32(state, 31)));
+		}
 		state.builder.AddFunction(
 		    {OpGroupNonUniformShuffle, type, low, scope, Arg(inst, index), lane});
 		return low;
@@ -569,8 +588,8 @@ uint32_t ValueEmitContext::Label(const IR::Block* block) const {
 }
 
 [[noreturn]] void ValueEmitContext::Fail(const char* reason) const {
-	EXIT("SPIR-V emission failed: hash=0x%016" PRIx64 " stage=%u reason=%s\n",
-	     program.shader_hash, static_cast<unsigned>(program.stage), reason);
+	EXIT("SPIR-V emission failed: hash=0x%016" PRIx64 " stage=%u reason=%s\n", program.shader_hash,
+	     static_cast<unsigned>(program.stage), reason);
 	std::abort();
 }
 

@@ -179,6 +179,39 @@ uint64_t ScalarBufferSize(const ShaderBufferResource& descriptor) {
 	           : static_cast<uint64_t>(descriptor.Stride()) * descriptor.NumRecords();
 }
 
+// A CPU-enumerated key domain must remain read-only during this dispatch.
+// Unknown address/image aliases need a runtime descriptor implementation.
+bool IndirectTablesAreReadOnly(const ResourcePlan& program, const ResourceSnapshot& snapshot,
+                               const std::vector<DescriptorValue>& tables) {
+	if (program.info.uses_dma || std::ranges::any_of(program.info.images, [](const auto& image) {
+		    return image.written || image.atomic;
+	    })) {
+		return SpecializationFail(
+		    "indirect image tables with unbounded address/image aliases are unsupported");
+	}
+	for (const auto& value: tables) {
+		ShaderBufferResource table;
+		if (!DecodeBufferDescriptor(value, table)) return false;
+		const auto begin = table.Base48() & ~uint64_t {3};
+		const auto size  = ScalarBufferSize(table);
+		for (size_t i = 0; i < program.info.buffers.size(); ++i) {
+			const auto& usage = program.info.buffers[i];
+			if (!usage.written && !usage.atomic) continue;
+			ShaderBufferResource buffer;
+			if (!DecodeBufferDescriptor(snapshot.buffers[i], buffer)) return false;
+			if (buffer.SwizzleEnabled()) {
+				return SpecializationFail("indirect image tables with swizzled writable buffers are unsupported");
+			}
+			const auto other  = buffer.Base48() & ~uint64_t {3};
+			const auto extent = ScalarBufferSize(buffer) + usage.max_byte_extent;
+			if (size && extent && begin < other + extent && other < begin + size) {
+				return SpecializationFail("indirect image table overlaps a writable buffer");
+			}
+		}
+	}
+	return true;
+}
+
 bool ReadSpecializationWord(const SrtRuntime& runtime, uint64_t address, uint32_t& word) {
 	return runtime.read_specialization_memory != nullptr &&
 	       runtime.read_specialization_memory(runtime.userdata, address, &word);
@@ -262,12 +295,15 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 				return false;
 			}
 		}
-		if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128)) {
+		if (NullImageDescriptor(candidate)) {
 			candidate.dwords.fill(0);
+		} else if (!ValidImageDescriptor(candidate, r128)) {
+			return SpecializationFail(
+			    "non-null indirect image descriptor is invalid; refusing null substitution");
 		}
 		const auto found = std::ranges::find(next.descriptors, candidate);
 		if (found == next.descriptors.end()) {
-			if (next.descriptors.size() >= ShaderInfo::MaxImages) {
+			if (next.descriptors.size() >= std::min(runtime.max_images, ShaderInfo::MaxImages)) {
 				return false;
 			}
 			next.descriptors.push_back(candidate);
@@ -333,6 +369,7 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 				return false;
 			}
 			const auto&   material = tables[0];
+			if (!IndirectTablesAreReadOnly(program, next, tables)) return false;
 			const auto&   heap     = tables[1];
 			IndirectImage table;
 			if (!MaterializeIndirectImage(*source->indirect_image, material, heap, image.r128,
@@ -388,16 +425,18 @@ template <typename Images>
 bool BuildSamplerPlan(const ShaderInfo& base, const Images& images, SamplerPlan& plan);
 
 static bool BuildResourceSpecialization(const ResourcePlan& program, MaterializedSnapshot snapshot,
-                                        ResourceSnapshot&       specialized_snapshot,
+                                        uint32_t max_images, ResourceSnapshot& specialized_snapshot,
                                         ResourceSpecialization& specialization) {
 	auto                   next_snapshot = std::move(snapshot.resources);
 	ResourceSpecialization next_specialization;
 	next_specialization.buffers.reserve(program.info.buffers.size());
 	size_t image_count   = program.info.images.size();
+	if (image_count > max_images)
+		return SpecializationFail("image count exceeds host descriptor limit");
 	size_t mapping_words = 0;
 	for (const auto& table: snapshot.indirect_images) {
 		if (table.resource >= program.info.images.size() || table.descriptors.size() < 2u ||
-		    image_count + table.descriptors.size() - 1u > ShaderInfo::MaxImages) {
+		    image_count + table.descriptors.size() - 1u > max_images) {
 			return SpecializationFail(
 			    "indirect image candidates exceed the dense image resource limit");
 		}
@@ -594,12 +633,15 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 				image.shader_swizzle    = image_class.shader_swizzle;
 				image.cube              = image_class.cube;
 			}
-			if (image.numeric_class != image_class.numeric_class ||
+			// Sampled candidates are emitted with their own type and address layout,
+			// then merged as guest register bits. Storage remains homogeneous.
+			if (program.info.images[root_index].resource_class != ImageResourceClass::Sampled &&
+			    (image.numeric_class != image_class.numeric_class ||
 			    image.dimension != image_class.dimension ||
 			    image.mip_count != image_class.mip_count ||
 			    image.conversion_format != image_class.conversion_format ||
 			    image.shader_swizzle != image_class.shader_swizzle ||
-			    image.cube != image_class.cube) {
+			     image.cube != image_class.cube)) {
 				return SpecializationFail(
 				    fmt::format("indirect image table at pc 0x{:08x} has incompatible candidates",
 				                program.info.images[root_index].first_use_pc));
@@ -623,6 +665,17 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 }
 
 template <typename Images>
+uint8_t ImageSamplerUsage(const Images& images, uint32_t root) {
+	uint8_t usage = RequiresPointSampler(images[root]) ? 2u : 1u;
+	if (images[root].indirect_root == root) {
+		for (const auto& image: images) {
+			if (image.indirect_root == root) usage |= RequiresPointSampler(image) ? 2u : 1u;
+		}
+	}
+	return usage;
+}
+
+template <typename Images>
 bool BuildSamplerPlan(const ShaderInfo& base, const Images& images, SamplerPlan& plan) {
 	if (base.samplers.size() > plan.point_sampler.size()) {
 		return false;
@@ -634,7 +687,7 @@ bool BuildSamplerPlan(const ShaderInfo& base, const Images& images, SamplerPlan&
 		if (pair.image >= images.size() || pair.sampler >= base.samplers.size()) {
 			return false;
 		}
-		usage[pair.sampler] |= RequiresPointSampler(images[pair.image]) ? 2u : 1u;
+		usage[pair.sampler] |= ImageSamplerUsage(images, pair.image);
 	}
 	for (uint32_t index = 0; index < base.samplers.size(); index++) {
 		if ((usage[index] & 2u) == 0u) {
@@ -815,7 +868,8 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 		if (program.info.images.size() != 1 || memory.dmask != 1 || memory.data_bits != 32 ||
 		    memory.image_has_mip || memory.image_sample_flags != 0 || memory.image_r128 ||
 		    memory.image_dimension != Decoder::ImageDimension::Dim2DArray ||
-		    store->Arg(3).Resolve() != Value(true)) return {};
+		    store->Arg(3).Resolve() != Value(true))
+			return {};
 		const auto& image = program.info.images[memory.resource];
 		if (image.read || image.atomic || image.mip_mode != ImageMipMode::None) return {};
 		const auto* address = store->Arg(1).ResolveInstruction();
@@ -845,8 +899,8 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 		if (store_op == stores.end() || store->Arg(2).Resolve() != Value(0u) ||
 		    store->Arg(3).Resolve() != Value(0u) || store->Arg(5).Resolve() != Value(true))
 			return {};
-		if (!memory.formatted || memory.typed || !memory.idxen || memory.offen || memory.offset != 0 ||
-		    memory.data_bits != 32 ||
+		if (!memory.formatted || memory.typed || !memory.idxen || memory.offen ||
+		    memory.offset != 0 || memory.data_bits != 32 ||
 		    memory.data_dwords != static_cast<uint32_t>(store_op - stores.begin() + 1))
 			return {};
 		const auto address = FillIndex(store->Arg(1), 0);
@@ -973,7 +1027,9 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	if (!MaterializeSnapshot(program, runtime, materialized)) {
 		return false;
 	}
-	return BuildResourceSpecialization(program, std::move(materialized), snapshot, specialization);
+	return BuildResourceSpecialization(program, std::move(materialized),
+	                                   std::min(runtime.max_images, ShaderInfo::MaxImages),
+	                                   snapshot, specialization);
 }
 
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
@@ -1036,7 +1092,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		}
 	}
 	for (auto& pair: sampled_pairs) {
-		if (RequiresPointSampler(images[pair.image])) {
+		if (ImageSamplerUsage(images, pair.image) == 2u) {
 			EXIT_IF(sampler_plan.point_sampler[pair.sampler] == UINT32_MAX);
 			pair.sampler = sampler_plan.point_sampler[pair.sampler];
 		}
@@ -1064,20 +1120,26 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 				constexpr uint32_t indices[] = {0x76543210u, 0xfedcba98u};
 				std::array<Value, 2> fragments;
 				for (uint32_t component = 0; component < fragments.size(); component++) {
-					const auto selected = block->PrependNewInst(
-					    it, ValueOpcode::SelectU32, {inst.Arg(2), Value(indices[component]), Value(0u)});
+					const auto selected =
+					    block->PrependNewInst(it, ValueOpcode::SelectU32,
+					                          {inst.Arg(2), Value(indices[component]), Value(0u)});
 					fragments[component] = Value(&*selected);
 				}
-				const auto result = block->PrependNewInst(
-				    it, ValueOpcode::CompositeConstructU32x4,
+				const auto result =
+				    block->PrependNewInst(it, ValueOpcode::CompositeConstructU32x4,
 				    {fragments[0], fragments[1], Value(0u), Value(0u)});
 				inst.ReplaceUsesWith(Value(&*result));
 				continue;
 			}
-			if (image_opcode.needs_sampler && RequiresPointSampler(image) &&
-			    memory.sampler < program.info.samplers.size()) {
+			if (image_opcode.needs_sampler && memory.sampler < program.info.samplers.size()) {
+				const auto usage = ImageSamplerUsage(images, memory.resource);
+				if ((usage & 2u) != 0u) {
 				EXIT_IF(sampler_plan.point_sampler[memory.sampler] == UINT32_MAX);
+					if (usage == 2u)
 				memory.sampler = sampler_plan.point_sampler[memory.sampler];
+					else
+						memory.point_sampler = sampler_plan.point_sampler[memory.sampler];
+				}
 			}
 			EXIT_IF(image.indirect_root == memory.resource &&
 			        inst.GetOpcode() != ValueOpcode::ImageSampleRaw);

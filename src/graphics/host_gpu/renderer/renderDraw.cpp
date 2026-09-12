@@ -544,13 +544,29 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		    !cache.ClearMeta(metadata.range.address)) {
 			EXIT("failed to acquire HTile metadata for a depth clear\n");
 		}
-		depth.depth_meta_clear_enable =
-		    metadata.kind == ImageMetadataKind::Htile &&
-		    cache.IsMetaCleared(metadata.range.address, depth.desc.view_info.base_layer);
-		depth.depth_load_clear_enable = depth.depth_clear_enable || depth.depth_meta_clear_enable;
-		if (depth.depth_meta_clear_enable &&
-		    !cache.TouchMeta(metadata.range.address, depth.desc.view_info.base_layer, false)) {
-			EXIT("failed to consume HTile clear state\n");
+		std::vector<uint32_t> pending_depth_layers;
+		const auto& depth_view = depth.desc.view_info;
+		if (metadata.kind == ImageMetadataKind::Htile) {
+			for (uint32_t layer = depth_view.base_layer; layer < depth_view.base_layer + depth_view.layer_count; ++layer) {
+				if (cache.IsMetaCleared(metadata.range.address, layer)) pending_depth_layers.push_back(layer);
+			}
+		}
+		depth.depth_meta_clear_enable = !pending_depth_layers.empty();
+		depth.depth_load_clear_enable = depth.depth_clear_enable ||
+		    pending_depth_layers.size() == depth_view.layer_count;
+		for (const auto layer : pending_depth_layers) {
+			if (!depth.depth_load_clear_enable) {
+				// LOAD_OP_CLEAR affects the entire attachment. Mixed pending/rendered layers
+				// need explicit subresource clears to retain already rendered depth.
+				vk::ClearValue clear {};
+				clear.depthStencil.depth = depth.depth_clear_value;
+				std::scoped_lock lock(cache.m_lock);
+				cache.ClearImage(buffer, depth.image_id,
+				    {vk::ImageAspectFlagBits::eDepth, depth_view.base_level, depth_view.level_count, layer, 1}, clear);
+			}
+			if (!cache.TouchMeta(metadata.range.address, layer, false)) {
+				EXIT("failed to consume HTile clear state\n");
+			}
 		}
 		auto& image = cache.GetImage(depth.image_id);
 		SetVulkanObjectNameF(m_context.GetGraphics().device, image.backing.image,

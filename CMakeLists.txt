@@ -488,6 +488,7 @@ target_link_libraries(image_page_table_tests common fmt::fmt)
 target_include_directories(image_page_table_tests PRIVATE ${inc_headers})
 
 add_kyty_full_emulator_test(shader_recompiler_compute_tests "${KYTY_TESTS_DIR}/ShaderRecompilerComputeTests.cpp")
+add_kyty_full_emulator_test(phase5_presentation_tests "${KYTY_TESTS_DIR}/Phase5PresentationTests.cpp")
 
 set(gpu_test_generated_dir "${PROJECT_BINARY_DIR}/gpu_test_shaders")
 set(gpu_test_ms_depth_source
@@ -549,6 +550,9 @@ if(BUILD_TESTING)
 	add_test(NAME phase0_eop_visibility COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase0-eop)
 	add_test(NAME phase3_completion COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase3-completion)
 	add_test(NAME phase4a_wave_contracts COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase4a-contracts)
+	add_test(NAME phase4_shader_corpus COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase4-corpus)
+	add_test(NAME phase4_shader_corpus_32 COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase4-corpus-32)
+	add_test(NAME phase4_indirect_images COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase4-images)
 	add_test(NAME phase4a_wave_regressions COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --wave64-only)
 	add_test(NAME phase4a_wave_contracts_32 COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase4a-contracts-32)
 	add_test(NAME phase4a_wave_regressions_32 COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase4a-regressions-32)
@@ -606,6 +610,14 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --storage-sampled-only)
 	add_test(NAME texture_cache_depth_readback
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --depth-readback-only)
+	add_test(NAME phase5_image_cpu_readback
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --image-cpu-readback-only)
+	add_test(NAME phase5_presentation
+		COMMAND $<TARGET_FILE:phase5_presentation_tests> 10)
+	add_test(NAME phase5_private_buffer_upload
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --private-buffer-upload-only)
+	add_test(NAME phase5_dcc_slice_range
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --dcc-slice-range-only)
 	add_test(NAME compute_meta_clear_classification
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --compute-meta-clear-only)
 	add_test(NAME buffer_cache_dirty_gc

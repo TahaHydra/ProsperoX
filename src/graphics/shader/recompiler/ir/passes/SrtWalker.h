@@ -17,6 +17,9 @@ struct SrtRuntime {
 	SrtMemoryReader           read_memory                = nullptr;
 	void*                     userdata                   = nullptr;
 	SrtMemoryReader           read_specialization_memory = nullptr;
+	// Standalone tools use a bounded test budget, not a Vulkan minimum guarantee.
+	// GPU callers supply the physical device's per-stage/set limit.
+	uint32_t max_images = 128;
 };
 
 enum class RuntimeValueType { Any, Integer };
@@ -44,8 +47,7 @@ bool EvaluateRuntimeSources(const ResourcePlan& program, std::span<const uint32_
                             std::vector<uint32_t>& flat, std::span<const uint8_t> clean_flat_slots,
                             std::vector<uint8_t>& active_sources);
 
-bool WalkSrt(const ResourcePlan& program, const SrtRuntime& runtime,
-             std::vector<uint32_t>& flat);
+bool WalkSrt(const ResourcePlan& program, const SrtRuntime& runtime, std::vector<uint32_t>& flat);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

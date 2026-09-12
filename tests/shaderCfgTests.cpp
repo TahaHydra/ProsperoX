@@ -2922,8 +2922,8 @@ void TestNewShaderRecompilerMoreAluFamilies() {
         "SPIR-V binary does not contain OpFNegate");
   Check(SpirvContainsOpcode(result.spirv, 12),
         "SPIR-V binary does not contain OpExtInst");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16");
+  Check(!SpirvContainsExtInst(result.spirv, 58),
+        "FP16 rounding must not rely on implementation-dependent PackHalf2x16");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16");
   Check(SpirvContainsExtInst(result.spirv, 50),
@@ -3193,8 +3193,9 @@ void TestNewShaderRecompilerVop3pPackedF16() {
         "accumulator");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16 for VOP3P");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16 for VOP3P");
+  Check(
+      !SpirvContainsExtInst(result.spirv, 58),
+      "VOP3P rounding must not rely on implementation-dependent PackHalf2x16");
   Check(SpirvContainsExtInst(result.spirv, 50),
         "SPIR-V binary does not contain GLSL.std.450 Fma for VOP3P");
   Check(
@@ -3291,9 +3292,9 @@ void TestNewShaderRecompilerStagedShaderOps() {
         "SPIR-V binary does not contain OpNot for S_BITSET0_B32");
   Check(SpirvContainsExtInst(result.spirv, 50),
         "SPIR-V binary does not contain GLSL.std.450 Fma for VOP2 F16 FMA ops");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16 for VOP2 F16 "
-        "FMA ops");
+  Check(!SpirvContainsExtInst(result.spirv, 58),
+        "VOP2 F16 rounding must not rely on implementation-dependent "
+        "PackHalf2x16");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16 for VOP2 "
         "F16 FMA ops");

@@ -6,6 +6,7 @@
 #include "common/lruCache.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
@@ -13,6 +14,7 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
 #include <map>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -59,6 +61,9 @@ public:
 	[[nodiscard]] bool ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
 	                                        uint32_t packed_clear);
 	void               InvalidateMemory(uint64_t address, uint64_t size);
+	[[nodiscard]] bool HasPendingCpuRead(uint64_t address, uint64_t size);
+	// GPU command lane only; publish image bytes before releasing CPU read protection.
+	void                     ReadMemory(uint64_t address, uint64_t size);
 	void               InvalidateMemoryFromGPU(uint64_t address, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t address, uint64_t size);
 
@@ -87,10 +92,26 @@ private:
 		// registered beside HTile and DCC without introducing parallel tracking paths.
 		enum class Type : uint8_t { PendingDcc, CMask, FMask, HTile, Dcc };
 
+		// Slices still awaiting materialization, as absolute slice indices in half-open ranges.
+		// A range set rather than a bitmask: the guest encodes 13-bit slice indices, so volumetric
+		// render targets legitimately exceed any fixed-width mask, and consumption is naturally
+		// expressed as "remove the contiguous runs that were just cleared".
 		Type     type       = Type::PendingDcc;
-		uint32_t clear_mask = 0;
+		RangeSet pending_clear;
 		uint32_t fill_value = 0xffffffffu;
 		uint64_t fill_size  = 0;
+
+		void ArmSlices(uint64_t capacity) {
+			pending_clear.Clear();
+			if (capacity != 0) {
+				pending_clear.Add(0, capacity);
+			}
+		}
+		void DisarmSlices() { pending_clear.Clear(); }
+		[[nodiscard]] bool AnyPending() const { return !pending_clear.Empty(); }
+		[[nodiscard]] bool IsPending(uint32_t slice) const {
+			return pending_clear.Contains(slice, 1);
+		}
 	};
 
 	struct OverlapResult {
@@ -113,6 +134,7 @@ private:
 	void                      TrackImageHead(ImageId id);
 	void                      TrackImageTail(ImageId id);
 	void                      UntrackImage(ImageId id);
+	void                             UntrackCpuRead(Image& image);
 	void                      UntrackImageHead(ImageId id);
 	void                      UntrackImageTail(ImageId id);
 	void                      MarkAsMaybeDirty(ImageId id, Image& image);
@@ -133,10 +155,13 @@ private:
 	void                        RefreshImage(ImageId id);
 	void                        PrepareDccClear(ImageId id, const ImageDesc& desc);
 	void                        InitializeImage(ImageId id);
-	[[nodiscard]] TextureTransferPlan
-	BuildTextureTransfer(const Image& image, BindingType binding, TransferDirection direction) const;
-	[[nodiscard]] DownloadPlan BuildDownload(const Image& image) const;
+	[[nodiscard]] TextureTransferPlan BuildTextureTransfer(const Image& image, BindingType binding,
+	                                                       TransferDirection direction) const;
+	[[nodiscard]] DownloadPlan        BuildDownload(const Image& image) const;
 	void UploadImage(Image& image, Buffer& source, uint64_t source_offset);
+	void TransferStencil(Image& image, GuestRange stencil, Buffer& buffer, uint64_t offset,
+	                     TransferDirection direction);
+	void PreserveStencil(ImageId depth);
 	void DownloadImageData(Image& image, Buffer& destination, uint64_t destination_offset,
 	                       uint64_t destination_size, DownloadPlan plan);
 	void DownloadDepth(Image& image, Buffer& destination, uint64_t destination_offset);
@@ -164,17 +189,17 @@ private:
 	BufferCache&                                      m_buffer_cache;
 	Common::SlotVector<Image>                         m_slot_images;
 	ImagePageTable                                    m_image_page_table;
-	std::unordered_map<vk::Format, ImageId>           m_null_images;
+	std::map<std::tuple<vk::Format, Prospero::ImageType, uint32_t>, ImageId> m_null_images;
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t> m_lru_cache;
 	std::unordered_set<ImageId>                       m_download_images;
 	std::map<uint64_t, MetaDataInfo>                  m_surface_metas;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t                                          m_trigger_gc_memory  = 0;
 	uint64_t                                          m_pressure_gc_memory = 1536ull * 1024 * 1024;
-	uint64_t         m_critical_gc_memory     = 3ull * 1024 * 1024 * 1024;
-	uint64_t         m_gc_tick                = 0;
-	mutable uint32_t m_image_query_epoch      = 0;
-	bool             m_readback_linear_images = false;
+	uint64_t         m_critical_gc_memory           = 3ull * 1024 * 1024 * 1024;
+	uint64_t         m_gc_tick                      = 0;
+	mutable uint32_t m_image_query_epoch            = 0;
+	bool             m_readback_linear_images       = false;
 
 	friend struct TextureCacheTestAccess;
 	friend class BufferCache;

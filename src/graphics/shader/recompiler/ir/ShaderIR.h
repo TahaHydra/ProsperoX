@@ -45,6 +45,7 @@ struct MemoryInfo {
 	ResourceKind            kind                     = ResourceKind::None;
 	uint32_t                resource                 = 0;
 	uint32_t                sampler                  = 0;
+	uint32_t                point_sampler            = UINT32_MAX;
 	uint32_t                offset                   = 0;
 	uint32_t                secondary_offset         = 0;
 	uint32_t                dmask                    = 0;
@@ -193,8 +194,7 @@ struct PositionExportComponent {
 	bool     viewport       = false;
 };
 
-inline PositionExportComponent DecodePositionExportComponent(uint32_t control,
-	                                                           uint32_t pos_index,
+inline PositionExportComponent DecodePositionExportComponent(uint32_t control, uint32_t pos_index,
 	                                                           uint32_t component) {
 	PositionExportComponent result;
 	if (pos_index == 0 || component >= 4) {
@@ -401,9 +401,7 @@ struct BindingLayout {
 	[[nodiscard]] uint32_t ShaderDataDwords() const {
 		return memory_offset_dword + (memory_offset_count + 3u) / 4u;
 	}
-	[[nodiscard]] bool UsesPushData() const {
-		return push_data_start_dword != PushData::NoStart;
-	}
+	[[nodiscard]] bool UsesPushData() const { return push_data_start_dword != PushData::NoStart; }
 	void AdvancePushData(uint32_t& cursor) const {
 		if (UsesPushData()) {
 			cursor = push_data_start_dword + ShaderDataDwords();
@@ -415,7 +413,8 @@ struct BindingLayout {
 
 struct ShaderInfo {
 	static constexpr uint32_t MaxBuffers      = 32;
-	static constexpr uint32_t MaxImages       = 32;
+	// Compiler work bound; physical descriptor capacity is checked at materialization.
+	static constexpr uint32_t MaxImages       = 65536;
 	static constexpr uint32_t MaxSamplers     = 32;
 	static constexpr uint32_t MaxSampledPairs = 64;
 

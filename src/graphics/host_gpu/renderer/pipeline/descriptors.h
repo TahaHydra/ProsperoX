@@ -33,6 +33,10 @@ struct PreparedBindings {
 		uint64_t address = 0;
 		uint64_t size    = 0;
 		BufferId id;
+		// Stream copies retain their issued offset; cached ranges resolve after all stages settle.
+		bool stream = false;
+		bool resolved = false;
+		uint32_t adjustment = 0;
 	};
 
 	const ShaderRecompiler::IR::CompiledShaderInfo* program  = nullptr;
@@ -41,6 +45,7 @@ struct PreparedBindings {
 	// become stale and need resolving again when bindings are rebound.
 	std::vector<BufferSource>             buffer_sources;
 	std::vector<vk::DescriptorBufferInfo> buffers;
+	bool published = false;
 	std::vector<TextureBinding>           images;
 	std::vector<vk::Sampler>              samplers;
 	vk::DescriptorBufferInfo              gds {nullptr, 0, VK_WHOLE_SIZE};

@@ -186,7 +186,10 @@ void ValidateNativeProgram(const IR::Program& program) {
 void AnalyzeProgramRequirements(IR::Program& program) {
 	program.spirv_requirements.reset();
 	IR::SpirvRequirements requirements {};
-	const auto MarkBallot = [&] { requirements.subgroup_ballot = true; };
+	const auto            MarkBallot = [&] {
+        requirements.subgroup_ballot = true;
+        if (program.wave_size == 32u) requirements.subgroup_local_invocation_id = true;
+	};
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
 			if (IR::BufferAccessOf(inst.GetOpcode()) == IR::BufferAccess::Atomic &&
@@ -290,8 +293,7 @@ void AnalyzeProgramRequirements(IR::Program& program) {
 					if (index >= program.export_info.size()) {
 						Fail(program, "attribute export has invalid metadata");
 					}
-					if (program.stage == ShaderType::Pixel &&
-					    program.export_info[index].vm) {
+					if (program.stage == ShaderType::Pixel && program.export_info[index].vm) {
 						requirements.pixel_valid_mask = true;
 					}
 					break;
@@ -303,8 +305,7 @@ void AnalyzeProgramRequirements(IR::Program& program) {
 	program.spirv_requirements.emplace(requirements);
 }
 
-std::vector<uint32_t> EmitProgram(const IR::Program& program,
-                                  ShaderStageInputInfo input_info) {
+std::vector<uint32_t> EmitProgram(const IR::Program& program, ShaderStageInputInfo input_info) {
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&

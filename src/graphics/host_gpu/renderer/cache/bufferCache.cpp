@@ -500,7 +500,12 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	if (mapped != nullptr) {
 		for (auto& copy: copies) {
 			const auto address = buffer.CpuAddress() + copy.dstOffset;
-			std::memcpy(mapped + copy.srcOffset, reinterpret_cast<const void*>(address), copy.size);
+			if (!Libs::LibKernel::Memory::TryReadGpuUploadMemory(address, mapped + copy.srcOffset,
+			                                                     copy.size)) {
+				EXIT("BufferCache: unreadable upload source addr=0x%016" PRIx64
+				     " size=0x%016" PRIx64 "\n",
+				     address, uint64_t(copy.size));
+			}
 			copy.srcOffset += base_offset;
 		}
 		m_staging_buffer.Commit();
@@ -511,8 +516,12 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	                                         vk::BufferUsageFlagBits::eTransferSrc, total_size);
 	for (const auto& copy: copies) {
 		const auto address = buffer.CpuAddress() + copy.dstOffset;
-		std::memcpy(temporary->Mapped().data() + copy.srcOffset,
-		            reinterpret_cast<const void*>(address), copy.size);
+		if (!Libs::LibKernel::Memory::TryReadGpuUploadMemory(
+		        address, temporary->Mapped().data() + copy.srcOffset, copy.size)) {
+			EXIT("BufferCache: unreadable temporary upload source addr=0x%016" PRIx64
+			     " size=0x%016" PRIx64 "\n",
+			     address, uint64_t(copy.size));
+		}
 	}
 	temporary->Flush(0, total_size);
 	const auto handle = temporary->Handle();
@@ -551,6 +560,21 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		m_gpu_modified_ranges.Add(vaddr, size);
 	}
 	return {buffer, buffer->Offset(vaddr)};
+}
+
+std::pair<Buffer*, uint64_t> BufferCache::FindPublishedOwner(uint64_t vaddr, uint64_t size) {
+	if (!GuestRange {vaddr, size}.Valid()) {
+		return {nullptr, 0};
+	}
+	const auto* owner = m_page_table.Find(vaddr >> PageTable::kPageBits);
+	if (owner == nullptr || !*owner) {
+		return {nullptr, 0};
+	}
+	auto& buffer = m_slot_buffers[*owner];
+	if (buffer.is_deleted || !buffer.IsInBounds(vaddr, size)) {
+		return {nullptr, 0};
+	}
+	return {&buffer, buffer.Offset(vaddr)};
 }
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t size) {

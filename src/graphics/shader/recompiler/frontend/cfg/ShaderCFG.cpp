@@ -62,7 +62,9 @@ bool IsConditionalBranch(Opcode opcode) {
 		case Opcode::S_CBRANCH_VCCZ:
 		case Opcode::S_CBRANCH_VCCNZ:
 		case Opcode::S_CBRANCH_EXECZ:
-		case Opcode::S_CBRANCH_EXECNZ: return true;
+		case Opcode::S_CBRANCH_EXECNZ:
+		case Opcode::S_SUBVECTOR_LOOP_BEGIN:
+		case Opcode::S_SUBVECTOR_LOOP_END: return true;
 		default: return false;
 	}
 }
@@ -80,6 +82,8 @@ BranchCondition ConditionForOpcode(Opcode opcode) {
 		case Opcode::S_CBRANCH_VCCNZ: return BranchCondition::VccNonZero;
 		case Opcode::S_CBRANCH_EXECZ: return BranchCondition::ExecZero;
 		case Opcode::S_CBRANCH_EXECNZ: return BranchCondition::ExecNonZero;
+		case Opcode::S_SUBVECTOR_LOOP_BEGIN:
+		case Opcode::S_SUBVECTOR_LOOP_END: return BranchCondition::ScalarInstruction;
 		default: return BranchCondition::Unknown;
 	}
 }
@@ -1168,8 +1172,7 @@ bool IsEnclosingLinearExit(const Graph& graph, uint32_t header, uint32_t block_i
 	       block->successors.size() == 1u) {
 		block = graph.FindBlock(block->successors.front());
 	}
-	if (block == nullptr || graph.Dominates(header, block->id) ||
-	    block->predecessors.empty()) {
+	if (block == nullptr || graph.Dominates(header, block->id) || block->predecessors.empty()) {
 		return false;
 	}
 	return std::ranges::all_of(block->predecessors, [&](uint32_t predecessor) {
@@ -1844,9 +1847,9 @@ bool RouteOneSharedArm(Graph& graph, uint32_t original_block_count, uint32_t out
 				}
 			}
 			const auto first_arm = std::min(continuation, other);
-			if (outer_predecessors.empty() || inner_predecessors.empty() ||
-			    external_predecessor || first_arm >= original_block_count ||
-			    outer_id >= inner_id || inner_id >= first_arm) {
+			if (outer_predecessors.empty() || inner_predecessors.empty() || external_predecessor ||
+			    first_arm >= original_block_count || outer_id >= inner_id ||
+			    inner_id >= first_arm) {
 				continue;
 			}
 
@@ -2266,6 +2269,7 @@ std::string BranchConditionToString(BranchCondition condition) {
 		case BranchCondition::VccNonZero: return "vccnz";
 		case BranchCondition::ExecZero: return "execz";
 		case BranchCondition::ExecNonZero: return "execnz";
+		case BranchCondition::ScalarInstruction: return "scalar_instruction";
 		case BranchCondition::GotoVariable: return "goto_variable";
 		default: return "unknown";
 	}

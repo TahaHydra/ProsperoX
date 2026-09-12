@@ -637,7 +637,13 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 		feedback_layout.pNext  = &feedback_dynamic;
 		supported_features2.pNext = &feedback_layout;
 	}
+	vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT swapchain_maintenance {};
+	if (HasExtension(device_extensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)) {
+		swapchain_maintenance.pNext = supported_features2.pNext;
+		supported_features2.pNext = &swapchain_maintenance;
+	}
 	physical_device.getFeatures2(&supported_features2);
+	graphics.swapchain_maintenance_enabled = swapchain_maintenance.swapchainMaintenance1;
 	graphics.attachment_feedback_loop_enabled =
 	    feedback_extensions && feedback_layout.attachmentFeedbackLoopLayout &&
 	    feedback_dynamic.attachmentFeedbackLoopDynamicState;
@@ -754,6 +760,10 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 	                        ? static_cast<void*>(&feedback_layout)
 	                        : feedback_dynamic.pNext;
 	create_info.flags                   = {};
+	if (graphics.swapchain_maintenance_enabled) {
+		swapchain_maintenance.pNext = const_cast<void*>(create_info.pNext);
+		create_info.pNext = &swapchain_maintenance;
+	}
 	create_info.pQueueCreateInfos       = &queue_create_info;
 	create_info.queueCreateInfoCount    = 1;
 	create_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
@@ -1150,6 +1160,9 @@ void WindowContext::CreateVulkan() {
 			if (HasExtension(available_extensions, extension)) {
 				device_extensions.push_back(extension);
 			}
+		}
+		if (HasExtension(available_extensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)) {
+			device_extensions.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
 		}
 		if (HasExtension(available_extensions, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME) &&
 		    HasExtension(available_extensions, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME)) {
