@@ -489,6 +489,7 @@ target_include_directories(image_page_table_tests PRIVATE ${inc_headers})
 
 add_kyty_full_emulator_test(shader_recompiler_compute_tests "${KYTY_TESTS_DIR}/ShaderRecompilerComputeTests.cpp")
 add_kyty_full_emulator_test(phase5_presentation_tests "${KYTY_TESTS_DIR}/Phase5PresentationTests.cpp")
+add_kyty_full_emulator_test(phase5_random_stress_tests "${KYTY_TESTS_DIR}/Phase5RandomStressTests.cpp")
 
 set(gpu_test_generated_dir "${PROJECT_BINARY_DIR}/gpu_test_shaders")
 set(gpu_test_ms_depth_source
