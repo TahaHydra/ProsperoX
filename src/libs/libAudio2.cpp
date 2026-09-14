@@ -352,25 +352,25 @@ static bool audioout2_context_has_queueable_device(AudioOut2ContextHandle ctx) {
 	return false;
 }
 
-static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool blocking) {
+static bool audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool blocking) {
 	std::vector<AudioInternal::OutputParam> params;
 	params.reserve(AudioInternal::OUT_PORTS_MAX);
 
-	g_audioout2_port_mutex.Lock();
+	// Pin backend handles until output finishes so a concurrent destroy/create
+	// cannot reuse a handle from the captured batch.
+	Common::LockGuard lock(g_audioout2_port_mutex);
 	for (const auto& state: g_audioout2_ports) {
 		if (state.used && state.context == ctx && state.audio_handle > 0 &&
 		    state.pcm_data != nullptr && params.size() < AudioInternal::OUT_PORTS_MAX) {
 			params.push_back(AudioInternal::OutputParam {state.audio_handle, state.pcm_data});
 		}
 	}
-	g_audioout2_port_mutex.Unlock();
-
 	if (params.empty()) {
-		return;
+		return true;
 	}
 
-	(void)AudioInternal::AudioOutOutputs(params.data(), static_cast<uint32_t>(params.size()),
-	                                     blocking);
+	return static_cast<int32_t>(AudioInternal::AudioOutOutputs(
+	           params.data(), static_cast<uint32_t>(params.size()), blocking)) >= 0;
 }
 
 static void audioout2_close_audio_handle(int audio_handle) {
@@ -523,13 +523,24 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t bloc
 				if (state->queued == 0) {
 					state->last_update = LibKernel::KernelGetProcessTime();
 				}
-				if (state->queued < state->queue_depth) {
+				const bool reserved = state->queued < state->queue_depth;
+				if (reserved) {
 					state->queued++;
 				}
 				g_audioout2_context_mutex.Unlock();
-				audioout2_queue_context_audio(ctx, blocking != 0);
+				if (!audioout2_queue_context_audio(ctx, blocking != 0)) {
+					Common::LockGuard lock(g_audioout2_context_mutex);
+					if (auto* current = audioout2_find_context_locked(ctx);
+					    current != nullptr && reserved && current->queued > 0) {
+						--current->queued;
+					}
+					return AUDIO_OUT2_ERROR_NOT_READY;
+				}
 				return OK;
 			}
+		} else {
+			g_audioout2_context_mutex.Unlock();
+			return AUDIO_OUT2_ERROR_INVALID_PARAM;
 		}
 		g_audioout2_context_mutex.Unlock();
 
@@ -621,11 +632,18 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 	const bool reserved = port_state->used && port_state->handle == next_port;
 	if (reserved) {
 		port_state->audio_handle = audio_handle;
+		if (audio_handle == 0) {
+			*port_state = AudioOut2PortStateEntry {};
+		}
 	}
 	g_audioout2_port_mutex.Unlock();
 	if (!reserved) {
 		audioout2_close_audio_handle(audio_handle);
 		return AUDIO_OUT2_ERROR_INVALID_PARAM;
+	}
+	if (audio_handle == 0) {
+		LOGF("AudioOut2: PCM backend unavailable or unsupported port/format\n");
+		return AUDIO_OUT2_ERROR_NOT_READY;
 	}
 
 	*port = next_port;

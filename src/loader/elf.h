@@ -293,7 +293,11 @@ private:
 	void Clear();
 	bool ValidateHeaders();
 	bool ValidateDynamic();
+	bool TryRepackedSelf();
 	bool Reject(const char* reason);
+	int m_repack_version = -1;
+	uint64_t m_repack_version_offset = 0;
+	std::vector<bool> m_repack_omitted;
 	std::string m_error;
 	uint64_t m_dynamic_size = 0;
 	uint64_t m_dynamic_data_size = 0;

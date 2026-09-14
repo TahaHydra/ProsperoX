@@ -404,6 +404,15 @@ struct TextureCacheTestAccess {
 };
 
 struct RenderExecutorTestAccess {
+  static void TessellationDraw(RenderExecutor& executor, CommandBuffer& buffer, bool indexed, uint32_t count) {
+    if (indexed) {
+      DrawIndexArgs args{}; args.index_count=count; args.instance_count=1;
+      executor.DrawIndex(0,buffer,args);
+    } else {
+      DrawAutoArgs args{}; args.vertex_count=count; args.instance_count=1;
+      executor.DrawAuto(0,buffer,args);
+    }
+  }
   static std::array<uint32_t, 5> CommandArguments(const CommandBuffer& buffer) {
     return {buffer.m_debug_op, buffer.m_debug_arg0, buffer.m_debug_arg1,
             buffer.m_debug_arg2, buffer.m_debug_arg3};
@@ -28971,6 +28980,10 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--phase3-completion") == 0) {
     VulkanHarness vulkan;
     return vulkan.CheckPhase3Completion(10000);
+  }
+  if (argc == 2 && std::strncmp(argv[1], "--phase6-tess-", 14) == 0) {
+    VulkanHarness vulkan;
+    return vulkan.CheckPhase6TessellationBoundary(argv[1]+14);
   }
   if (argc == 2 && std::strcmp(argv[1], "--phase3-ownership") == 0) {
     VulkanHarness vulkan;

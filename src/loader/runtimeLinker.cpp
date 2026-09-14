@@ -812,6 +812,17 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			return true;
 		}
 	}
+	// Preserve the captured guest context; a host unwind cannot recover frames
+	// across the native guest entry boundary. Never dereference register values.
+	LOGF("Fault registers: rax=%016" PRIx64 " rbx=%016" PRIx64 " rcx=%016" PRIx64 " rdx=%016" PRIx64 "\n"
+	     " rsi=%016" PRIx64 " rdi=%016" PRIx64 " rbp=%016" PRIx64 " rsp=%016" PRIx64 "\n"
+	     " r8=%016" PRIx64 " r9=%016" PRIx64 " r10=%016" PRIx64 " r11=%016" PRIx64 "\n"
+	     " r12=%016" PRIx64 " r13=%016" PRIx64 " r14=%016" PRIx64 " r15=%016" PRIx64 "\n",
+	     info->rax, info->rbx, info->rcx, info->rdx, info->rsi, info->rdi, info->rbp, info->rsp,
+	     info->r8, info->r9, info->r10, info->r11, info->r12, info->r13, info->r14, info->r15);
+	void* frames[20]{};
+	const int depth = WalkGuestStack(info->rbp, info->rsp, frames, int(std::size(frames)));
+	for (int i = 0; i < depth; ++i) LOGF("Fault guest frame[%d]=%016" PRIx64 "\n", i, reinterpret_cast<uint64_t>(frames[i]));
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",
 	     static_cast<unsigned>(info->type), info->native_code, info->exception_address,
@@ -1141,23 +1152,31 @@ static KYTY_MS_ABI uint8_t* TlsMainGetAddr() {
 	return g_tls_cached_main_tcb;
 }
 
-static void PatchProgram(Program* program, uint64_t address, uint64_t size) {
+static void PatchProgram(Program* program, uint64_t address, uint64_t size,
+                         std::span<const uintptr_t> function_starts = {}) {
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->elf == nullptr);
 
 	ZydisDecoder decoder{};
 	EXIT_IF(!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)));
 	std::vector<std::pair<uint64_t,uint8_t>> instructions;
-	for (uint64_t offset = 0; offset < size;) {
-		ZydisDecodedInstruction instruction{};
-		ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
-		if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<void*>(address+offset),
-		                                      size-offset, &instruction, operands))) {
-			LOGF("TLS patch scan stopped at undecodable offset 0x%" PRIx64 "\n", offset);
-			break;
+	std::vector<uint64_t> boundaries{0, size};
+	for (const auto start: function_starts)
+		if (start > address && start - address < size) boundaries.push_back(start - address);
+	std::sort(boundaries.begin(), boundaries.end());
+	boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+	for (size_t range = 0; range + 1 < boundaries.size(); ++range) {
+		for (uint64_t offset = boundaries[range]; offset < boundaries[range + 1];) {
+			ZydisDecodedInstruction instruction{};
+			ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
+			if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<void*>(address+offset),
+			                                      boundaries[range + 1]-offset, &instruction, operands))) {
+				LOGF("TLS patch scan stopped at undecodable offset 0x%" PRIx64 "\n", offset);
+				break;
+			}
+			instructions.emplace_back(offset,instruction.length);
+			offset += instruction.length;
 		}
-		instructions.emplace_back(offset,instruction.length);
-		offset += instruction.length;
 	}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	if (size >= 12 && program->tls.handler_vaddr != 0) {
@@ -2053,15 +2072,19 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			                     mode == Common::VirtualMemory::Mode::NoAccess);
 
 			if (Common::VirtualMemory::IsExecute(mode)) {
-				PatchProgram(program, segment_addr, segment_file_size);
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-				if (use_red_zone_protection) {
-					executable_segments.emplace_back(segment_addr, segment_file_size);
-				}
+				executable_segments.emplace_back(segment_addr, segment_file_size);
+#else
+				PatchProgram(program, segment_addr, segment_file_size);
 #endif
 			}
 
 			if (!skip_protect) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+				// Windows TLS discovery needs the fully loaded unwind header.
+				// Executable protection is applied after patching below.
+				if (!Common::VirtualMemory::IsExecute(mode))
+#endif
 				Libs::LibKernel::Memory::SetProgramMemoryProtection(segment_addr,
 				                                                    segment_memory_size, mode);
 
@@ -2095,21 +2118,38 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		if (use_red_zone_protection && phdr[i].p_type == PT_GNU_EH_FRAME) {
-			eh_frame_header_addr = phdr[i].p_vaddr + program->base_vaddr;
-			eh_frame_header_size = phdr[i].p_memsz;
+		if (phdr[i].p_type == PT_GNU_EH_FRAME) {
+			// Trust only a completely file-backed header inside a LOAD/RELRO,
+			// with matching file/virtual displacement. Never probe an arbitrary
+			// address supplied by supplementary metadata.
+			for (Elf64_Half j = 0; j < ehdr->e_phnum; ++j) {
+				const auto& owner = phdr[j];
+				if ((owner.p_type != PT_LOAD && owner.p_type != PT_OS_RELRO) ||
+				    phdr[i].p_vaddr < owner.p_vaddr || phdr[i].p_offset < owner.p_offset) continue;
+				const auto delta = phdr[i].p_vaddr - owner.p_vaddr;
+				if (delta != phdr[i].p_offset - owner.p_offset || delta > owner.p_filesz ||
+				    phdr[i].p_filesz > owner.p_filesz - delta) continue;
+				eh_frame_header_addr = phdr[i].p_vaddr + program->base_vaddr;
+				eh_frame_header_size = phdr[i].p_filesz;
+				break;
+			}
 		}
 #endif
 	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::vector<uintptr_t> function_starts;
+	if (!IsReadableRange(eh_frame_header_addr, eh_frame_header_size) ||
+	    !DecodeEhFrameFunctionStarts(eh_frame_header_addr, eh_frame_header_size, &function_starts)) {
+		function_starts.clear();
+		LOGF("Windows guest patching could not decode function boundaries for %s\n",
+		     Common::PathToString(program->file_name).c_str());
+	}
+	LOGF("Windows TLS function anchors: %s, count=%zu\n",
+	     Common::PathToString(program->file_name.filename()).c_str(), function_starts.size());
+	for (const auto& [segment_addr, segment_size]: executable_segments)
+		PatchProgram(program, segment_addr, segment_size, function_starts);
 	if (use_red_zone_protection) {
-		std::vector<uintptr_t> function_starts;
-		if (!DecodeEhFrameFunctionStarts(eh_frame_header_addr, eh_frame_header_size,
-		                                 &function_starts)) {
-			LOGF("Windows guest red-zone patching could not decode function boundaries for %s\n",
-			     Common::PathToString(program->file_name).c_str());
-		}
 		for (const auto& [segment_addr, segment_size]: executable_segments) {
 			const auto result =
 			    PatchRedZoneMemoryInstructions(segment_addr, segment_size, function_starts);
@@ -2123,6 +2163,14 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			     result.control_flow_memory_instruction_count,
 			     result.unrelocatable_memory_instruction_count);
 			Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
+		}
+	}
+	for (Elf64_Half i = 0; i < ehdr->e_phnum; ++i) {
+		if ((phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_OS_RELRO) && phdr[i].p_memsz &&
+		    Common::VirtualMemory::IsExecute(GetMode(phdr[i].p_flags))) {
+			const auto address = program->base_vaddr + phdr[i].p_vaddr;
+			Libs::LibKernel::Memory::SetProgramMemoryProtection(address, GetAlignedSize(phdr + i), GetMode(phdr[i].p_flags));
+			Common::VirtualMemory::FlushInstructionCache(address, GetAlignedSize(phdr + i));
 		}
 	}
 	Common::VirtualMemory::FlushInstructionCache(program->red_zone_trampoline_vaddr,

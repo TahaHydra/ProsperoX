@@ -61,3 +61,16 @@ the actual device's descriptor limits; the standalone 128-image test budget is
 not a Vulkan minimum or a portable device requirement. Broader fragment-helper
 and float-control-mode permutations remain future conformance work. Keep the
 test harness's queried image capabilities consistent with the production context.
+
+Phase 6 memory-slot publication is validated on Windows using a flushed staging
+file and same-directory `MoveFileExW` replacement. Other hosts explicitly fail
+publication until their rename/durability semantics and crash/error fixtures are
+implemented and tested. Repeat SDL device/queue failure, PCM routing, controller
+reconnect, and generated media tests per host. The DualSense hardware capture is
+manual and is not part of unattended CTest. None of this expands the supported
+host matrix beyond the designated Windows PC.
+
+Phase 6 TLS discovery now uses loaded, bounded unwind-table function anchors on
+Windows to resume after undecodable gaps. Other hosts retain the prior load/
+patch order; adapt this sequencing and rerun the gap, instruction-boundary,
+register/flags/vector and red-zone fixtures before enabling those hosts.

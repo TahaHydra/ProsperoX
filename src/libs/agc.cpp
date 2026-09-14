@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -342,11 +343,16 @@ int KYTY_SYSV_ABI AgcInit(uint32_t* state, uint32_t ver) {
 	     "\t ver   = %u\n",
 	     reinterpret_cast<uint64_t>(state), ver);
 
-	if (ver > GRAPHICS_REGISTER_DEFAULTS_MAX_VERSION) {
-		LOGF_COLOR(Log::Color::Red, "\t unsupported version %u\n", ver);
+	// No supported feature negotiation mutates this opaque caller-owned state.
+	// Do not invent a guest error code for an unverified initialization contract.
+	if (state == nullptr || ver > GRAPHICS_REGISTER_DEFAULTS_MAX_VERSION) {
+		std::fprintf(stderr, "AGC_INIT_UNSUPPORTED state=%p version=%u supported=0..%u\n",
+		             static_cast<void*>(state), ver, GRAPHICS_REGISTER_DEFAULTS_MAX_VERSION);
+		std::fflush(stderr);
+		std::quick_exit(86);
 	}
-
-	printf("version = %u\n", ver);
+	LOGF("AGC_INIT state=0x%016" PRIx64 " version=%u caller_state=preserved\n",
+	     reinterpret_cast<uint64_t>(state), ver);
 
 	return OK;
 }
@@ -4189,16 +4195,6 @@ namespace Gen5Driver {
 
 LIB_NAME("Graphics5Driver", "Graphics5Driver");
 
-struct TessellationDriverState {
-	uint64_t tf_ring_base      = 0;
-	uint32_t tf_ring_size      = 0;
-	uint64_t hs_offchip_value0 = 0;
-	uint64_t hs_offchip_value1 = 0;
-	uint64_t hs_offchip_value2 = 0;
-};
-
-static TessellationDriverState g_tessellation_driver_state {};
-
 static void submit_dcb(uint32_t* dcb, uint32_t size_in_dwords) {
 	GraphicsDbgDumpDcb("d", size_in_dwords, dcb);
 	EXIT_IF(g_renderer == nullptr);
@@ -4371,6 +4367,7 @@ int KYTY_SYSV_ABI AgcDriverSubmitMultiAcbs(uint32_t queue, uint32_t* const* acbs
 
 int KYTY_SYSV_ABI AgcDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata) {
 	PRINT_NAME();
+	LOGF("AGC_ADD_EQ queue=%" PRId64 " id=%d udata=%p\n", static_cast<int64_t>(eq), id, udata);
 
 	if (eq == LibKernel::EventQueue::KERNEL_EQUEUE_INVALID) {
 		return LibKernel::KERNEL_ERROR_EBADF;
@@ -4421,29 +4418,32 @@ uint32_t KYTY_SYSV_ABI AgcDriverGetEqContextId(const LibKernel::EventQueue::Kern
 
 int KYTY_SYSV_ABI AgcDriverSetTFRing(const volatile void* base, uint32_t size) {
 	PRINT_NAME();
-
-	g_tessellation_driver_state.tf_ring_base = reinterpret_cast<uint64_t>(base);
-	g_tessellation_driver_state.tf_ring_size = size;
-
-	LOGF("\t base = 0x%016" PRIx64 "\n"
-	     "\t size = 0x%08" PRIx32 "\n",
-	     g_tessellation_driver_state.tf_ring_base, g_tessellation_driver_state.tf_ring_size);
-
+	const auto address = reinterpret_cast<uint64_t>(base);
+	const auto* reason = g_renderer == nullptr ? "renderer_not_initialized" :
+	    g_renderer->GetTessellationState().Configure(address, size);
+	if (reason != nullptr) {
+		std::fprintf(stderr, "AGC_TF_RING_UNSUPPORTED base=0x%016" PRIx64
+		             " size_bytes=%" PRIu32 " reason=%s\n", address, size, reason);
+		std::fflush(stderr);
+		std::quick_exit(86);
+	}
+	LOGF("AGC_TF_RING_CONFIGURED base=0x%016" PRIx64 " size_bytes=%" PRIu32
+	     " native_tessellation=unsupported\n", address, size);
 	return OK;
 }
 
-int KYTY_SYSV_ABI AgcDriverSetHsOffchipParam(uint64_t value0, uint64_t value1, uint64_t value2) {
+int KYTY_SYSV_ABI AgcDriverSetHsOffchipParam(uint32_t control, uint32_t buffering) {
 	PRINT_NAME();
-
-	g_tessellation_driver_state.hs_offchip_value0 = value0;
-	g_tessellation_driver_state.hs_offchip_value1 = value1;
-	g_tessellation_driver_state.hs_offchip_value2 = value2;
-
-	LOGF("\t value0 = 0x%016" PRIx64 "\n"
-	     "\t value1 = 0x%016" PRIx64 "\n"
-	     "\t value2 = 0x%016" PRIx64 "\n",
-	     value0, value1, value2);
-
+	const auto* reason = g_renderer == nullptr ? "renderer_not_initialized" :
+	    g_renderer->GetTessellationState().ConfigureOffchip(control, buffering);
+	if (reason != nullptr) {
+		std::fprintf(stderr, "AGC_HS_OFFCHIP_UNSUPPORTED control=%" PRIu32
+		             " buffering=%" PRIu32 " reason=%s\n", control, buffering, reason);
+		std::fflush(stderr);
+		std::quick_exit(86);
+	}
+	LOGF("AGC_HS_OFFCHIP_CONFIGURED control=%" PRIu32 " buffering=%" PRIu32
+	     " blocks=%" PRIu32 " native_tessellation=unsupported\n", control, buffering, buffering + 1);
 	return OK;
 }
 

@@ -1250,6 +1250,8 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	if (args.index_count == 0 || args.instance_count == 0) {
 		return;
 	}
+	m_context.GetTessellationState().RequireDrawSupport(buffer.GetRegisters().GetShaderStages(),
+	    static_cast<uint32_t>(ucfg.GetPrimType()));
 
 	if (ConsumeMetadataColorOperation(buffer)) {
 		ResetBindings();
@@ -1378,6 +1380,8 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	if (args.vertex_count == 0 || args.instance_count == 0) {
 		return;
 	}
+	m_context.GetTessellationState().RequireDrawSupport(buffer.GetRegisters().GetShaderStages(),
+	    static_cast<uint32_t>(ucfg.GetPrimType()));
 
 	if (ConsumeMetadataColorOperation(buffer)) {
 		ResetBindings();

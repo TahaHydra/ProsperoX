@@ -6,6 +6,7 @@
 #include "common/subsystems.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/window/windowInternal.h"
@@ -80,21 +81,26 @@ int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-    Check(argc <= 4, "usage: seconds [seed [replay_frames]]");
-    const uint64_t seconds = argc >= 2 ? ParseNumber(argv[1], "duration") : 30;
+    const bool fresh_small = argc == 2 && std::strcmp(argv[1], "--fresh-small") == 0;
+    const bool resize_repro = argc == 2 && std::strcmp(argv[1], "--resize-repro") == 0;
+    const bool layout_repro = fresh_small || resize_repro;
+    Check(argc <= 4, "usage: seconds [seed [replay_frames]] or --fresh-small or --resize-repro");
+    const uint64_t seconds = argc >= 2 && !layout_repro ? ParseNumber(argv[1], "duration") : 30;
 
     Check(seconds >= 1 && seconds <= 600, "duration must be 1..600 seconds");
 
     uint64_t seed = 0;
     if (argc >= 3) {
         seed = ParseNumber(argv[2], "seed");
+    } else if (layout_repro) {
+        seed = 0x5058352026091201ull;
     } else {
         seed = static_cast<uint64_t>(
             std::chrono::high_resolution_clock::now().time_since_epoch().count());
     }
 
     g_state.seed = seed;
-    const uint64_t replay_frames = argc == 4 ? ParseNumber(argv[3], "replay_frames") : 0;
+    const uint64_t replay_frames = layout_repro ? 60 : argc == 4 ? ParseNumber(argv[3], "replay_frames") : 0;
     Check(argc != 4 || replay_frames >= 60, "replay must include warmup");
     std::mt19937_64 rng(seed);
 
@@ -271,23 +277,36 @@ int main(int argc, char** argv)
 
             // A game frame can submit several image/resource operations.
             const uint32_t ops_this_frame =
-                1u + static_cast<uint32_t>(rng() % 3u);
+                layout_repro ? 1u : 1u + static_cast<uint32_t>(rng() % 3u);
 
             for (uint32_t op = 0; op < ops_this_frame; ++op) {
                 g_state.op = op;
 
                 const auto extent =
+                    layout_repro ? ExtentChoice{resize_repro && frames % 2 == 0 ? 64u : 32u,
+                                                resize_repro && frames % 2 == 0 ? 16u : 8u} :
                     extents[static_cast<size_t>(rng() % extents.size())];
 
                 const uint64_t resource_offset =
-                    offsets[static_cast<size_t>(rng() % offsets.size())];
+                    layout_repro ? 0 : offsets[static_cast<size_t>(rng() % offsets.size())];
 
                 const uint64_t guest_addr =
                     base + resource_offset;
 
-                const uint64_t image_bytes =
-                    static_cast<uint64_t>(extent.width) *
-                    static_cast<uint64_t>(extent.height) * 4ull;
+                // Supported linear RGBA8 uses a 256-byte row alignment, even
+                // when the visible width is only 32 or 96 pixels. Keep the
+                // oracle's stride arithmetic independent of the transfer plan.
+                const uint32_t row_bytes = ((extent.width * 4u + 255u) / 256u) * 256u;
+                const uint32_t pitch = row_bytes / 4u;
+                const uint64_t image_bytes = static_cast<uint64_t>(row_bytes) * extent.height;
+                TileSizeAlign canonical{};
+                TileGetTextureSize(Prospero::BufferFormat::k8_8_8_8UNorm, extent.width,
+                                   extent.height, 1, Prospero::TileMode::kLinear,
+                                   &canonical, nullptr, nullptr);
+                Check(canonical.size == image_bytes &&
+                      TileGetTexturePitch(Prospero::BufferFormat::k8_8_8_8UNorm, extent.width,
+                                          Prospero::TileMode::kLinear) == pitch,
+                      "generator must match supported linear layout");
 
                 Check(
                     resource_offset + image_bytes < sentinel_offset,
@@ -334,13 +353,13 @@ int main(int argc, char** argv)
                     1
                 };
 
-                desc.info.pitch = extent.width;
+                desc.info.pitch = pitch;
                 desc.info.bytes_per_block = 4;
 
                 desc.info.mip_layout[0] = {
                     0,
                     image_bytes,
-                    extent.width,
+                    pitch,
                     extent.height
                 };
 
@@ -357,6 +376,13 @@ int main(int argc, char** argv)
 
                 auto& image =
                     cache.GetImage(id);
+
+                std::printf("PHASE5_RANDOM_OWNER requested=%ux%u pitch=%u bytes=%llu cached=%ux%u pitch=%u bytes=%llu backing=%ux%u mip=%u\n",
+                            extent.width, extent.height, pitch,
+                            static_cast<unsigned long long>(image_bytes), image.info.extent.width,
+                            image.info.extent.height, image.info.pitch,
+                            static_cast<unsigned long long>(image.info.data.size),
+                            image.backing.extent.width, image.backing.extent.height, desc.view_info.base_level);
 
                 ImageViewInfo view =
                     desc.view_info;
@@ -414,7 +440,7 @@ int main(int argc, char** argv)
                 Check(cache.HasPendingCpuRead(guest_addr, image_bytes), "GPU write armed demand publication");
                 for (uint32_t y = 0; y < extent.height; ++y) {
                     for (uint32_t x = 0; x < extent.width / 2; ++x) {
-                        const size_t i = resource_offset + (y * extent.width + x) * 4;
+                        const size_t i = resource_offset + y * row_bytes + x * 4;
                         expected[i] = static_cast<uint8_t>(r * 255);
                         expected[i + 1] = static_cast<uint8_t>(g * 255);
                         expected[i + 2] = static_cast<uint8_t>(b * 255);

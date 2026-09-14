@@ -280,7 +280,9 @@ void GameController::Disconnect(int id) {
 	Common::LockGuard lock(m_mutex);
 
 	const auto it = std::find(m_connected_ids.begin(), m_connected_ids.end(), id);
-	EXIT_IF(it == m_connected_ids.end());
+	if (it == m_connected_ids.end()) {
+		return;
+	}
 
 	m_connected_ids.erase(it);
 
@@ -311,6 +313,7 @@ void GameController::CheckActive() {
 	m_active_id     = new_active_id;
 	m_connected     = new_connected;
 	m_state         = {};
+	m_state.time    = LibKernel::KernelGetProcessTime();
 	m_states_num    = 0;
 	m_first_state   = 0;
 	m_next_touch_id = 1;
@@ -726,11 +729,10 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(num < 1 || num > 64);
 	if (handle != 1) {
 		return PAD_ERROR_INVALID_HANDLE;
 	}
-	if (data == nullptr) {
+	if (data == nullptr || num < 1 || num > 64) {
 		return PAD_ERROR_INVALID_ARG;
 	}
 

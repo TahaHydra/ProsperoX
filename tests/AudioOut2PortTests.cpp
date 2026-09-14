@@ -24,6 +24,8 @@ std::vector<bool>       g_output_blocking;
 int                     g_next_device  = 1;
 int                     g_open_waiters = 0;
 bool                    g_block_opens  = false;
+bool                    g_fail_opens = false;
+bool                    g_fail_outputs = false;
 
 void Check(bool value, const char* text) {
 	if (!value) {
@@ -327,12 +329,36 @@ void TestHandleWithoutPcmDoesNotBypassQueue() {
 	AudioOut2::AudioOut2ContextDestroy(context);
 }
 
+void TestDeviceFailuresAreReported() {
+	const auto context = CreateContext(1);
+	const auto param = MakeParam();
+	AudioOut2::AudioOut2PortHandle port = 0;
+	g_fail_opens = true;
+	Check(AudioOut2::AudioOut2PortCreate(context, AsParam(&param), &port) != OK && port == 0,
+	      "failed backend open must not return a successful silent port");
+	g_fail_opens = false;
+	Check(AudioOut2::AudioOut2PortCreate(context, AsParam(&param), &port) == OK, "retry open");
+	uint32_t pcm[512] {};
+	SetPcm(port, pcm);
+	g_fail_outputs = true;
+	Check(AudioOut2::AudioOut2ContextPush(context, 0) != OK, "backend failure must reach push caller");
+	g_fail_outputs = false;
+	uint32_t queued = 99, available = 99;
+	Check(AudioOut2::AudioOut2ContextGetQueueLevel(context, &queued, &available) == OK &&
+	      queued == 0 && available == 1, "failed push must release queue reservation");
+	Check(AudioOut2::AudioOut2ContextPush(context, 0) == OK, "retry push after backend recovery");
+	AudioOut2::AudioOut2PortDestroy(port);
+	AudioOut2::AudioOut2ContextDestroy(context);
+	Check(AudioOut2::AudioOut2ContextPush(context, 1) != OK, "destroyed context must not wait forever");
+}
+
 } // namespace
 
 namespace Libs::Audio::AudioInternal {
 
 int AudioOutOpen(int type, uint32_t /*samples_num*/, uint32_t /*freq*/, Format /*format*/) {
 	std::unique_lock lock(g_device_mutex);
+	if (g_fail_opens) return 0;
 	const int        handle = g_next_device++;
 	g_live_devices.push_back(handle);
 	if (type != 10) {
@@ -366,7 +392,7 @@ bool AudioOutHasDevice(int handle) {
 uint32_t AudioOutOutputs(const OutputParam* /*params*/, uint32_t /*num*/, bool blocking) {
 	std::lock_guard lock(g_device_mutex);
 	g_output_blocking.push_back(blocking);
-	return 0;
+	return g_fail_outputs ? static_cast<uint32_t>(-1) : 0;
 }
 
 } // namespace Libs::Audio::AudioInternal
@@ -389,6 +415,7 @@ int main() {
 	TestFloat12ChannelPortOutputsPcm();
 	TestAsynchronousDevicePushKeepsQueueBounded();
 	TestHandleWithoutPcmDoesNotBypassQueue();
+	TestDeviceFailuresAreReported();
 	std::printf("AudioOut2PortTests: all cases passed\n");
 	return 0;
 }

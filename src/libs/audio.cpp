@@ -22,6 +22,9 @@
 #include <vector>
 
 #include "libatrac9.h"
+extern "C" {
+#include <libswresample/swresample.h>
+}
 
 namespace Libs::Audio {
 
@@ -109,6 +112,9 @@ private:
 
 		SDL_AudioDeviceID audio_device = 0;
 		SDL_AudioSpec     audio_spec   = {};
+		SDL_AudioStream*  audio_stream = nullptr;
+		SwrContext*      resampler = nullptr;
+		bool             stream_failed = false;
 	};
 
 	struct PortIn {
@@ -249,10 +255,35 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 	    SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, SDL_AUDIO_ALLOW_ANY_CHANGE);
 	if (port->audio_device == 0) {
 		LOGF("AudioOut: SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+		SDL_QuitSubSystem(SDL_INIT_AUDIO);
 		return false;
 	}
 
 	port->audio_spec = obtained;
+	if (desired.freq != obtained.freq) {
+		AVChannelLayout layout{};
+		av_channel_layout_default(&layout, desired.channels);
+		const auto format = FormatIsFloat(port->format) ? AV_SAMPLE_FMT_FLT : AV_SAMPLE_FMT_S16;
+		const int result = swr_alloc_set_opts2(&port->resampler, &layout, format, obtained.freq,
+		                                       &layout, format, desired.freq, 0, nullptr);
+		av_channel_layout_uninit(&layout);
+		if (result < 0 || swr_init(port->resampler) < 0) {
+			LOGF("AudioOut: persistent resampler initialization failed\n");
+			CloseSdlDevice(port);
+			return false;
+		}
+	}
+	if (desired.format != obtained.format || desired.channels != obtained.channels) {
+		// SDL handles format/channel conversion only. Its bundled fallback rate
+		// converter drops fractional phase between puts at non-integral ratios.
+		port->audio_stream = SDL_NewAudioStream(desired.format, desired.channels, obtained.freq,
+		                                        obtained.format, obtained.channels, obtained.freq);
+		if (port->audio_stream == nullptr) {
+			LOGF("AudioOut: SDL_NewAudioStream failed: %s\n", SDL_GetError());
+			CloseSdlDevice(port);
+			return false;
+		}
+	}
 	SDL_PauseAudioDevice(port->audio_device, 0);
 
 	LOGF("AudioOut: opened SDL device (%d Hz, %u ch, format 0x%04x)\n", obtained.freq,
@@ -262,10 +293,17 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 
 void Audio::CloseSdlDevice(PortOut* port) {
 	EXIT_IF(port == nullptr);
+	swr_free(&port->resampler);
+	if (port->audio_stream != nullptr) {
+		SDL_FreeAudioStream(port->audio_stream);
+		port->audio_stream = nullptr;
+	}
+	port->stream_failed = false;
 
 	if (port->audio_device != 0 && SDL_WasInit(SDL_INIT_AUDIO) != 0) {
 		SDL_ClearQueuedAudio(port->audio_device);
 		SDL_CloseAudioDevice(port->audio_device);
+		SDL_QuitSubSystem(SDL_INIT_AUDIO);
 	}
 
 	port->audio_device = 0;
@@ -347,8 +385,26 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 	EXIT_IF(port == nullptr);
 
-	if (port->audio_device == 0 || data == nullptr) {
+	if (port->audio_device == 0 || data == nullptr || port->stream_failed) {
 		return false;
+	}
+	// Wait before accepting input into the stateful converter: a timeout must
+	// leave its history untouched so retrying the same input is safe.
+	if (blocking) {
+		constexpr uint64_t target_latency_us = 40000;
+		const uint64_t block_us = (1000000ULL * port->samples_num) / port->freq;
+		const uint64_t latency_us = std::max(target_latency_us, 2 * block_us);
+		const uint64_t bytes_per_second = uint64_t(port->audio_spec.freq) *
+		    port->audio_spec.channels * (SDL_AUDIO_BITSIZE(port->audio_spec.format) / 8);
+		const uint64_t threshold = bytes_per_second * latency_us / 1000000;
+		const auto wait_start = LibKernel::KernelGetProcessTime();
+		while (SDL_GetQueuedAudioSize(port->audio_device) > threshold) {
+			if (LibKernel::KernelGetProcessTime() - wait_start > 200000) {
+				LOGF("AudioOut: output device did not drain; preserving queued audio\n");
+				return false;
+			}
+			Common::Thread::SleepMicro(1000);
+		}
 	}
 
 	std::vector<uint8_t> prepared_buffer;
@@ -358,55 +414,47 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 	    BytesPerSample(port->format) * output_channels * port->samples_num;
 
 	std::vector<uint8_t> convert_buffer;
+	std::vector<uint8_t> resampled_buffer;
 	const void*          queue_data = prepared_data;
 	uint32_t             queue_size = prepared_size;
-
-	SDL_AudioCVT cvt {};
-	const int    cvt_result =
-	    SDL_BuildAudioCVT(&cvt, SdlFormat(port->format), static_cast<Uint8>(output_channels),
-	                      static_cast<int>(port->freq), port->audio_spec.format,
-	                      port->audio_spec.channels, port->audio_spec.freq);
-
-	if (cvt_result < 0) {
-		LOGF("AudioOut: SDL_BuildAudioCVT failed: %s\n", SDL_GetError());
-		return false;
-	}
-
-	if (cvt_result > 0) {
-		convert_buffer.resize(prepared_size * cvt.len_mult);
-		std::memcpy(convert_buffer.data(), prepared_data, prepared_size);
-
-		cvt.buf = convert_buffer.data();
-		cvt.len = static_cast<int>(prepared_size);
-
-		if (SDL_ConvertAudio(&cvt) < 0) {
-			LOGF("AudioOut: SDL_ConvertAudio failed: %s\n", SDL_GetError());
+	if (port->resampler != nullptr) {
+		const int capacity = swr_get_out_samples(port->resampler, static_cast<int>(port->samples_num));
+		const uint64_t frame_bytes = BytesPerSample(port->format) * output_channels;
+		if (capacity < 0 || uint64_t(capacity) * frame_bytes > INT32_MAX) {
+			port->stream_failed = true;
 			return false;
 		}
-
-		queue_data = cvt.buf;
-		queue_size = static_cast<uint32_t>(cvt.len_cvt);
+		resampled_buffer.resize(static_cast<size_t>(capacity) * frame_bytes);
+		uint8_t* destination = resampled_buffer.data();
+		const uint8_t* source = static_cast<const uint8_t*>(prepared_data);
+		const int frames = swr_convert(port->resampler, &destination, capacity, &source,
+		                               static_cast<int>(port->samples_num));
+		if (frames < 0) { port->stream_failed = true; return false; }
+		if (frames == 0) return true;
+		queue_data = resampled_buffer.data();
+		queue_size = static_cast<uint32_t>(frames * frame_bytes);
 	}
 
-	if (blocking) {
-		constexpr uint64_t target_latency_us = 40000;
-		const auto buffer_us = port->freq != 0 ? (1000000ULL * port->samples_num) / port->freq : 0;
-		const auto buffers =
-		    buffer_us != 0 ? static_cast<uint32_t>((target_latency_us + buffer_us - 1) / buffer_us)
-		                   : 2u;
-		const auto min_queued_size = queue_size * std::clamp(buffers, 2u, 16u);
-		const auto wait_start      = LibKernel::KernelGetProcessTime();
-		while (SDL_GetQueuedAudioSize(port->audio_device) > min_queued_size) {
-			if (LibKernel::KernelGetProcessTime() - wait_start > 200000) {
-				SDL_ClearQueuedAudio(port->audio_device);
-				break;
-			}
-			Common::Thread::SleepMicro(1000);
+	if (port->audio_stream != nullptr) {
+		if (SDL_AudioStreamPut(port->audio_stream, queue_data, static_cast<int>(queue_size)) < 0) {
+			port->stream_failed = true;
+			return false;
 		}
+		const int available = SDL_AudioStreamAvailable(port->audio_stream);
+		if (available < 0) { port->stream_failed = true; return false; }
+		if (available == 0) return true; // Accepted into bounded converter lookahead.
+		convert_buffer.resize(static_cast<size_t>(available));
+		const int converted = SDL_AudioStreamGet(port->audio_stream, convert_buffer.data(), available);
+		if (converted != available) { port->stream_failed = true; return false; }
+		queue_data = convert_buffer.data();
+		queue_size = static_cast<uint32_t>(converted);
 	}
 
 	if (SDL_QueueAudio(port->audio_device, queue_data, queue_size) < 0) {
 		LOGF("AudioOut: SDL_QueueAudio failed: %s\n", SDL_GetError());
+		// SDL cannot roll back consumed converter history. Require close/reopen
+		// after this failure rather than duplicate or silently omit a retry block.
+		port->stream_failed = port->audio_stream != nullptr || port->resampler != nullptr;
 		return false;
 	}
 
@@ -415,6 +463,10 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 
 Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format) {
 	Common::LockGuard lock(m_mutex);
+	if (samples_num == 0 || samples_num > UINT16_MAX || freq == 0 ||
+	    freq > INT32_MAX || format == Format::Unknown) {
+		return Id::Invalid();
+	}
 
 	for (int id = 0; id < OUT_PORTS_MAX; id++) {
 		if (!m_out_ports[id].used) {
@@ -444,8 +496,9 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 				port.volume[i] = 32768;
 			}
 
-			if (type != AUDIO_OUT_PORT_TYPE_VIBRATION) {
-				OpenSdlDevice(&port);
+			if (type != AUDIO_OUT_PORT_TYPE_VIBRATION && !OpenSdlDevice(&port)) {
+				port = {};
+				return Id::Invalid();
 			}
 
 			return Id::Create(id);
@@ -522,17 +575,27 @@ bool Audio::AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume) {
 }
 
 uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking) {
-	EXIT_NOT_IMPLEMENTED(num == 0);
-	EXIT_NOT_IMPLEMENTED(!AudioOutValid(params[0].handle));
+	// Keep handles/devices alive through submission and validate the complete
+	// batch before indexing any port (including secondary ports).
+	Common::LockGuard lock(m_mutex);
+	if (params == nullptr || num == 0 || num > OUT_PORTS_MAX) {
+		return static_cast<uint32_t>(AUDIO_OUT_ERROR_INVALID_ARG);
+	}
+	for (uint32_t i = 0; i < num; ++i) {
+		if (!AudioOutValid(params[i].handle)) {
+			return static_cast<uint32_t>(AUDIO_OUT_ERROR_INVALID_PORT);
+		}
+	}
 
 	const auto& first_port = m_out_ports[params[0].handle.GetId()];
 
-	uint64_t block_time   = (1000000 * first_port.samples_num) / first_port.freq;
 	uint64_t current_time = LibKernel::KernelGetProcessTime();
 
 	uint64_t max_wait_time = 0;
 
 	for (uint32_t i = 0; i < num; i++) {
+		const auto& port = m_out_ports[params[i].handle.GetId()];
+		const uint64_t block_time = (1000000ULL * port.samples_num) / port.freq;
 		uint64_t next_time = m_out_ports[params[i].handle.GetId()].last_output_time + block_time;
 		uint64_t wait_time = (next_time > current_time ? next_time - current_time : 0);
 		max_wait_time      = (wait_time > max_wait_time ? wait_time : max_wait_time);
@@ -556,7 +619,10 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 	for (uint32_t i = 0; i < num; i++) {
 		auto& port = m_out_ports[params[i].handle.GetId()];
 
-		QueueSdlAudio(&port, params[i].data, blocking);
+		if (port.type != AUDIO_OUT_PORT_TYPE_VIBRATION && params[i].data != nullptr &&
+		    !QueueSdlAudio(&port, params[i].data, blocking)) {
+			return static_cast<uint32_t>(AUDIO_OUT_ERROR_SYSTEM_RESOURCE);
+		}
 	}
 
 	for (uint32_t i = 0; i < num; i++) {

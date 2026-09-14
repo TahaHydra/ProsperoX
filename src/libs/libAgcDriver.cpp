@@ -189,9 +189,36 @@ LIB_DEFINE(InitAgcDriver_1) {
 
 } // namespace LibGen5Driver
 
+namespace AgcQualified {
+LIB_VERSION("Agc", 1, "Agc", 1, 1);
+LIB_DEFINE(Init) {
+	// Independently reviewed public ABI entries only. Graphics5 stays intact.
+	LIB_FUNC("23LRUSvYu1M", Graphics::Gen5::AgcInit);
+	LIB_FUNC("2JtWUUiYBXs", Graphics::Gen5::AgcGetRegisterDefaults2);
+	LIB_FUNC("wRbq6ZjNop4", Graphics::Gen5::AgcGetRegisterDefaults2Internal);
+	LIB_FUNC("BfBDZGbti7A", Graphics::Gen5::AgcGetIsTrinityMode);
+	LIB_FUNC("wr23dPKyWc0", Graphics::Gen5::AgcCbReleaseMem);
+	LIB_FUNC("57labkp+rSQ", Graphics::Gen5::AgcDcbAcquireMem);
+	LIB_FUNC("f3dg2CSgRKY", Graphics::Gen5::AgcCreateShader);
+	LIB_FUNC("D9sr1xGUriE", Graphics::Gen5::AgcCreatePrimState);
+}
+} // namespace AgcQualified
+
+namespace AgcDriverQualified {
+LIB_VERSION("AgcDriver", 1, "AgcDriver", 1, 1);
+LIB_DEFINE(Init) {
+	LIB_FUNC("XlNp7jzGiPo", Graphics::Gen5Driver::AgcDriverSetTFRing);
+	LIB_FUNC("MM4IZSEYytQ", Graphics::Gen5Driver::AgcDriverSetHsOffchipParam);
+	LIB_FUNC("w2rJhmD+dsE", Graphics::Gen5Driver::AgcDriverAddEqEvent);
+	LIB_FUNC("DL2RXaXOy88", Graphics::Gen5Driver::AgcDriverDeleteEqEvent);
+}
+} // namespace AgcDriverQualified
+
 LIB_DEFINE(InitAgcDriver_1) {
 	LibGen5::InitAgcDriver_1(s);
 	LibGen5Driver::InitAgcDriver_1(s);
+	AgcQualified::Init(s);
+	AgcDriverQualified::Init(s);
 }
 
 } // namespace Libs

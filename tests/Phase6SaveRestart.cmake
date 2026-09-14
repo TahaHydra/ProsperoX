@@ -1,0 +1,12 @@
+string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef run_id)
+set(evidence "${CMAKE_CURRENT_BINARY_DIR}/phase6-save-${run_id}")
+file(MAKE_DIRECTORY "${evidence}")
+foreach(mode write read)
+    execute_process(COMMAND "${PROBE}" "--save-${mode}" "${evidence}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 30)
+    file(WRITE "${evidence}/${mode}.log" "${output}${error}")
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "Phase 6 save ${mode} failed (${result}): ${output}${error}; evidence=${evidence}")
+    endif()
+    message(STATUS "${output}")
+endforeach()

@@ -43,6 +43,7 @@ void RenderContext::ShutdownGpu() {
 		m_command_scheduler.DrainPriorityOperations();
 		m_video_out = nullptr;
 	}
+	m_tessellation.Reset();
 }
 
 GuestGpu& RenderContext::GetGpu() const {

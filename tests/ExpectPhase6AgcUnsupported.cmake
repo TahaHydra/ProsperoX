@@ -1,0 +1,6 @@
+foreach(mode null version overflow)
+  execute_process(COMMAND "${PROBE}" --phase6-agc-${mode} RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
+  if(NOT result EQUAL 86 OR NOT "${out}${err}" MATCHES "AGC_INIT_UNSUPPORTED")
+    message(FATAL_ERROR "${mode}: expected explicit AGC unsupported boundary, got ${result}: ${out}${err}")
+  endif()
+endforeach()

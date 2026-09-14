@@ -9,12 +9,14 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/saveDataMountSlots.h"
+#include "libs/saveDataMemory.h"
 #include "loader/symbolDatabase.h"
 #include "loader/systemContent.h"
 
 #include <algorithm>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <vector>
 
 namespace Libs {
@@ -232,7 +234,7 @@ static constexpr uint32_t SAVE_DATA_EVENT_TYPE_UMOUNT_BACKUP_END = 1u;
 static constexpr uint32_t SAVE_DATA_EVENT_TYPE_BACKUP_END        = 2u;
 static constexpr uint32_t SAVE_DATA_EVENT_TYPE_COMMIT_BACKUP_END = 4u;
 
-static std::vector<uint8_t>      g_save_data_memory(0x10000);
+static std::map<std::string, MemoryStore::Image> g_save_data_memory;
 static int32_t                   g_next_transaction_resource = 1;
 static std::deque<SaveDataEvent> g_save_data_events;
 static SaveDataMountSlots        g_mount_slots;
@@ -247,9 +249,25 @@ static std::string get_title_id() {
 	return title_id;
 }
 
+static std::string memory_path(int32_t user, uint32_t slot) {
+	const auto title = get_title_id();
+	if (user < 0 || title.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != std::string::npos) {
+		return {};
+	}
+	return std::string(SAVE_DATA_DIR) + "/" + title + "/sce_sdmemory/u" +
+	       std::to_string(user) + "_s" + std::to_string(slot) + ".pxm";
+}
+
+static bool memory_range_valid(const SaveDataMemoryData& range, size_t size) {
+	return range.offset >= 0 && static_cast<uint64_t>(range.offset) <= size &&
+	       range.buf_size <= size - static_cast<size_t>(range.offset) &&
+	       (range.buf_size == 0 || range.buf != nullptr);
+}
+
 static void queue_save_data_event(uint32_t type, int32_t user_id,
                                   const SceSaveDataTitleId* title_id,
                                   const SceSaveDataDirName* dir_name, int32_t error_code = OK) {
+	Common::LockGuard lock(g_mount_mutex);
 	SaveDataEvent event = {};
 	event.type          = type;
 	event.error_code    = error_code;
@@ -322,6 +340,7 @@ int KYTY_SYSV_ABI SaveDataTerminate() {
 		return SAVE_DATA_ERROR_BUSY;
 	}
 	g_save_data_events.clear();
+	g_save_data_memory.clear();
 
 	return OK;
 }
@@ -493,13 +512,39 @@ int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(const SaveDataMemorySetup2* setup
 	     setup_param->option, setup_param->user_id, static_cast<uint64_t>(setup_param->memory_size),
 	     static_cast<uint64_t>(setup_param->icon_memory_size), setup_param->slot_id);
 
-	if (setup_param->memory_size > g_save_data_memory.size()) {
-		g_save_data_memory.resize(setup_param->memory_size);
+	const auto key = memory_path(setup_param->user_id, setup_param->slot_id);
+	if (key.empty() || setup_param->memory_size == 0 ||
+	    setup_param->memory_size > MemoryStore::MAX_BYTES ||
+	    setup_param->icon_memory_size > MemoryStore::MAX_BYTES ||
+	    (setup_param->init_icon != nullptr &&
+	     (setup_param->init_icon->data_size > setup_param->init_icon->buf_size ||
+	      setup_param->init_icon->data_size > setup_param->icon_memory_size ||
+	      (setup_param->init_icon->data_size != 0 && setup_param->init_icon->buf == nullptr)))) {
+		return SAVE_DATA_ERROR_PARAMETER;
 	}
-
+	Common::LockGuard lock(g_mount_mutex);
+	MemoryStore::Image image;
+	const auto status = MemoryStore::Load(key, &image);
+	if (status != MemoryStore::Result::Ok && status != MemoryStore::Result::Missing) {
+		return SAVE_DATA_ERROR_INTERNAL;
+	}
+	const auto existing_size = image.data.size();
+	if (status == MemoryStore::Result::Missing) {
+		image.param.resize(sizeof(SaveDataParam));
+		if (setup_param->init_param) std::memcpy(image.param.data(), setup_param->init_param, sizeof(SaveDataParam));
+		if (setup_param->init_icon && setup_param->init_icon->data_size != 0) {
+			const auto* begin = static_cast<const uint8_t*>(setup_param->init_icon->buf);
+			image.icon.assign(begin, begin + setup_param->init_icon->data_size);
+		}
+	} else if (image.param.size() != sizeof(SaveDataParam)) {
+		return SAVE_DATA_ERROR_INTERNAL;
+	}
+	if (setup_param->memory_size > image.data.size()) image.data.resize(setup_param->memory_size);
+	if (!MemoryStore::Commit(key, image)) return SAVE_DATA_ERROR_INTERNAL;
+	g_save_data_memory[key] = std::move(image);
 	if (result != nullptr) {
-		*result                     = {};
-		result->existed_memory_size = g_save_data_memory.size();
+		*result = {};
+		result->existed_memory_size = existing_size;
 	}
 
 	return OK;
@@ -521,23 +566,22 @@ int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(SaveDataMemoryGet2* get_param) {
 	     reinterpret_cast<uint64_t>(get_param->param), reinterpret_cast<uint64_t>(get_param->icon),
 	     get_param->slot_id);
 
-	if (get_param->data != nullptr) {
-		auto* data = get_param->data;
-		if (data->buf == nullptr || data->offset < 0) {
-			return SAVE_DATA_ERROR_PARAMETER;
-		}
-
-		const auto offset = static_cast<size_t>(data->offset);
-		if (offset + data->buf_size > g_save_data_memory.size()) {
-			g_save_data_memory.resize(offset + data->buf_size);
-		}
-		std::memcpy(data->buf, g_save_data_memory.data() + offset, data->buf_size);
+	const auto key = memory_path(get_param->user_id, get_param->slot_id);
+	if (key.empty()) return SAVE_DATA_ERROR_PARAMETER;
+	Common::LockGuard lock(g_mount_mutex);
+	const auto found = g_save_data_memory.find(key);
+	if (found == g_save_data_memory.end()) return SAVE_DATA_ERROR_MEMORY_NOT_READY;
+	const auto& image = found->second;
+	if ((get_param->data && !memory_range_valid(*get_param->data, image.data.size())) ||
+	    (get_param->icon && (get_param->icon->buf_size < image.icon.size() ||
+	      (!image.icon.empty() && !get_param->icon->buf)))) return SAVE_DATA_ERROR_PARAMETER;
+	if (get_param->data && get_param->data->buf_size != 0) {
+		std::memcpy(get_param->data->buf, image.data.data() + get_param->data->offset, get_param->data->buf_size);
 	}
-	if (get_param->param != nullptr) {
-		std::memset(get_param->param, 0, sizeof(*get_param->param));
-	}
-	if (get_param->icon != nullptr) {
-		get_param->icon->data_size = 0;
+	if (get_param->param) std::memcpy(get_param->param, image.param.data(), sizeof(SaveDataParam));
+	if (get_param->icon) {
+		if (!image.icon.empty()) std::memcpy(get_param->icon->buf, image.icon.data(), image.icon.size());
+		get_param->icon->data_size = image.icon.size();
 	}
 
 	return OK;
@@ -561,20 +605,32 @@ int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(const SaveDataMemorySet2* set_param
 	     set_param->data_num, set_param->slot_id);
 
 	const uint32_t data_num = (set_param->data_num == 0 ? 1 : set_param->data_num);
+	const auto key = memory_path(set_param->user_id, set_param->slot_id);
+	if (key.empty() || (set_param->data_num != 0 && !set_param->data)) return SAVE_DATA_ERROR_PARAMETER;
+	Common::LockGuard lock(g_mount_mutex);
+	const auto found = g_save_data_memory.find(key);
+	if (found == g_save_data_memory.end()) return SAVE_DATA_ERROR_MEMORY_NOT_READY;
+	if (set_param->icon && (set_param->icon->data_size > set_param->icon->buf_size ||
+	    set_param->icon->data_size > MemoryStore::MAX_BYTES ||
+	    (set_param->icon->data_size && !set_param->icon->buf))) return SAVE_DATA_ERROR_PARAMETER;
+	// Validate the whole scatter write before changing any bytes or publishing.
 	if (set_param->data != nullptr) {
 		for (uint32_t i = 0; i < data_num; i++) {
-			const auto& data = set_param->data[i];
-			if (data.buf == nullptr || data.offset < 0) {
-				return SAVE_DATA_ERROR_PARAMETER;
-			}
-
-			const auto offset = static_cast<size_t>(data.offset);
-			if (offset + data.buf_size > g_save_data_memory.size()) {
-				g_save_data_memory.resize(offset + data.buf_size);
-			}
-			std::memcpy(g_save_data_memory.data() + offset, data.buf, data.buf_size);
+			if (!memory_range_valid(set_param->data[i], found->second.data.size())) return SAVE_DATA_ERROR_PARAMETER;
 		}
 	}
+	auto image = found->second;
+	if (set_param->data) for (uint32_t i = 0; i < data_num; ++i) {
+		const auto& data = set_param->data[i];
+		if (data.buf_size) std::memcpy(image.data.data() + data.offset, data.buf, data.buf_size);
+	}
+	if (set_param->param) std::memcpy(image.param.data(), set_param->param, sizeof(SaveDataParam));
+	if (set_param->icon) {
+		image.icon.resize(set_param->icon->data_size);
+		if (!image.icon.empty()) std::memcpy(image.icon.data(), set_param->icon->buf, image.icon.size());
+	}
+	if (!MemoryStore::Commit(key, image)) return SAVE_DATA_ERROR_INTERNAL;
+	found->second = std::move(image);
 
 	return OK;
 }
@@ -764,6 +820,21 @@ int KYTY_SYSV_ABI SaveDataSyncSaveDataMemory(const void* sync_param) {
 	PRINT_NAME();
 
 	LOGF("\t sync_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(sync_param));
+	if (!sync_param) return SAVE_DATA_ERROR_PARAMETER;
+	int32_t user = -1;
+	std::memcpy(&user, sync_param, sizeof(user));
+	const auto prefix_path = memory_path(user, 0);
+	if (prefix_path.empty()) return SAVE_DATA_ERROR_PARAMETER;
+	const auto prefix = prefix_path.substr(0, prefix_path.size() - 5); // remove 0.pxm, retain _s
+	Common::LockGuard lock(g_mount_mutex);
+	bool ready = false;
+	for (const auto& [key, image]: g_save_data_memory) {
+		if (key.starts_with(prefix)) { ready = true; break; }
+	}
+	if (!ready) return SAVE_DATA_ERROR_MEMORY_NOT_READY;
+	// Set/Setup already flushed and atomically published the snapshot. Completion
+	// is still observable through the service event queue (memory-sync type 3).
+	queue_save_data_event(3, user, nullptr, nullptr);
 
 	return OK;
 }
@@ -778,6 +849,7 @@ int KYTY_SYSV_ABI SaveDataGetEventResult(const void* event_param, SaveDataEvent*
 	if (event == nullptr) {
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
+	Common::LockGuard lock(g_mount_mutex);
 
 	if (g_save_data_events.empty()) {
 		return SAVE_DATA_ERROR_NOT_FOUND;

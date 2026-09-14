@@ -1861,6 +1861,10 @@ namespace Posix {
 
 LIB_VERSION("Posix", 1, "libkernel", 1, 1);
 
+static int KYTY_SYSV_ABI unlink(const char* path) {
+	return POSIX_CALL(LibKernel::FileSystem::KernelUnlink(path));
+}
+
 int KYTY_SYSV_ABI getpagesize() {
 	PRINT_NAME();
 
@@ -1924,6 +1928,7 @@ int KYTY_SYSV_ABI mkdir(const char* path, uint16_t mode) {
 
 int64_t KYTY_SYSV_ABI lseek(int d, int64_t offset, int whence) {
 	PRINT_NAME();
+	if (d < 0) { *GetErrorAddr() = POSIX_EBADF; return -1; }
 
 	return POSIX_N_CALL(LibKernel::FileSystem::KernelLseek(d, offset, whence));
 }
@@ -1966,6 +1971,7 @@ int KYTY_SYSV_ABI flock(int d, int operation) {
 
 int64_t KYTY_SYSV_ABI fstat(int d, LibKernel::FileSystem::FileStat* sb) {
 	PRINT_NAME();
+	if (d < 0) { *GetErrorAddr() = POSIX_EBADF; return -1; }
 
 	return POSIX_N_CALL(LibKernel::FileSystem::KernelFstat(d, sb));
 }
@@ -2117,6 +2123,13 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWake(volatile void* address, int32_t count)
 }
 
 LIB_DEFINE(InitLibKernel_1_Posix) {
+	LIB_FUNC("VAzswvTOCzI", Posix::unlink);
+	// These NIDs are also imported through the qualified POSIX library.
+	// Keep its -1/errno ABI distinct from the kernel-error exports below.
+	LIB_FUNC("wuCroIGjt2g", LibKernel::open);
+	LIB_FUNC("bY-PO6JhzhQ", LibKernel::close);
+	LIB_FUNC("Oy6IpwgtYOk", Posix::lseek);
+	LIB_FUNC("mqQMh1zPPT8", Posix::fstat);
 	LIB_FUNC("k+AXqu2-eBc", getpagesize);
 	LIB_FUNC("lLMT9vJAck0", clock_gettime);
 	LIB_FUNC("smIj7eqzZE8", clock_getres);
@@ -2178,6 +2191,7 @@ LIB_DEFINE(InitLibKernel_1_Posix) {
 	LIB_FUNC("mkx2fVhNMsg", Posix::pthread_cond_broadcast);
 	LIB_FUNC("2MOy+rUfuhQ", Posix::pthread_cond_signal);
 	LIB_FUNC("0TyVk4MSLt0", Posix::pthread_cond_init);
+	LIB_FUNC("RXXqi4CtF8w", Posix::pthread_cond_destroy);
 	LIB_FUNC("Op8TBGY5KHg", Posix::pthread_cond_wait);
 	LIB_FUNC("Z4QosVuAsA0", Posix::pthread_once);
 	LIB_FUNC("1471ajPzxh0", Posix::pthread_rwlock_destroy);
@@ -3172,6 +3186,8 @@ LIB_DEFINE(InitLibKernel_1_Semaphore) {
 }
 
 LIB_DEFINE(InitLibKernel_1_Pthread) {
+	LIB_FUNC("P41kTWUS3EI", Posix::pthread_getschedparam);
+	LIB_FUNC("oIRFTjoILbg", Posix::pthread_setschedparam);
 	LIB_FUNC("9UK1vLZQft4", LibKernel::PthreadMutexLock);
 	LIB_FUNC("tn3VlD0hG60", LibKernel::PthreadMutexUnlock);
 	LIB_FUNC("2Of0f+3mhhE", LibKernel::PthreadMutexDestroy);
@@ -3313,6 +3329,14 @@ static void AddLibkernelUnityFunc(Loader::SymbolDatabase* s, const char* nid, ui
 	s->Add(sr, func, dbg_name);
 }
 
+namespace LibKernelSyncExports {
+LIB_VERSION("libkernel_sync_on_address", 1, "libkernel", 1, 1);
+LIB_DEFINE(Init) {
+	LIB_FUNC("Hc4CaR6JBL0", Posix::KernelSyncOnAddressWait);
+	LIB_FUNC("q2y-wDIVWZA", Posix::KernelSyncOnAddressWake);
+}
+} // namespace LibKernelSyncExports
+
 LIB_DEFINE(InitLibKernel_1) {
 	InitLibKernel_1_FS(s);
 	InitLibKernel_1_Mem(s);
@@ -3322,6 +3346,7 @@ LIB_DEFINE(InitLibKernel_1) {
 	InitLibKernel_1_Pthread(s);
 	LibKernelApr::InitLibKernel_1_Apr(s);
 	Posix::InitLibKernel_1_Posix(s);
+	LibKernelSyncExports::Init(s);
 	LibKernelWriteThrottling::InitLibKernelWriteThrottling(s);
 
 	LIB_OBJECT("f7uOxY9mM1U", &LibKernel::g_stack_chk_guard);

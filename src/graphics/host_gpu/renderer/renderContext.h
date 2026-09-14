@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "kernel/eventQueue.h"
+#include "graphics/guest_gpu/tessellationState.h"
 
 #include <memory>
 #include <vector>
@@ -46,6 +47,7 @@ public:
 	BufferCache&        GetBufferCache() { return m_gpu_resources.GetBufferCache(); }
 	TextureCache&       GetTextureCache() { return m_gpu_resources.GetTextureCache(); }
 	RenderExecutor&     GetRenderExecutor() { return m_render_executor; }
+	TessellationState& GetTessellationState() { return m_tessellation; }
 
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
 	void DeleteInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
@@ -58,6 +60,7 @@ private:
 	};
 
 	GraphicContext&           m_graphics;
+	TessellationState         m_tessellation;
 	Common::Mutex             m_mutex;
 	RenderExecutor            m_render_executor;
 	CommandScheduler          m_command_scheduler;

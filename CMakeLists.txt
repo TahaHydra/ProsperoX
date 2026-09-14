@@ -490,6 +490,13 @@ target_include_directories(image_page_table_tests PRIVATE ${inc_headers})
 add_kyty_full_emulator_test(shader_recompiler_compute_tests "${KYTY_TESTS_DIR}/ShaderRecompilerComputeTests.cpp")
 add_kyty_full_emulator_test(phase5_presentation_tests "${KYTY_TESTS_DIR}/Phase5PresentationTests.cpp")
 add_kyty_full_emulator_test(phase5_random_stress_tests "${KYTY_TESTS_DIR}/Phase5RandomStressTests.cpp")
+add_kyty_full_emulator_test(phase6_input_tests "${KYTY_TESTS_DIR}/Phase6InputTests.cpp")
+# The fixture includes real audio.cpp with a headless SDL transport adapter.
+set(phase6_emulator_src "${kyty_emulator_src}")
+list(REMOVE_ITEM kyty_emulator_src "${KYTY_SOURCE_DIR}/libs/audio.cpp" "${KYTY_SOURCE_DIR}/libs/libSaveData.cpp")
+add_kyty_full_emulator_test(phase6_audio_tests "${KYTY_TESTS_DIR}/Phase6AudioTests.cpp")
+set(kyty_emulator_src "${phase6_emulator_src}")
+unset(phase6_emulator_src)
 
 set(gpu_test_generated_dir "${PROJECT_BINARY_DIR}/gpu_test_shaders")
 set(gpu_test_ms_depth_source
@@ -585,6 +592,24 @@ if(BUILD_TESTING)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
 	add_test(NAME sync_on_address COMMAND $<TARGET_FILE:sync_on_address_tests>)
 	add_test(NAME audio_out2_port COMMAND $<TARGET_FILE:audio_out2_port_tests>)
+	add_test(NAME phase6_audio_pcm COMMAND $<TARGET_FILE:phase6_audio_tests>)
+	add_test(NAME phase6_audio_errors COMMAND $<TARGET_FILE:phase6_audio_tests> --errors)
+	add_test(NAME phase6_audio_streaming COMMAND $<TARGET_FILE:phase6_audio_tests> --streaming)
+	add_test(NAME phase6_self_repack COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-repack)
+	add_test(NAME phase6_posix_files COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-posix)
+	add_test(NAME phase6_agc_init COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-agc-valid)
+	add_test(NAME phase6_ring COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-ring)
+	add_test(NAME phase6_tessellation_boundary COMMAND ${CMAKE_COMMAND}
+		-DPROBE=$<TARGET_FILE:shader_recompiler_compute_tests> -P "${KYTY_TESTS_DIR}/ExpectPhase6Tessellation.cmake")
+	add_test(NAME phase6_agc_unsupported COMMAND ${CMAKE_COMMAND} -DPROBE=$<TARGET_FILE:phase0_runtime_probes>
+		-P "${KYTY_TESTS_DIR}/ExpectPhase6AgcUnsupported.cmake")
+	set_tests_properties(phase6_agc_init phase6_agc_unsupported PROPERTIES TIMEOUT 30 LABELS "host;phase6")
+	add_test(NAME phase6_input COMMAND $<TARGET_FILE:phase6_input_tests>)
+	add_test(NAME phase6_media COMMAND $<TARGET_FILE:phase6_input_tests> --media)
+	add_test(NAME phase6_save_store COMMAND $<TARGET_FILE:phase6_audio_tests> --save-store)
+	add_test(NAME phase6_save_restart COMMAND ${CMAKE_COMMAND} -DPROBE=$<TARGET_FILE:phase6_audio_tests>
+		-P "${KYTY_TESTS_DIR}/Phase6SaveRestart.cmake")
+	set_tests_properties(phase6_audio_pcm phase6_audio_errors phase6_input PROPERTIES TIMEOUT 60 LABELS "host;phase6")
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
@@ -652,8 +677,13 @@ if(BUILD_TESTING)
 		shader_recompiler_compute_tests
 		virtual_memory_allocation_tests
 		audio_out2_port_tests
+		phase6_audio_tests
+		phase6_input_tests
 	)
 	include("${CMAKE_CURRENT_SOURCE_DIR}/scripts/phase0/test-labels.cmake")
+	set_tests_properties(phase6_tessellation_boundary PROPERTIES TIMEOUT 100 LABELS "gpu;phase6" RUN_SERIAL TRUE)
+	set_tests_properties(phase6_ring phase6_agc_init phase6_agc_unsupported phase6_audio_pcm phase6_audio_errors phase6_audio_streaming phase6_self_repack phase6_posix_files phase6_input phase6_media phase6_save_store phase6_save_restart
+		PROPERTIES TIMEOUT 60 LABELS "host;phase6")
 endif()
 
 

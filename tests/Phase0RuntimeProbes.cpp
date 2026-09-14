@@ -5,6 +5,10 @@
 #include "common/subsystems.h"
 #include "kernel/fileSystem.h"
 #include "Phase1RuntimeTests.inc"
+#include "Phase6SelfRepackTests.inc"
+#include "Phase6PosixTests.inc"
+#include "Phase6AgcTests.inc"
+#include "Phase6RingTests.inc"
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -17,6 +21,13 @@ int main(int argc, char** argv) {
     Config::Load(options);
     subsystems.Initialize<Log::Lifecycle>();
     if (argc != 2) { return 2; }
+    if (std::strcmp(argv[1], "--phase6-ring") == 0) {
+        subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
+        const auto result=Phase6Ring::Run();
+        subsystems.Destroy();
+        return result;
+    }
+    if (std::strncmp(argv[1], "--phase6-agc-", 13) == 0) return Phase6Agc::Run(argv[1]+13);
     if (std::strcmp(argv[1], "--phase1-legacy-plt") == 0) {
         Loader::RelocateHandlerStack args{{7,0,0}};
         Loader::RelocateHandler(args);
@@ -52,6 +63,19 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[1], "--phase1-executables") == 0) {
         const auto result = Phase1::Executables();
+        subsystems.Destroy();
+        return result;
+    }
+    if (std::strcmp(argv[1], "--phase6-repack") == 0) {
+        const auto result = Phase6Repack::Run();
+        subsystems.Destroy();
+        return result;
+    }
+    if (std::strcmp(argv[1], "--phase6-posix") == 0) {
+        subsystems.Initialize<Libs::LibKernel::PthreadLifecycle>();
+        subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
+        subsystems.Initialize<Libs::LibKernel::FileSystem::Lifecycle>();
+        const auto result = Phase6Posix::Run();
         subsystems.Destroy();
         return result;
     }

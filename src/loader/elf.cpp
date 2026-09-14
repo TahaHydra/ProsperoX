@@ -4,6 +4,8 @@
 #include "common/file.h"
 #include "common/logging/log.h"
 
+#include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 
@@ -283,6 +285,15 @@ void Elf64::LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size) {
 			}
 		}
 
+		if (m_repack_version >= 0) {
+			const auto& version = m_phdr[m_repack_version];
+			if (file_offset >= version.p_offset && InRange(file_offset - version.p_offset, size, version.p_filesz)) {
+				m_f->Seek(m_repack_version_offset + file_offset - version.p_offset);
+				m_f->Read(reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr)), size);
+				return;
+			}
+			EXIT("repacked SELF read has no validated payload\n");
+		}
 		if (m_self->file_size <= m_f->Size() && m_f->Size() - m_self->file_size == size) {
 			m_f->Seek(m_self->file_size);
 			m_f->Read(reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr)), size);
@@ -350,6 +361,9 @@ const char* Elf64::GetSectionName(int index) const {
 
 void Elf64::Clear() {
 	m_error.clear();
+	m_repack_version = -1;
+	m_repack_version_offset = 0;
+	m_repack_omitted.clear();
 	m_dynamic_size = 0;
 	m_dynamic_data_size = 0;
 	if (m_f != nullptr) {
@@ -374,6 +388,10 @@ void Elf64::DbgDump(const std::string& folder) {
 	Common::File::CreateDirectories(folder_str);
 
 	for (uint16_t i = 0; i < m_ehdr->e_phnum; i++) {
+		if (!m_repack_omitted.empty() && m_repack_omitted[i]) {
+			LOGF("SELF repack: debug dump omits non-runtime NOTE phdr=%u\n", unsigned(i));
+			continue;
+		}
 		if (m_phdr[i].p_filesz == 0u) {
 			continue;
 		}
@@ -397,7 +415,7 @@ void Elf64::DbgDump(const std::string& folder) {
 		fout.Close();
 	}
 
-	for (uint16_t i = 0; i < m_ehdr->e_shnum; i++) {
+	for (uint16_t i = 0; m_shdr != nullptr && i < m_ehdr->e_shnum; i++) {
 		if (m_shdr[i].sh_size == 0u || m_shdr[i].sh_type == 8) {
 			continue;
 		}
@@ -432,7 +450,7 @@ void Elf64::DbgDump(const std::string& folder) {
 	fout.Close();
 
 	fout.Create(folder_str + "shdr.txt");
-	for (uint16_t i = 0; i < m_ehdr->e_shnum; i++) {
+	for (uint16_t i = 0; m_shdr != nullptr && i < m_ehdr->e_shnum; i++) {
 		const char* section_name = GetSectionName(i);
 		fout.Printf("--- shdr [%d] %s ---\n", i, section_name != nullptr ? section_name : "");
 		DbgPrintShdr64(m_shdr.get() + i, fout);
@@ -663,6 +681,117 @@ bool Elf64::ValidateDynamic() {
 	return true;
 }
 
+bool Elf64::TryRepackedSelf() {
+	const auto repack_mismatch = [](int line) { LOGF("SELF repack: contract mismatch at elf.cpp:%d\n", line); return false; };
+	// Original bounded implementation of docs/self-repack-contract.md. This
+	// fallback never authenticates or decrypts a container. Failure is closed.
+	constexpr uint32_t version_type = 0x6fffff01, comment_type = 0x6fffff00, note_type = 4;
+	const auto count = m_self->segments_num;
+	if (!IsNextGen() || m_self->ident[4] != 0 || m_self->unknown != 0x22 ||
+	    m_self->pad != 0 || count == 0 || count % 2 || m_ehdr->e_phoff != sizeof(Elf64_Ehdr)) return repack_mismatch(__LINE__);
+	const uint64_t table_end = sizeof(SelfHeader) + uint64_t(count) * sizeof(SelfSegment) +
+	                          sizeof(Elf64_Ehdr) + uint64_t(m_ehdr->e_phnum) * sizeof(Elf64_Phdr);
+	const uint64_t extended = (table_end + 15) & ~uint64_t(15);
+	if (!InRange(extended, 64, m_self->size1) || (m_self->size1 & 15) ||
+	    m_self->size2 < 256 || (m_self->size2 & 15) ||
+	    !InRange(m_self->size1, m_self->size2, m_self->file_size)) return repack_mismatch(__LINE__);
+	uint64_t program_type = 0;
+	m_f->Seek(extended + 8);
+	m_f->Read(&program_type, sizeof(program_type));
+	if (program_type != 1) return repack_mismatch(__LINE__);
+	auto overlap = [](uint64_t a, uint64_t n, uint64_t b, uint64_t m) {
+		return n && m && (a <= b ? b - a < n : a - b < m);
+	};
+	for (uint16_t i = 0; i < m_ehdr->e_phnum; ++i) {
+		const auto& p = m_phdr[i];
+		if (p.p_filesz > UINT32_MAX || p.p_offset > UINT64_MAX - p.p_filesz ||
+		    p.p_vaddr > UINT64_MAX - p.p_memsz) return repack_mismatch(__LINE__);
+	}
+	std::vector<unsigned> owners;
+	uint64_t logical_owner_end = 0;
+	uint64_t cursor = uint64_t(m_self->size1) + m_self->size2;
+	uint64_t last_end = 0;
+	for (uint16_t i = 0; i < count; i += 2) {
+		const auto& digest = m_self_segments[i];
+		const auto& data = m_self_segments[i + 1];
+		const unsigned index = (data.type >> 20) & 0xfff;
+		if (index >= m_ehdr->e_phnum || digest.type != (0x10004 | (uint64_t(i + 1) << 20)) ||
+		    data.type != (0x2804 | (uint64_t(index) << 20))) return repack_mismatch(__LINE__);
+		const auto& p = m_phdr[index];
+		if ((p.p_type != PT_LOAD && p.p_type != PT_OS_RELRO && p.p_type != PT_OS_DYNLIBDATA &&
+		     p.p_type != comment_type) || p.p_filesz == 0) return repack_mismatch(__LINE__);
+		for (const auto previous: owners) {
+			const auto& q = m_phdr[previous];
+			if (index == previous || overlap(p.p_offset, p.p_filesz, q.p_offset, q.p_filesz)) return repack_mismatch(__LINE__);
+			if ((p.p_type == PT_LOAD || p.p_type == PT_OS_RELRO) &&
+			    (q.p_type == PT_LOAD || q.p_type == PT_OS_RELRO) &&
+			    overlap(p.p_vaddr, p.p_memsz, q.p_vaddr, q.p_memsz)) return repack_mismatch(__LINE__);
+		}
+		owners.push_back(index);
+		logical_owner_end = std::max(logical_owner_end, p.p_offset + p.p_filesz);
+		const uint64_t digest_size = ((p.p_filesz + 0x3fff) / 0x4000) * 32;
+		if (digest.offset != cursor || digest.compressed_size != digest_size ||
+		    digest.decompressed_size != digest_size || !InRange(cursor, digest_size, m_self->file_size)) return repack_mismatch(__LINE__);
+		cursor = (cursor + digest_size + 15) & ~uint64_t(15);
+		if (data.offset != cursor || data.compressed_size != p.p_filesz ||
+		    data.decompressed_size != p.p_filesz || !InRange(cursor, p.p_filesz, m_self->file_size)) return repack_mismatch(__LINE__);
+		last_end = cursor + p.p_filesz;
+		if (last_end > UINT64_MAX - 15) return repack_mismatch(__LINE__);
+		cursor = (last_end + 15) & ~uint64_t(15);
+	}
+	if (cursor != m_self->file_size) return repack_mismatch(__LINE__);
+	int version = -1;
+	std::vector<bool> omitted(m_ehdr->e_phnum, false);
+	for (uint16_t i = 0; i < m_ehdr->e_phnum; ++i) {
+		const auto& p = m_phdr[i];
+		if (p.p_type == version_type) {
+			if (version >= 0 || p.p_flags || p.p_vaddr || p.p_paddr || p.p_align > 16 ||
+			    (p.p_align && (p.p_align & (p.p_align - 1))) ||
+			    p.p_filesz == 0 || p.p_filesz > 64 * 1024 * 1024) return repack_mismatch(__LINE__);
+			const auto alignment = std::max(uint64_t(1), p.p_align);
+			// VERSION is supplementary metadata, never a guest mapping. Repackers
+			// retain its header; p_memsz need not track the emitted file payload.
+			if (p.p_memsz > 64 * 1024 * 1024 ||
+			    (p.p_memsz != p.p_filesz && (p.p_memsz & (alignment - 1)))) return repack_mismatch(__LINE__);
+			version = i;
+		}
+		if (!p.p_filesz) continue;
+		unsigned matches = 0;
+		for (const auto index: owners) {
+			const auto& q = m_phdr[index];
+			if (!overlap(p.p_offset, p.p_filesz, q.p_offset, q.p_filesz)) continue;
+			if (p.p_offset < q.p_offset || !InRange(p.p_offset - q.p_offset, p.p_filesz, q.p_filesz)) return repack_mismatch(__LINE__);
+			++matches;
+		}
+		if (matches > 1 || (matches && p.p_type == version_type)) return repack_mismatch(__LINE__);
+		if (matches) continue;
+		if (p.p_type == note_type && !p.p_flags && !p.p_vaddr && !p.p_paddr && !p.p_memsz &&
+		    (p.p_align == 0 || p.p_align == 1 || p.p_align == 4)) omitted[i] = true;
+		else if (p.p_type != version_type) return repack_mismatch(__LINE__);
+	}
+	if (version < 0) return repack_mismatch(__LINE__);
+	const auto& v = m_phdr[version];
+	for (uint16_t i = 0; i < m_ehdr->e_phnum; ++i) {
+		if (i != version && !omitted[i]) continue;
+		const auto& p = m_phdr[i];
+		if (omitted[i] && p.p_offset < logical_owner_end) return repack_mismatch(__LINE__);
+		for (uint16_t j = 0; j < m_ehdr->e_phnum; ++j) {
+			if (i != j && overlap(p.p_offset, p.p_filesz, m_phdr[j].p_offset, m_phdr[j].p_filesz)) return repack_mismatch(__LINE__);
+		}
+	}
+	const uint64_t physical_size = m_f->Size();
+	// Recognize the published writer's unpadded placement only. Do not try a
+	// second location based on trailer contents: that could reinterpret appended
+	// or truncated bytes as a different layout.
+	if (!InRange(last_end, v.p_filesz, physical_size) || physical_size - last_end != v.p_filesz) return repack_mismatch(__LINE__);
+	m_repack_version = version;
+	m_repack_version_offset = last_end;
+	m_repack_omitted = std::move(omitted);
+	LOGF("SELF repack: validated plain FSELF, VERSION phdr=%d physical_offset=%" PRIu64 " size=%" PRIu64 "\n",
+	     version, last_end, v.p_filesz);
+	return true;
+}
+
 bool Elf64::ValidateHeaders() {
 	unsigned dynamic_count = 0, data_count = 0, tls_count = 0;
 	if (m_self != nullptr) {
@@ -707,8 +836,20 @@ bool Elf64::ValidateHeaders() {
 				const auto& owner = m_phdr[(segment.type >> 20u) & 0xfffu];
 				if (p.p_offset >= owner.p_offset && InRange(p.p_offset - owner.p_offset, p.p_filesz, owner.p_filesz)) represented = true;
 			}
-			if (!represented && !(p.p_type == PT_OS_DYNLIBDATA && m_f->Size() - m_self->file_size == p.p_filesz))
-				return Reject("SELF segment has no supported payload mapping");
+			if (!represented && !(p.p_type == PT_OS_DYNLIBDATA && m_f->Size() - m_self->file_size == p.p_filesz)) {
+				if (m_repack_version < 0) TryRepackedSelf();
+				if (m_repack_version >= 0 && (i == m_repack_version || m_repack_omitted[i])) continue;
+				// Report numeric container metadata only, before Reject clears it.
+				// This does not infer a payload location from nearby or trailing bytes.
+				char reason[384];
+				std::snprintf(reason, sizeof(reason),
+				              "SELF segment has no supported payload mapping: phdr=%u type=0x%08" PRIx32
+				              " offset=%" PRIu64 " filesz=%" PRIu64 " self_size=%" PRIu64
+				              " file_size=%" PRIu64 " trailing=%" PRIu64,
+				              unsigned(i), p.p_type, p.p_offset, p.p_filesz, m_self->file_size,
+				              uint64_t(m_f->Size()), uint64_t(m_f->Size() - m_self->file_size));
+				return Reject(reason);
+			}
 		}
 	}
 	// TLS initialization is copied from mapped virtual bytes, not directly from
@@ -833,6 +974,10 @@ void Elf64::Open(const std::filesystem::path& file_name) {
 
 void Elf64::Save(const std::filesystem::path& file_name) {
 	EXIT_IF(!IsValid());
+	if (m_repack_version >= 0) {
+		LOGF("SELF repack: refusing full ELF export; omitted metadata cannot be reconstructed\n");
+		return;
+	}
 
 	if (IsValid()) {
 		Common::File f;

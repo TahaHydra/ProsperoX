@@ -1,0 +1,11 @@
+foreach(mode index auto patch)
+  execute_process(COMMAND "${PROBE}" "--phase6-tess-${mode}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 30)
+  if(NOT result EQUAL 86 OR NOT "${output}${error}" MATCHES "AGC_NATIVE_TESSELLATION_UNSUPPORTED.*mapping=valid")
+    message(FATAL_ERROR "${mode}: expected first-use rejection, got ${result}\n${output}\n${error}")
+  endif()
+  if("${output}${error}" MATCHES "VUID-|SYNC-HAZARD|Validation Error")
+    message(FATAL_ERROR "${mode}: Vulkan validation failure\n${output}\n${error}")
+  endif()
+  message(STATUS "${mode}: ${error}")
+endforeach()

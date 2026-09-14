@@ -72,17 +72,27 @@ DCC slice ranges, metadata classification, image overlap, HTile clear, and
 buffer ranges. The presenter test identified the device as AMD Radeon RX 7800 XT
 (vendor `1002`, device `747e`, driver `8389003`). A ten-second CTest presentation
 run completed 859 frames with 1,317,171,216 live VMA bytes and 13 live
-allocations, unchanged from warm-up. A separate direct run remained stable for
-90 seconds (7,681 frames) with the same live allocation totals before being
-stopped at the user's request; the exact 3,600-second soak is intentionally
-deferred and is the only remaining Phase 5 validation action.
+allocations, unchanged from warm-up. The final unchanged deterministic soak
+passed for 3,600.002 seconds and 311,884 frames, with those same warm/peak VMA
+totals (1,317,171,216 bytes, 13 allocations) and exit 0. The corrected randomized
+test then passed for 30.051 seconds, 251 batches / 501 operations, seed
+`0x5058352026091201`, with warm/peak bytes 1,317,231,632 / 1,317,273,616 and
+17 / 17 allocations. Both ran on the RX 7800 XT with Vulkan and synchronization
+validation enabled and zero usage/synchronization errors. See
+[final validation](phase5-final-validation.md) for immutable logs, test review,
+the diagnosed invalid-pitch fixture, upstream comparison, and reproduction.
 
 No commercial runtime files were accessed. Phase 6 has not started.
 
-The all-68-test CTest sweep was also executed. Its process-order run was not a
-valid clean gate: legacy host probes intermittently failed while reserving the
-13,824 MiB guest direct-memory window, and a small number of older filesystem
-and path probes were order-sensitive. The same binaries pass when rerun alone,
-and the complete Phase 5-focused 13-test gate above remained 13/13. This host
-commit-limit/flakiness issue is recorded for follow-up rather than counted as a
-Phase 5 resource or Vulkan failure.
+The final all-68-test CTest sweep passed 67 tests, including every registered
+Phase 5 test. The monolithic `shader_recompiler_compute` test exits at the
+previously documented unavailable attachment-feedback-loop dynamic-state
+capability; CTest reports that exclusion as a failure. This is not a literal
+68/68 clean result, and later cases within that executable remain unexecuted.
+The earlier host direct-memory reservation and filesystem/path flakiness did
+not recur in this final sweep. Evidence is preserved in
+`_Build/evidence/phase5-close-full-regression-20260912`.
+
+The supported Phase 5 checkpoint is closed with that pre-existing capability
+exclusion retained. The final validation required test changes only; production
+implementation remains at the completed Phase 5 baseline.

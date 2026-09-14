@@ -4452,6 +4452,10 @@ int KYTY_SYSV_ABI pthread_cond_init(LibKernel::PthreadCond*           cond,
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondInit(cond, attr, nullptr));
 }
 
+int KYTY_SYSV_ABI pthread_cond_destroy(LibKernel::PthreadCond* cond) {
+	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondDestroy(cond));
+}
+
 int KYTY_SYSV_ABI pthread_condattr_setclock(LibKernel::PthreadCondattr* attr,
                                             LibKernel::KernelClockid    clock_id) {
 	PRINT_NAME();

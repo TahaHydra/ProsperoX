@@ -1,4 +1,31 @@
 // Original synthetic packets and data. Included inside VulkanHarness.
+int CheckPhase6TessellationBoundary(const char* mode) {
+  constexpr const char* name="Phase6TessellationBoundary";
+  EnsureRuntimeContext();
+  auto& renderer=Renderer();
+  constexpr uint64_t base=0x209d00000ull, bytes=0x10000;
+  int64_t offset=-1;
+  Require(name,"allocate",LibKernel::Memory::KernelAllocateDirectMemory(0,
+    LibKernel::Memory::KernelGetDirectMemorySize(),bytes,bytes,0,&offset)==0,"allocate failed");
+  void* mapped=reinterpret_cast<void*>(base);
+  Require(name,"map",LibKernel::Memory::KernelMapDirectMemory(&mapped,bytes,0x33,0x10,offset,bytes)==0,"map failed");
+  Require(name,"configure",renderer.GetTessellationState().Configure(base,bytes)==nullptr,"configure failed");
+  Require(name,"offchip",renderer.GetTessellationState().ConfigureOffchip(0,511)==nullptr,
+    "offchip configure failed");
+  HW::Context registers{}; HW::UserConfig user{}; HW::Shader shaders{};
+  const bool patch=std::strcmp(mode,"patch")==0;
+  registers.SetShaderStages(patch ? 0 : 4);
+  user.SetPrimitiveType(patch ? Prospero::PrimitiveType::kPatch : Prospero::PrimitiveType::kTriList);
+  auto& scheduler=renderer.GetCommandScheduler();
+  scheduler.Begin(registers,user,shaders);
+  // Empty draws do not consume the ring. Nonempty draws must fail before
+  // shader lookup or resource/pipeline work, even without a valid shader.
+  const bool indexed=std::strcmp(mode,"index")==0;
+  RenderExecutorTestAccess::TessellationDraw(renderer.GetRenderExecutor(),scheduler.Current(),indexed,0);
+  RenderExecutorTestAccess::TessellationDraw(renderer.GetRenderExecutor(),scheduler.Current(),indexed,3);
+  Fail(name,"first use","native tessellation unexpectedly returned instead of failing at its consumer");
+}
+
 int CheckPhase3Completion(unsigned iterations) {
   constexpr const char* name = "Phase3Completion";
   EnsureRuntimeContext();

@@ -253,6 +253,7 @@ int KYTY_SYSV_ABI pthread_attr_setschedpolicy(LibKernel::PthreadAttr* attr, int 
 int KYTY_SYSV_ABI pthread_attr_setstacksize(LibKernel::PthreadAttr* attr, size_t stack_size);
 int KYTY_SYSV_ABI pthread_cond_broadcast(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI pthread_cond_signal(LibKernel::PthreadCond* cond);
+int KYTY_SYSV_ABI pthread_cond_destroy(LibKernel::PthreadCond* cond);
 int KYTY_SYSV_ABI pthread_cond_init(LibKernel::PthreadCond*           cond,
                                     const LibKernel::PthreadCondattr* attr);
 int KYTY_SYSV_ABI pthread_condattr_init(LibKernel::PthreadCondattr* attr);
