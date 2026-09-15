@@ -1,7 +1,7 @@
 diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.h b/src/graphics/host_gpu/renderer/cache/bufferCache.h
 --- a/src/graphics/host_gpu/renderer/cache/bufferCache.h
 +++ b/src/graphics/host_gpu/renderer/cache/bufferCache.h
-@@ -139,7 +139,8 @@ private:
+@@ -139,6 +139,7 @@ private:
  	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
  	void DownloadBufferMemory(std::span<const DownloadCopy> copies);
 -	void ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write);
@@ -13,7 +13,7 @@ diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.h b/src/graphics/h
 diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
 --- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
 +++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
-@@ -14,6 +14,7 @@
+@@ -14,7 +14,8 @@
  #include "kernel/memory.h"
  
  #include <algorithm>
@@ -37,7 +37,7 @@ diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics
  } // namespace
  
  void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source,
-@@ -52,8 +61,14 @@ void BufferCache::RecordCompletionValue(uint64_t address, uint64_t value, uint32
+@@ -52,8 +61,11 @@ void BufferCache::RecordCompletionValue(uint64_t address, uint64_t value, uint32
  
  void BufferCache::ReadCommandMemory(uint64_t address, void* output, uint64_t size) {
  	EXIT_IF(output == nullptr || size == 0 || size > UINT64_MAX - address);
@@ -65,7 +65,7 @@ diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics
  	if (is_write && !IsRegionRegistered(vaddr, size)) {
  		return;
  	}
-@@ -323,11 +339,19 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write)
+@@ -323,9 +339,15 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write)
  
  	// Widen nearby CPU reads so they share one GPU drain.
  	constexpr uint64_t WindowSize   = 512 * 1024;
