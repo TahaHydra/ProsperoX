@@ -10,6 +10,7 @@
 #include "Phase6AgcTests.inc"
 #include "Phase6RingTests.inc"
 #include "Phase6DriverTests.inc"
+#include "Phase6CheckpointTests.inc"
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -22,6 +23,7 @@ int main(int argc, char** argv) {
     Config::Load(options);
     subsystems.Initialize<Log::Lifecycle>();
     if (argc != 2) { return 2; }
+    if (std::strcmp(argv[1], "--phase6-checkpoint") == 0) return Phase6Checkpoint::Run();
     if (std::strcmp(argv[1], "--phase6-driver") == 0) {
         options.vulkan_validation_enabled=true;
         options.printf_direction=Config::OutputDirection::Console;

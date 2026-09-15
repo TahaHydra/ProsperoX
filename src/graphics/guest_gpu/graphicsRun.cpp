@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/perfTrace.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -39,6 +40,162 @@ static thread_local bool              g_gpu_mutex_owned   = false;
 static thread_local bool              g_gpu_thread        = false;
 static thread_local GuestGpu*         g_gpu_state         = nullptr;
 
+namespace {
+
+struct GuestGpuPerfStats {
+	std::atomic<uint64_t> submit_graphics {0};
+	std::atomic<uint64_t> submit_compute {0};
+	std::atomic<uint64_t> submit_flip {0};
+
+	std::atomic<uint64_t> process_graphics {0};
+	std::atomic<uint64_t> process_compute {0};
+	std::atomic<uint64_t> process_flip {0};
+	std::atomic<uint64_t> process_blocked {0};
+	std::atomic<uint64_t> process_ticks {0};
+	std::atomic<uint64_t> pm4_wait_reg_mem {0};
+	std::atomic<uint64_t> pm4_wait_ce {0};
+	std::atomic<uint64_t> pm4_wait_de_diff {0};
+	std::atomic<uint64_t> pm4_wait_rewind {0};
+
+	std::atomic<uint64_t> buffer_flush {0};
+	std::atomic<uint64_t> buffer_flush_wait {0};
+	std::atomic<uint64_t> buffer_wait {0};
+
+	std::atomic<uint64_t> done_calls {0};
+	std::atomic<uint64_t> idle_wait_calls {0};
+	std::atomic<uint64_t> idle_wait_ticks {0};
+
+	std::atomic<uint64_t> queue_peak {0};
+	std::atomic<uint64_t> last_report {0};
+};
+
+GuestGpuPerfStats g_guest_gpu_perf;
+
+void GpuPerfInc(std::atomic<uint64_t>& value) {
+	if (Common::PerfTrace::Enabled()) {
+		value.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+void GpuPerfQueueDepth(uint64_t depth) {
+	if (!Common::PerfTrace::Enabled()) {
+		return;
+	}
+
+	auto peak = g_guest_gpu_perf.queue_peak.load(std::memory_order_relaxed);
+
+	while (depth > peak && !g_guest_gpu_perf.queue_peak.compare_exchange_weak(
+	                           peak, depth, std::memory_order_relaxed, std::memory_order_relaxed)) {
+	}
+}
+
+void GpuPerfAddElapsed(std::atomic<uint64_t>& value, uint64_t begin) {
+	if (begin == 0 || !Common::PerfTrace::Enabled()) {
+		return;
+	}
+
+	const auto end = Common::Timer::QueryPerformanceCounter();
+
+	if (end >= begin) {
+		value.fetch_add(end - begin, std::memory_order_relaxed);
+	}
+}
+
+void GpuPerfReport() {
+	if (!Common::PerfTrace::Enabled()) {
+		return;
+	}
+
+	const auto frequency = Common::Timer::QueryPerformanceFrequency();
+
+	if (frequency == 0) {
+		return;
+	}
+
+	const auto now  = Common::Timer::QueryPerformanceCounter();
+	auto       last = g_guest_gpu_perf.last_report.load(std::memory_order_relaxed);
+
+	if (last == 0) {
+		g_guest_gpu_perf.last_report.compare_exchange_strong(last, now, std::memory_order_relaxed,
+		                                                     std::memory_order_relaxed);
+		return;
+	}
+
+	if (now - last < frequency) {
+		return;
+	}
+
+	if (!g_guest_gpu_perf.last_report.compare_exchange_strong(last, now, std::memory_order_relaxed,
+	                                                          std::memory_order_relaxed)) {
+		return;
+	}
+
+	const double seconds = static_cast<double>(now - last) / static_cast<double>(frequency);
+
+	auto rate = [seconds](std::atomic<uint64_t>& value) {
+		const auto count = value.exchange(0, std::memory_order_relaxed);
+
+		return seconds > 0.0 ? static_cast<double>(count) / seconds : 0.0;
+	};
+
+	const auto submit_gfx  = rate(g_guest_gpu_perf.submit_graphics);
+	const auto submit_cmp  = rate(g_guest_gpu_perf.submit_compute);
+	const auto submit_flip = rate(g_guest_gpu_perf.submit_flip);
+
+	const auto process_gfx  = rate(g_guest_gpu_perf.process_graphics);
+	const auto process_cmp  = rate(g_guest_gpu_perf.process_compute);
+	const auto process_flip = rate(g_guest_gpu_perf.process_flip);
+	const auto blocked      = rate(g_guest_gpu_perf.process_blocked);
+	const auto wait_reg_mem = rate(g_guest_gpu_perf.pm4_wait_reg_mem);
+
+	const auto wait_ce = rate(g_guest_gpu_perf.pm4_wait_ce);
+
+	const auto wait_de_diff = rate(g_guest_gpu_perf.pm4_wait_de_diff);
+
+	const auto wait_rewind = rate(g_guest_gpu_perf.pm4_wait_rewind);
+
+	const auto flush       = rate(g_guest_gpu_perf.buffer_flush);
+	const auto flush_wait  = rate(g_guest_gpu_perf.buffer_flush_wait);
+	const auto buffer_wait = rate(g_guest_gpu_perf.buffer_wait);
+
+	const auto done       = rate(g_guest_gpu_perf.done_calls);
+	const auto idle_calls = rate(g_guest_gpu_perf.idle_wait_calls);
+
+	const auto process_ticks =
+	    g_guest_gpu_perf.process_ticks.exchange(0, std::memory_order_relaxed);
+
+	const auto idle_ticks = g_guest_gpu_perf.idle_wait_ticks.exchange(0, std::memory_order_relaxed);
+
+	const auto queue_peak = g_guest_gpu_perf.queue_peak.exchange(0, std::memory_order_relaxed);
+
+	const double process_ms_per_second =
+	    static_cast<double>(process_ticks) * 1000.0 / static_cast<double>(frequency) / seconds;
+
+	const double idle_ms_per_second =
+	    static_cast<double>(idle_ticks) * 1000.0 / static_cast<double>(frequency) / seconds;
+
+	std::printf("GPU PERF "
+	            "submit[gfx=%7.1f cmp=%6.1f flip=%5.1f]/s "
+	            "process[gfx=%7.1f cmp=%6.1f flip=%5.1f blocked=%7.1f]/s "
+
+	            "wait[reg=%7.1f ce=%7.1f dediff=%7.1f rewind=%7.1f]/s "
+	            "flush=%7.1f/s "
+	            "flushwait=%6.1f/s "
+	            "bufwait=%6.1f/s "
+	            "done=%6.1f/s "
+	            "idle=%6.1f/s "
+	            "qpeak=%llu "
+	            "process_elapsed=%8.2fms/s "
+	            "idle_wait=%8.2fms/s\n",
+	            submit_gfx, submit_cmp, submit_flip, process_gfx, process_cmp, process_flip,
+	            blocked, wait_reg_mem, wait_ce, wait_de_diff, wait_rewind, flush, flush_wait,
+	            buffer_wait, done, idle_calls, static_cast<unsigned long long>(queue_peak),
+	            process_ms_per_second, idle_ms_per_second);
+
+	std::fflush(stdout);
+}
+
+} // namespace
 struct DrawIndirectArgs {
 	uint32_t vertex_count_per_instance;
 	uint32_t instance_count;
@@ -160,6 +317,7 @@ void GuestGpu::Submit(std::span<const uint32_t> draw_commands,
 	if (draw_commands.empty()) {
 		return;
 	}
+	GpuPerfInc(g_guest_gpu_perf.submit_graphics);
 	GpuMutexLock lock(m_submission_mutex);
 	Submission   submission;
 	submission.type              = SubmissionType::Graphics;
@@ -173,6 +331,7 @@ void GuestGpu::Submit(std::span<const uint32_t> draw_commands,
 
 void GuestGpu::SubmitCompute(uint32_t queue, std::span<const uint32_t> commands) {
 	EXIT_IF(commands.empty());
+	GpuPerfInc(g_guest_gpu_perf.submit_compute);
 	GpuMutexLock lock(m_submission_mutex);
 
 	EXIT_NOT_IMPLEMENTED(queue < ComputeQueueBase || queue >= ComputeQueueBase + ComputeQueueCount);
@@ -186,6 +345,7 @@ void GuestGpu::SubmitCompute(uint32_t queue, std::span<const uint32_t> commands)
 }
 
 void GuestGpu::SubmitFlipPreparation(uint64_t request_id) {
+	GpuPerfInc(g_guest_gpu_perf.submit_flip);
 	GpuMutexLock lock(m_submission_mutex);
 	Submission   submission;
 	submission.type            = SubmissionType::FlipPreparation;
@@ -197,6 +357,7 @@ void GuestGpu::SubmitFlipPreparation(uint64_t request_id) {
 }
 
 void GuestGpu::Done() {
+	GpuPerfInc(g_guest_gpu_perf.done_calls);
 	GpuMutexLock lock(m_submission_mutex);
 	if (!IsGpuThread()) {
 		WaitForIdle();
@@ -265,14 +426,17 @@ void CommandProcessor::BufferInit() {
 }
 
 void CommandProcessor::BufferFlush() {
+	GpuPerfInc(g_guest_gpu_perf.buffer_flush);
 	GetScheduler().Flush();
 }
 
 void CommandProcessor::BufferFlushAndWait() {
+	GpuPerfInc(g_guest_gpu_perf.buffer_flush_wait);
 	GetScheduler().FlushAndWait();
 }
 
 void CommandProcessor::BufferWait() {
+	GpuPerfInc(g_guest_gpu_perf.buffer_wait);
 	BufferInit();
 	GetScheduler().Finish();
 }
@@ -285,6 +449,7 @@ void CommandProcessor::ResetDeCe() {
 
 void CommandProcessor::WaitCe() {
 	if (m_ce_count <= m_de_count && !m_ce_complete) {
+		GpuPerfInc(g_guest_gpu_perf.pm4_wait_ce);
 		SuspendPm4();
 	}
 }
@@ -292,12 +457,14 @@ void CommandProcessor::WaitCe() {
 void CommandProcessor::WaitDeDiff(uint32_t diff) {
 	EXIT_IF(m_de_count > m_ce_count);
 	if (m_ce_count - m_de_count >= diff) {
+		GpuPerfInc(g_guest_gpu_perf.pm4_wait_de_diff);
 		SuspendPm4();
 	}
 }
 
 void CommandProcessor::WaitForRewind(bool valid) {
 	if (!valid) {
+		GpuPerfInc(g_guest_gpu_perf.pm4_wait_rewind);
 		SuspendPm4();
 	}
 }
@@ -345,6 +512,7 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	T observed{};
 	m_renderer.GetBufferCache().ReadCommandMemory(reinterpret_cast<uint64_t>(addr), &observed, sizeof(observed));
 	if (!TestWaitRegMemValue(observed, ref, mask, func)) {
+		GpuPerfInc(g_guest_gpu_perf.pm4_wait_reg_mem);
 		SuspendPm4();
 	}
 }
@@ -453,14 +621,21 @@ void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(!m_accepting);
 	m_queues[submission.queue_id].push_back(std::move(submission));
 	m_submission_count++;
+	GpuPerfQueueDepth(m_submission_count);
 	m_work_available.Signal();
 }
 
 void GuestGpu::WaitForIdle() {
+	GpuPerfInc(g_guest_gpu_perf.idle_wait_calls);
+	const auto perf_begin = Common::PerfTrace::Now();
+
 	Common::LockGuard lock(m_queue_mutex);
+
 	while (m_processing || !m_commands.empty() || m_submission_count != 0) {
 		m_idle.Wait(&m_queue_mutex);
 	}
+
+	GpuPerfAddElapsed(g_guest_gpu_perf.idle_wait_ticks, perf_begin);
 }
 
 void GuestGpu::ThreadRun(void* data) {
@@ -554,6 +729,7 @@ void GuestGpu::ThreadRun(void* data) {
 			submission.blocked = true;
 			gpu->m_queues[submission.queue_id].push_front(std::move(submission));
 			gpu->m_submission_count++;
+			GpuPerfQueueDepth(gpu->m_submission_count);
 		} else {
 			for (auto& queue: gpu->m_queues) {
 				if (!queue.empty()) {
@@ -569,6 +745,17 @@ void GuestGpu::ThreadRun(void* data) {
 }
 
 bool GuestGpu::Process(Submission& submission) {
+	GpuPerfReport();
+
+	const auto perf_process_begin = Common::PerfTrace::Now();
+
+	switch (submission.type) {
+		case SubmissionType::Graphics: GpuPerfInc(g_guest_gpu_perf.process_graphics); break;
+
+		case SubmissionType::Compute: GpuPerfInc(g_guest_gpu_perf.process_compute); break;
+
+		case SubmissionType::FlipPreparation: GpuPerfInc(g_guest_gpu_perf.process_flip); break;
+	}
 	const bool first_slice = !submission.started;
 	auto& cp = GetProcessor(submission.queue_id);
 
@@ -652,6 +839,12 @@ bool GuestGpu::Process(Submission& submission) {
 			cp.PrepareCpuFlip(submission.flip_request_id);
 			break;
 	}
+
+	if (!complete) {
+		GpuPerfInc(g_guest_gpu_perf.process_blocked);
+	}
+
+	GpuPerfAddElapsed(g_guest_gpu_perf.process_ticks, perf_process_begin);
 
 	return complete;
 }

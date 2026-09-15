@@ -1,5 +1,11 @@
 # Phase 6 — Interactive integration checkpoint
 
+**Historical record.** The current September 16 pause checkpoint records real
+Bendy Chapter 1 gameplay with working audio/controller/video, unresolved low FPS
+and repeating intro, and the latest validation. See
+[Phase 6 pause checkpoint](phase6-pause-checkpoint.md). The older blockers and
+"no gameplay" statements below describe their dated runs, not the current tree.
+
 Status: **in progress, not complete**, 2026-09-14. Target: Windows 11,
 Ryzen 7 7800X3D, RX 7800 XT, 32 GB DDR5. Baseline is `b00d5a8` plus the
 retained Phase 5 validation changes. No Phase 7 work has started.

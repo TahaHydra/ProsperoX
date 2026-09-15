@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/perfTrace.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -788,16 +789,21 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	while (!token.stop_requested()) {
 		const auto sleep_begin = Common::Timer::QueryPerformanceCounter();
 		if (total_wait > 0) {
+			const auto perf_sleep_begin = Common::PerfTrace::Now();
 			const auto remaining_us =
 			    (static_cast<uint64_t>(total_wait) * 1000000u + frequency - 1) / frequency;
 			Common::Thread::SleepMicro(static_cast<uint32_t>(
 			    std::clamp<uint64_t>(remaining_us, 1, std::numeric_limits<uint32_t>::max())));
+			Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::PresentThreadSleep,
+			                              perf_sleep_begin);
 		}
 		if (token.stop_requested()) {
 			break;
 		}
 		const auto frame_begin = Common::Timer::QueryPerformanceCounter();
+		Common::PerfTrace::Count(Common::PerfTrace::Event::PresentLoop);
 		total_wait -= static_cast<int64_t>(frame_begin - sleep_begin);
+		Common::PerfTrace::ReportIfDue();
 
 		const auto refresh = std::max(Config::GetVblankFrequency(), 1u);
 		const auto period  = std::max(frequency / refresh, uint64_t {1});
@@ -807,6 +813,8 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 				m_presenter.Present(*frame, true);
 			}
 			const auto frame_end = Common::Timer::QueryPerformanceCounter();
+			Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::PresentThreadWork,
+			                              frame_begin);
 			total_wait +=
 			    static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
 			continue;
@@ -851,6 +859,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		VblankEnd();
 
 		const auto frame_end = Common::Timer::QueryPerformanceCounter();
+		Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::PresentThreadWork, frame_begin);
 		total_wait += static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
 	}
 }
@@ -860,6 +869,7 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
 	Common::LockGuard lock(m_mutex);
 
 	if (m_requests.size() + m_cpu_requests.size() >= VIDEO_OUT_FLIP_QUEUE_CAPACITY) {
+		Common::PerfTrace::Count(Common::PerfTrace::Event::FlipQueueFull);
 		return false;
 	}
 	auto& pending = source == FlipRequestSource::GpuEop ? m_requests : m_cpu_requests;
@@ -974,7 +984,10 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 	uint32_t            height  = 0;
 	bool                current = false;
 	{
+		const auto        perf_cfg_lock_begin = Common::PerfTrace::Now();
 		Common::LockGuard lock(cfg->mutex);
+		Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::VideoOutPrepareConfigMutexWait,
+		                              perf_cfg_lock_begin);
 		current = cfg->opened && !cfg->closing && cfg->generation == generation;
 		if (current) {
 			if (special) {
@@ -1065,6 +1078,7 @@ void FlipQueue::Complete(uint64_t request_id) {
 }
 
 void FlipQueue::WaitForSubmitSlot() {
+	Common::PerfTrace::Scope perf_trace(Common::PerfTrace::Bucket::FlipSubmitSlotWait);
 	Common::LockGuard lock(m_mutex);
 	while (m_requests.size() + m_cpu_requests.size() >= VIDEO_OUT_FLIP_QUEUE_CAPACITY) {
 		if (m_requests.empty()) {
@@ -1075,6 +1089,7 @@ void FlipQueue::WaitForSubmitSlot() {
 }
 
 void FlipQueue::Wait(VideoOutConfig& cfg, int index) {
+	Common::PerfTrace::Scope perf_trace(Common::PerfTrace::Bucket::FlipCompletionWait);
 	Common::LockGuard lock(m_mutex);
 
 	auto has_request = [this, &cfg, index] {
@@ -1103,6 +1118,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 		EXIT("video-out flip queue processing is already active\n");
 	}
 	if (m_requests.front().state != RequestState::Ready) {
+		Common::PerfTrace::Count(Common::PerfTrace::Event::FlipNotReady);
 		m_mutex.Unlock();
 		return false;
 	}
@@ -1112,6 +1128,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 
 	r.cfg->mutex.Lock();
 	if (!IsFlipDueLocked(*r.cfg, r.generation)) {
+		Common::PerfTrace::Count(Common::PerfTrace::Event::FlipNotDue);
 		r.cfg->mutex.Unlock();
 		Common::LockGuard queue_lock(m_mutex);
 		m_processing = false;
@@ -1127,7 +1144,10 @@ bool FlipQueue::Flip(uint32_t micros) {
 	m_requests.front().state = RequestState::Presenting;
 	m_mutex.Unlock();
 
+	const auto perf_present_begin = Common::PerfTrace::Now();
 	m_presenter.Present(*r.frame);
+	Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::FlipPresenterPresent,
+	                              perf_present_begin);
 
 	m_mutex.Lock();
 	if (m_requests.empty() || m_requests.front().id != r.id ||
@@ -1155,6 +1175,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	r.cfg->mutex.Unlock();
 
 	Graphics::RenderDocOnGuestFlip(m_presenter.Renderer());
+	Common::PerfTrace::Count(Common::PerfTrace::Event::GuestFlip);
 
 	if (Config::GraphicsDebugDumpEnabled() &&
 	    Config::GetPrintfDirection() != Config::OutputDirection::Silent) {

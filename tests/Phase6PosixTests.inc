@@ -22,6 +22,8 @@ int Run() {
     using Stat = KYTY_SYSV_ABI int64_t (*)(int,F::FileStat*);
     const auto open = reinterpret_cast<Open>(lookup("wuCroIGjt2g"));
     const auto close = reinterpret_cast<Close>(lookup("bY-PO6JhzhQ"));
+    using Write = KYTY_SYSV_ABI int64_t (*)(int,const char*,int64_t);
+    const auto write = reinterpret_cast<Write>(lookup("FN4gaPmuFV8"));
     const auto seek = reinterpret_cast<Seek>(lookup("Oy6IpwgtYOk"));
     const auto stat = reinterpret_cast<Stat>(lookup("mqQMh1zPPT8"));
     using Unlink = KYTY_SYSV_ABI int (*)(const char*);
@@ -71,6 +73,19 @@ int Run() {
     std::ofstream(root/"payload") << "synthetic";
     F::Mount(root,"/phase6posix");
     auto* error = Libs::Posix::GetErrorAddr();
+    const auto writable=open("/phase6posix/payload",2,0);
+    Check(writable>=3,"open writable mounted file");
+    *error=123;
+    Check(write(writable,"checkpoint",10)==10 && *error==123,
+          "qualified POSIX write returns byte count and preserves errno on success");
+    Check(seek(writable,0,0)==0,"rewind written file");
+    char written[10]{};
+    Check(F::KernelRead(writable,written,10)==10 && std::memcmp(written,"checkpoint",10)==0,
+          "qualified write publishes actual file bytes");
+    Check(close(writable)==0,"close writable file");
+    Check(write(writable,"x",1)==-1 && *error==Libs::Posix::POSIX_EBADF,
+          "qualified POSIX write translates a closed-descriptor error");
+    std::ofstream(root/"payload",std::ios::trunc) << "synthetic";
     *error=0;
     Check(open("/phase6posix/missing",0,0)==-1 && *error==Libs::Posix::POSIX_ENOENT,
         "POSIX open translates kernel failure to minus one and guest errno");
@@ -106,7 +121,7 @@ int Run() {
     F::Umount("/phase6posix");
     std::filesystem::remove(root/"payload");
     std::filesystem::remove(root);
-    std::puts("PHASE6_POSIX_PASS qualified open/close/lseek/fstat, real descriptors, error translation");
+    std::puts("PHASE6_POSIX_PASS qualified open/close/write/lseek/fstat/unlink, real descriptors, error translation");
     return 0;
 }
 }

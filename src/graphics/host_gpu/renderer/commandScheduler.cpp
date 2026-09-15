@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/perfTrace.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
@@ -176,12 +177,14 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 }
 
 void CommandScheduler::FlushAndWait() {
+	Common::PerfTrace::Scope perf_trace(Common::PerfTrace::Bucket::SchedulerFlushAndWait);
 	const auto tick = Submit();
 	m_master.Wait(tick);
 	BeginNext();
 }
 
 void CommandScheduler::Finish() {
+	Common::PerfTrace::Scope perf_trace(Common::PerfTrace::Bucket::SchedulerFinish);
 	CheckActive();
 	if (!m_command.IsInvalid()) {
 		Submit();
@@ -192,6 +195,7 @@ void CommandScheduler::Finish() {
 }
 
 void CommandScheduler::Wait(uint64_t tick) {
+	Common::PerfTrace::Scope perf_trace(Common::PerfTrace::Bucket::SchedulerWait);
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
 		CheckActive();
@@ -361,6 +365,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 
 	vk::Result result;
 	uint64_t   tick;
+	const auto perf_queue_submit_begin = Common::PerfTrace::Now();
 	{
 		Common::LockGuard lock(graphics.queue_mutex);
 		tick = m_master.NextTick();
@@ -383,6 +388,8 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		submit_info.pSignalSemaphores    = submit.signal_semaphores.data();
 
 		result = graphics.queue.submit(1, &submit_info, nullptr);
+		Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::VkQueueSubmit,
+		                              perf_queue_submit_begin);
 	}
 
 	if (result != vk::Result::eSuccess) {

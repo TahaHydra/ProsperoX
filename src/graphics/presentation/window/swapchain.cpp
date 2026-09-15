@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/perfTrace.h"
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -92,7 +93,10 @@ public:
 			EXIT("prepared-frame pool was used before swapchain initialization\n");
 		}
 		while (m_free.empty()) {
+			const auto perf_pool_begin = Common::PerfTrace::Now();
 			m_available.Wait(&m_mutex);
+			Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::FramePoolAvailableWait,
+			                              perf_pool_begin);
 		}
 		auto* frame = m_free.front();
 		m_free.pop_front();
@@ -157,7 +161,11 @@ public:
 	}
 
 private:
-	void WaitForFrame(Presenter::Frame& frame) { m_scheduler.Wait(frame.present_tick); }
+	void WaitForFrame(Presenter::Frame& frame) {
+		const auto perf_wait_begin = Common::PerfTrace::Now();
+		m_scheduler.Wait(frame.present_tick);
+		Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::FramePoolGpuWait, perf_wait_begin);
+	}
 
 	WindowContext&                                 m_window;
 	CommandScheduler&                              m_scheduler;
@@ -576,11 +584,17 @@ void Swapchain::Recreate(bool surface_lost) {
 Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
 	// This semaphore is indexed by CPU slot, independent of the prepared-frame pool order.
+	const auto perf_tick_begin = Common::PerfTrace::Now();
 	scheduler.Wait(m_acquire_ticks[m_frame_index]);
+	Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::SwapchainAcquireTickWait,
+	                              perf_tick_begin);
 	m_image_index     = static_cast<uint32_t>(-1);
+	const auto perf_acquire_begin = Common::PerfTrace::Now();
 	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
 	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
 	    &m_image_index);
+	Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::VkAcquireNextImage,
+	                              perf_acquire_begin);
 	switch (result) {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eSuboptimalKHR:
@@ -714,7 +728,10 @@ Swapchain::Status Swapchain::Present() {
 		auto& device = m_window.graphic_ctx.device;
 		auto& fence = m_present_fences[m_image_index];
 		if (m_present_pending[m_image_index]) {
+			const auto perf_fence_begin = Common::PerfTrace::Now();
 			RequireVulkanSuccess(device.waitForFences(1, &fence, true, UINT64_MAX), "reuse present fence");
+			Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::PresentFenceWait,
+			                              perf_fence_begin);
 			RequireVulkanSuccess(device.resetFences(1, &fence), "reset present fence");
 		}
 		fences.swapchainCount = 1; fences.pFences = &fence;
@@ -722,9 +739,12 @@ Swapchain::Status Swapchain::Present() {
 	}
 
 	vk::Result result;
+	const auto perf_queue_present_begin = Common::PerfTrace::Now();
 	{
 		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
 		result = m_window.graphic_ctx.queue.presentKHR(&present);
+		Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::VkQueuePresent,
+		                              perf_queue_present_begin);
 	}
 	if (!m_present_fences.empty()) m_present_pending[m_image_index] = true;
 	switch (result) {
@@ -749,11 +769,18 @@ Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(windo
 Presenter::~Presenter() = default;
 
 Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info) {
+	Common::PerfTrace::Scope perf_trace(Common::PerfTrace::Bucket::PresenterPrepareFrame);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer.IsInvalid());
 	auto*             frame = m_impl->frames.Acquire();
+	const auto        perf_render_lock_begin = Common::PerfTrace::Now();
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
+	Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::RendererMutexWait,
+	                              perf_render_lock_begin);
+	const auto        perf_resolve_begin = Common::PerfTrace::Now();
 	auto&             image = m_impl->ResolveSurface(info);
+	Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::PresenterResolveSurface,
+	                              perf_resolve_begin);
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
 	}
@@ -775,7 +802,10 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	KYTY_PROFILER_FUNCTION();
 	auto              format = m_impl->frames.GetFormat();
 	auto*             frame  = m_impl->frames.Acquire();
+	const auto        perf_render_lock_begin = Common::PerfTrace::Now();
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
+	Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::RendererMutexWait,
+	                              perf_render_lock_begin);
 	frame->Configure(m_impl->window.graphic_ctx, {width, height}, format);
 	vk::ClearColorValue clear {};
 	clear.float32[3] = opaque ? 1.0f : 0.0f;
@@ -809,6 +839,7 @@ RenderContext& Presenter::Renderer() const noexcept {
 }
 
 void Presenter::Present(Frame& frame, bool reuse) {
+	Common::PerfTrace::Scope perf_trace(Common::PerfTrace::Bucket::PresenterPresentTotal);
 	KYTY_PROFILER_FUNCTION();
 	m_impl->frames.ValidateForPresent(&frame, reuse);
 	// A minimized Win32 surface can have zero extent. Drop this presentation request;
@@ -827,7 +858,10 @@ void Presenter::Present(Frame& frame, bool reuse) {
 			continue;
 		}
 		{
+			const auto        perf_render_lock_begin = Common::PerfTrace::Now();
 			Common::LockGuard render_lock(m_impl->renderer.GetMutex());
+			Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::RendererMutexWait,
+			                              perf_render_lock_begin);
 			auto&             command          = m_impl->present_scheduler.BeginCommand();
 			const bool        draw_system_overlay =
 			    overlay_visual.active && swapchain.PrepareSystemOverlay();
@@ -842,7 +876,10 @@ void Presenter::Present(Frame& frame, bool reuse) {
 
 		m_impl->presented_overlay_revision.store(overlay_visual.revision,
 		                                         std::memory_order_release);
+		const auto perf_title_begin = Common::PerfTrace::Now();
 		m_impl->window.UpdateTitle();
+		Common::PerfTrace::AddElapsed(Common::PerfTrace::Bucket::WindowUpdateTitle,
+		                              perf_title_begin);
 		m_impl->frames.Release(&frame, true);
 		return;
 	}

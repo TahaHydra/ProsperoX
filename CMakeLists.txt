@@ -597,6 +597,7 @@ if(BUILD_TESTING)
 	add_test(NAME phase6_audio_streaming COMMAND $<TARGET_FILE:phase6_audio_tests> --streaming)
 	add_test(NAME phase6_self_repack COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-repack)
 	add_test(NAME phase6_posix_files COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-posix)
+	add_test(NAME phase6_runtime_checkpoint COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-checkpoint)
 	add_test(NAME phase6_agc_init COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-agc-valid)
 	add_test(NAME phase6_ring COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-ring)
 	add_test(NAME phase6_driver COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-driver)
@@ -692,6 +693,7 @@ if(BUILD_TESTING)
 	set_tests_properties(phase6_pixel_inputs PROPERTIES TIMEOUT 60 LABELS "gpu;phase6" RUN_SERIAL TRUE)
 	set_tests_properties(phase6_ring phase6_agc_init phase6_agc_unsupported phase6_audio_pcm phase6_audio_errors phase6_audio_streaming phase6_self_repack phase6_posix_files phase6_input phase6_media phase6_save_store phase6_save_restart
 		PROPERTIES TIMEOUT 60 LABELS "host;phase6")
+	set_tests_properties(phase6_runtime_checkpoint PROPERTIES TIMEOUT 60 LABELS "host;phase6")
 endif()
 
 
