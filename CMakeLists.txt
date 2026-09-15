@@ -647,6 +647,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --dcc-slice-range-only)
 	add_test(NAME phase6_video_out_dcc_clear
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --video-out-dcc-clear-only)
+	add_test(NAME phase6_pixel_inputs
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --phase6-pixel-inputs)
 	add_test(NAME compute_meta_clear_classification
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --compute-meta-clear-only)
 	add_test(NAME buffer_cache_dirty_gc
@@ -687,6 +689,7 @@ if(BUILD_TESTING)
 	set_tests_properties(phase6_tessellation_boundary PROPERTIES TIMEOUT 100 LABELS "gpu;phase6" RUN_SERIAL TRUE)
 	set_tests_properties(phase6_driver PROPERTIES TIMEOUT 45 LABELS "gpu;phase6" RUN_SERIAL TRUE)
 	set_tests_properties(phase6_video_out_dcc_clear PROPERTIES TIMEOUT 45 LABELS "gpu;phase6" RUN_SERIAL TRUE)
+	set_tests_properties(phase6_pixel_inputs PROPERTIES TIMEOUT 60 LABELS "gpu;phase6" RUN_SERIAL TRUE)
 	set_tests_properties(phase6_ring phase6_agc_init phase6_agc_unsupported phase6_audio_pcm phase6_audio_errors phase6_audio_streaming phase6_self_repack phase6_posix_files phase6_input phase6_media phase6_save_store phase6_save_restart
 		PROPERTIES TIMEOUT 60 LABELS "host;phase6")
 endif()

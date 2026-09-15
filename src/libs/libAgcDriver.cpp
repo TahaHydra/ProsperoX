@@ -233,6 +233,8 @@ LIB_DEFINE(Init) {
 namespace AgcDriverQualified {
 LIB_VERSION("AgcDriver", 1, "AgcDriver", 1, 1);
 LIB_DEFINE(Init) {
+	LIB_FUNC("Zw7uUVPulbw", Graphics::Gen5Driver::AgcDriverGetEqContextId);
+	LIB_FUNC("5CdQTZIQPxM", Graphics::Gen5Driver::AgcDriverGetEqEventType);
 	LIB_FUNC("UglJIZjGssM", Graphics::Gen5Driver::AgcDriverSubmitDcb);
 	LIB_FUNC("XlNp7jzGiPo", Graphics::Gen5Driver::AgcDriverSetTFRing);
 	LIB_FUNC("MM4IZSEYytQ", Graphics::Gen5Driver::AgcDriverSetHsOffchipParam);

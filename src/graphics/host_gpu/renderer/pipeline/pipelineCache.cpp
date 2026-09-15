@@ -352,7 +352,7 @@ struct PipelineCache::ProgramCache {
 				options.wave_size      = input_info.mesh.wave_size;
 				options.scratch_dwords = input_info.mesh.scratch_size_dwords;
 			}
-		} else if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+		} else {
 			options.wave_size = input_info.wave_size;
 		}
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);

@@ -67,8 +67,10 @@ uint32_t EmitBuiltinU32(ValueEmitContext& ctx, IR::StageInputKind kind, uint32_t
 		const auto value = state.builder.AllocateId();
 		const auto bits  = state.builder.AllocateId();
 		state.builder.AddFunction({OpLoad, TypeBool(state), value, variable});
+		// Guest pixel front-face VGPR contains IEEE-754 +1.0 / -1.0.
 		state.builder.AddFunction(
-		    {OpSelect, TypeU32(state), bits, value, ConstantU32(state, 1), ConstantU32(state, 0)});
+		    {OpSelect, TypeU32(state), bits, value, ConstantU32(state, 0x3f800000u),
+		     ConstantU32(state, 0xbf800000u)});
 		return bits;
 	}
 	if (kind == IR::StageInputKind::VertexIndex || kind == IR::StageInputKind::InstanceIndex ||

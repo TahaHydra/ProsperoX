@@ -1603,7 +1603,7 @@ bool RuntimeLinker::ResolveLoadedSymbol(const std::string& qualified_name,
 	// Match the initial resolution policy: explicit HLE registration wins, then
 	// an exact guest export. Never discard module, library, version or symbol type.
 	if (m_symbols != nullptr) {
-		if (const auto* rec = m_symbols->FindExact(qualified_name); rec != nullptr) {
+		if (const auto* rec = m_symbols->FindExactOrCompatible(qualified_name); rec != nullptr) {
 			*out_info = *rec;
 			return true;
 		}

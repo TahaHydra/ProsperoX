@@ -20,6 +20,29 @@ int Run(const char* mode) {
     using Phase1::Check;
     Loader::SymbolDatabase symbols;
     Libs::InitAgcDriver_1(&symbols);
+    {
+        Loader::SymbolResolve event_key{"Zw7uUVPulbw","AgcDriver",1,"AgcDriver",1,1,Loader::SymbolType::Func};
+        const auto* context_entry=symbols.Find(event_key);
+        Check(context_entry!=nullptr,"qualified event context export");
+        auto context_id=reinterpret_cast<decltype(&Libs::Graphics::Gen5Driver::AgcDriverGetEqContextId)>(context_entry->vaddr);
+        event_key.module_version_minor=2;
+        Check(!symbols.Find(event_key),"event context module version stays strict");
+        event_key.module_version_minor=1; event_key.name="5CdQTZIQPxM";
+        const auto* type_entry=symbols.Find(event_key);
+        Check(type_entry!=nullptr,"qualified event type export");
+        auto event_type=reinterpret_cast<decltype(&Libs::Graphics::Gen5Driver::AgcDriverGetEqEventType)>(type_entry->vaddr);
+        Libs::LibKernel::EventQueue::KernelEvent event{};
+        event.filter=Libs::LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS;
+        event.ident=0x40; event.data=0x1234567887654321ll;
+        const auto before=event;
+        Check(context_id(&event)==0x87654321u && event_type(&event)==0x40,
+              "graphics event preserves 32-bit context separately from event type");
+        Check(std::memcmp(&before,&event,sizeof(event))==0,"event queries do not mutate delivered event");
+        event.filter=0; event.ident=0xabcdef0123456789ull; event.data=9;
+        Check(context_id(&event)==0x23456789u && event_type(&event)==9,
+              "legacy event field interpretation retained");
+        Check(context_id(nullptr)==0 && event_type(nullptr)==0,"null event query contract retained");
+    }
     Loader::SymbolResolve key{"23LRUSvYu1M","Agc",1,"Agc",1,1,Loader::SymbolType::Func};
     const auto* record=symbols.Find(key);
     Check(record!=nullptr,"AGC initialization resolves with the exact guest library/module identity");

@@ -619,6 +619,86 @@ LIB_VERSION("LibcInternal", 1, "LibcInternal", 1, 1);
 
 static uint32_t g_need_flag = 1;
 
+struct LibcMspaceState {
+uint8_t*   base;
+size_t     capacity;
+size_t     offset;
+bool       thread_safe;
+std::mutex mutex;
+};
+
+static void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capacity,
+                                             uint32_t flag) {
+PRINT_NAME();
+
+LOGF("\t name     = %s\n"
+     "\t base     = 0x%016" PRIx64 "\n"
+     "\t capacity = %" PRIu64 "\n"
+     "\t flag     = %u\n",
+     name != nullptr ? name : "<null>",
+     reinterpret_cast<uint64_t>(base),
+     static_cast<uint64_t>(capacity),
+     flag);
+
+if (name == nullptr || base == nullptr || capacity == 0 || (flag != 0 && flag != 1)) {
+return nullptr;
+}
+
+auto* state       = new LibcMspaceState {};
+state->base       = static_cast<uint8_t*>(base);
+state->capacity   = capacity;
+state->offset     = 0;
+state->thread_safe = (flag == 0);
+
+return state;
+}
+
+static void* KYTY_SYSV_ABI LibcMspaceMalloc(void* msp, size_t size) {
+PRINT_NAME();
+
+auto* state = static_cast<LibcMspaceState*>(msp);
+if (state == nullptr) {
+return nullptr;
+}
+
+std::unique_lock<std::mutex> lock(state->mutex, std::defer_lock);
+if (state->thread_safe) {
+lock.lock();
+}
+
+size_t aligned = state->offset;
+
+const size_t misalignment = aligned & 15u;
+if (misalignment != 0) {
+const size_t padding = 16u - misalignment;
+
+if (aligned > state->capacity || padding > state->capacity - aligned) {
+return nullptr;
+}
+
+aligned += padding;
+}
+
+const size_t allocation_size = (size == 0 ? 1 : size);
+
+if (aligned > state->capacity ||
+    allocation_size > state->capacity - aligned) {
+return nullptr;
+}
+
+void* result = state->base + aligned;
+state->offset = aligned + allocation_size;
+
+LOGF("\t msp    = 0x%016" PRIx64 "\n"
+     "\t size   = %" PRIu64 "\n"
+     "\t result = 0x%016" PRIx64 "\n",
+     reinterpret_cast<uint64_t>(msp),
+     static_cast<uint64_t>(size),
+     reinterpret_cast<uint64_t>(result));
+
+return result;
+}
+
 int KYTY_SYSV_ABI vprintf(const char* str, VaList* c) {
 	PRINT_NAME();
 
@@ -797,6 +877,9 @@ LIB_DEFINE(InitLibcInternal_1) {
 	LIB_FUNC("2WE3BTYVwKM", LibcInternal::cos);
 	LIB_FUNC("jMB7EFyu30Y", LibcInternal::sincos);
 	LIB_FUNC("eLdDw6l0-bU", LibcInternal::snprintf);
+
+LIB_FUNC("-hn1tcVHq5Q", LibcInternal::LibcMspaceCreate);
+LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
 
 	LIB_FUNC("L1SBTkC+Cvw", LibC::abort);
 	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);

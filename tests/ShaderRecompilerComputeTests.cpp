@@ -1242,6 +1242,8 @@ struct GraphicsCase {
   std::vector<u32> vertices;
   bool pixel_ancillary = false;
   bool pixel_front_face = false;
+  bool clockwise_front = false;
+  u32 pixel_wave_size = 64;
   u32 layers = 1;
   vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e1;
   bool pixel_position_w = false;
@@ -1604,6 +1606,8 @@ CompiledShader CompileFragmentCase(const GraphicsCase &test) {
 
   ShaderRecompiler::CompileOptions options;
   options.stage = ShaderType::Pixel;
+  options.wave_size = test.pixel_wave_size;
+  pixel_info.wave_size = test.pixel_wave_size;
   options.dump_ir = false;
   options.input_info.pixel = &pixel_info;
   options.user_data = user_data;
@@ -2674,6 +2678,25 @@ public:
         interrupt_event.ident == 0x20 && interrupt_event.data == 0x567u &&
         interrupt_event.udata == &compute_interrupt_udata &&
         compute_clock_label != 0;
+
+    constexpr uint64_t compute_done_value = 0x1234567887654321ull;
+    uint64_t compute_done_label = 0;
+    auto compute_done_commands = make_interrupt_packet(
+        2, 2, &compute_done_label, compute_done_value, 0x678u);
+    compute_done_commands[1] = 0x62fu; // CS_DONE, shader-done index, no GCR action.
+    gpu.SubmitCompute(0x20, compute_done_commands);
+    gpu.Done();
+    finish_gpu();
+
+    interrupt_count = 0;
+    const auto compute_done_wait =
+        wait_for_interrupt(interrupt_event, interrupt_count);
+    Require("GpuCommandLane", "CS_DONE write-confirm interrupt",
+            compute_done_wait == 0 && interrupt_count == 1 &&
+                interrupt_event.ident == 0x20 && interrupt_event.data == 0x678u &&
+                interrupt_event.udata == &compute_interrupt_udata &&
+                compute_done_label == compute_done_value,
+            "CS_DONE lost its full 64-bit label write or write-confirm interrupt");
 
     interrupt_count = 0;
     const auto extra_interrupt_wait =
@@ -8877,10 +8900,12 @@ public:
     struct FillCase {
       uint32_t fill;
       std::array<uint32_t, 2> texel;
+      bool reuse_unorm = false;
     };
     constexpr std::array cases{
         FillCase{0x40404040u, {0, 0x3c000000u}},
         FillCase{0x80808080u, {0x3c003c00u, 0x00003c00u}},
+        FillCase{0x40404040u, {0, 0x3c000000u}, true},
     };
     EnsureRuntimeContext();
 
@@ -8926,6 +8951,20 @@ public:
       auto &texture_cache = resources.GetTextureCache();
       auto &executor = context.GetRenderExecutor();
       resources.MapMemory(base, allocation_size);
+      ImageId unorm_id{};
+      if (fill_case.reuse_unorm) {
+        const auto float_info = registers.GetRenderTarget(0).info;
+        auto unorm_info = float_info;
+        unorm_info.dcc_compression_enable = false;
+        unorm_info.channel_type = Prospero::ChannelType::kUNorm;
+        registers.SetColorInfo(0, unorm_info);
+        RenderColorInfo unorm{};
+        RenderExecutorTestAccess::ResolveRenderColorTarget(executor, 1, scheduler.Current(), unorm, 0);
+        unorm_id = unorm.image_id;
+        (void)texture_cache.FindRenderTarget(unorm_id, unorm.desc);
+        RenderExecutorTestAccess::ResetBindings(executor);
+        registers.SetColorInfo(0, float_info);
+      }
       texture_cache.TrackDccFill(dcc_address, 0x1000, fill_case.fill);
       Require(name, "deferred fixed-code fill",
               !texture_cache.IsMeta(dcc_address),
@@ -8949,6 +8988,11 @@ public:
               ReadCachedTexel(name, context, color.image_id) ==
                   std::vector<u32>(fill_case.texel.begin(), fill_case.texel.end()),
               "RGBA16F native image did not receive the fixed clear value");
+      if (fill_case.reuse_unorm) {
+        Require(name, "aliased float clear", color.image_id == unorm_id &&
+          texture_cache.GetImage(unorm_id).backing.format == vk::Format::eR16G16B16A16Unorm,
+          "fixture failed to reuse UNORM backing for FLOAT clear");
+      }
 
       RenderExecutorTestAccess::ResetBindings(executor);
       resources.UnmapMemory(base, allocation_size);
@@ -9075,6 +9119,8 @@ public:
     for (bool gpu : {false, true}) {
       std::memset(mapped, 0x5a, allocation_size);
       RenderContext context(m_runtime_context);
+      context.InitializeGpu(nullptr);
+      context.GetGpu().SendCommandSync([&] {
       auto& scheduler = context.GetCommandScheduler();
       HW::Context registers{}; HW::UserConfig user{}; HW::Shader shaders{};
       scheduler.Begin(registers, user, shaders);
@@ -9135,12 +9181,16 @@ public:
       Require(name, "native authority", cache.GetImage(image).IsGpuModified() &&
           !cache.GetImage(image).IsBufferModified(), "clear did not establish native ownership");
       // Stale metadata must not replace an existing native image on a later flip.
-      std::memset(reinterpret_cast<void*>(metadata_address), 0, 0x1000);
+      const std::array<uint8_t, 0x1000> stale_metadata{};
+      Require(name, "stale backing fixture", LibKernel::Memory::TryWriteBacking(
+          metadata_address, stale_metadata.data(), stale_metadata.size()), "backing update failed");
       Require(name, "owner retained", cache.FindImage(desc) == image &&
           ReadCachedTexel(name, context, image) == std::vector<u32>{expected},
           "repeat presentation replayed stale metadata");
       resources.UnmapMemory(base, allocation_size);
       scheduler.Finish();
+      });
+      context.ShutdownGpu();
     }
     Require(name, "unmap", Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
             "unmap failed");
@@ -12604,7 +12654,7 @@ public:
     raster.sType = vk::StructureType::ePipelineRasterizationStateCreateInfo;
     raster.polygonMode = vk::PolygonMode::eFill;
     raster.cullMode = vk::CullModeFlagBits::eNone;
-    raster.frontFace = vk::FrontFace::eCounterClockwise;
+    raster.frontFace = test.clockwise_front ? vk::FrontFace::eClockwise : vk::FrontFace::eCounterClockwise;
     raster.lineWidth = 1.0f;
 
     vk::PipelineMultisampleStateCreateInfo multisample{};
@@ -24222,6 +24272,35 @@ GraphicsCase GraphicsPositionWExport() {
   return test;
 }
 
+GraphicsCase GraphicsFrontFaceBits(bool clockwise) {
+  GraphicsCase test;
+  test.name = clockwise ? "FrontFaceFloatPositive" : "FrontFaceFloatNegative";
+  test.pixel_front_face = true;
+  test.clockwise_front = clockwise;
+  // Positive-height Vulkan viewport makes this triangle clockwise on screen.
+  test.fragment_code = {EncodeExp0(0x00, 0xf), EncodeExp1(2,2,2,2)};
+  AppendEnd(&test.fragment_code);
+  test.expected_pixel.assign(4, clockwise ? 0x3f800000u : 0xbf800000u);
+  test.opcodes = {ShaderOpcode::EXP, ShaderOpcode::S_ENDPGM};
+  return test;
+}
+
+GraphicsCase GraphicsPixelWaveHighMask(u32 width) {
+  GraphicsCase test;
+  test.name = width == 32 ? "PixelWave32HighMask" : "PixelWave64HighMask";
+  test.pixel_wave_size = width;
+  AppendVMovU32(&test.fragment_code, 0, 0);
+  AppendSMovLiteral(&test.fragment_code, 107, 0x3e800000u);
+  test.fragment_code.push_back(EncodeVopc(0xc2, InlineU32(1), 0));
+  test.fragment_code.push_back(EncodeVop1(0x01, 1, 107));
+  test.fragment_code.push_back(EncodeExp0(0x00, 0xf));
+  test.fragment_code.push_back(EncodeExp1(1,1,1,1));
+  AppendEnd(&test.fragment_code);
+  test.expected_pixel.assign(4, width == 32 ? 0x3e800000u : 0u);
+  test.opcodes = {ShaderOpcode::V_CMP_EQ_U32, ShaderOpcode::EXP};
+  return test;
+}
+
 GraphicsCase GraphicsAncillaryLayer(bool front_face) {
   GraphicsCase test;
   test.name = front_face ? "GraphicsAncillaryAfterFrontFace" : "GraphicsAncillaryLayer";
@@ -29151,6 +29230,14 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--position-w-only") == 0) {
     VulkanHarness vulkan;
     RunGraphicsCase(&vulkan, GraphicsPositionWExport());
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--phase6-pixel-inputs") == 0) {
+    VulkanHarness vulkan;
+    RunGraphicsCase(&vulkan, GraphicsFrontFaceBits(false));
+    RunGraphicsCase(&vulkan, GraphicsFrontFaceBits(true));
+    RunGraphicsCase(&vulkan, GraphicsPixelWaveHighMask(64));
+    RunGraphicsCase(&vulkan, GraphicsPixelWaveHighMask(32));
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--clip-control-only") == 0) {

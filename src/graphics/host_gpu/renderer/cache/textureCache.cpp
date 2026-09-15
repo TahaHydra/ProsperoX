@@ -1256,7 +1256,7 @@ void TextureCache::PrepareDccClear(ImageId id, const ImageDesc& desc) {
 		return;
 	}
 	vk::ClearValue clear {};
-	if (!DecodeDccClear(desc, image.backing.format, metadata.fill_value, clear.color)) {
+	if (!DecodeDccClear(desc, desc.view_info.format, metadata.fill_value, clear.color)) {
 		return;
 	}
 	const auto& view           = desc.view_info;
@@ -1281,7 +1281,7 @@ void TextureCache::PrepareDccClear(ImageId id, const ImageDesc& desc) {
 		ClearImage(m_scheduler.Current(), id,
 		           {vk::ImageAspectFlagBits::eColor, view.base_level, view.level_count,
 		            static_cast<uint32_t>(range.address), static_cast<uint32_t>(range.size)},
-		           clear);
+		           clear, view.format);
 		// ClearImage can retire images, and retiring an image that shares this metadata allocation
 		// erases the entry, so re-resolve it instead of holding a reference across the clear.
 		const auto current = m_surface_metas.find(metadata_address);
@@ -1758,8 +1758,10 @@ bool TextureCache::ClearImageFromBuffer(CommandBuffer& command, uint64_t address
 }
 
 void TextureCache::ClearImage(CommandBuffer& command, ImageId id,
-                              const vk::ImageSubresourceRange& range, const vk::ClearValue& clear) {
+                              const vk::ImageSubresourceRange& range, const vk::ClearValue& clear,
+                              vk::Format format) {
 	auto&      image   = m_slot_images[id];
+	if (format == vk::Format::eUndefined) format = image.backing.format;
 	const auto aspects = image.info.IsDepth() ? ImageViewOps::DepthAspectMask(image.backing.format)
 	                                          : vk::ImageAspectFlagBits::eColor;
 	EXIT_IF(range.baseMipLevel >= image.info.resources.levels);
@@ -1801,11 +1803,12 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id,
 		}
 	}
 	command.EndRendering();
-	if (image.info.IsVolume() && !full_image) {
+	// Transfer clears encode in the backing format; an alias must use its view.
+	if (format != image.backing.format || (image.info.IsVolume() && !full_image)) {
 		EXIT_NOT_IMPLEMENTED(range.aspectMask != vk::ImageAspectFlagBits::eColor ||
 		                     range.levelCount != 1);
 		ImageViewInfo view {};
-		view.format = image.backing.format;
+		view.format = format;
 		view.type   = range.layerCount == 1 ? vk::ImageViewType::e2D : vk::ImageViewType::e2DArray;
 		view.base_level  = range.baseMipLevel;
 		view.base_layer  = range.baseArrayLayer;

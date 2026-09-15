@@ -1168,7 +1168,6 @@ static int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum) {
 			return KERNEL_ERROR_EINVAL;
 		}
 
-		Common::CondVar::SignalThread(PthreadGetUniqueId(thread));
 		PthreadWakeForSignal(thread);
 		CloseHandle(target_thread);
 		return OK;
@@ -1193,7 +1192,6 @@ static int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum) {
 			return KERNEL_ERROR_EINVAL;
 		}
 
-		Common::CondVar::SignalThread(PthreadGetUniqueId(thread));
 		PthreadWakeForSignal(thread);
 		WaitForSignalDispatch(thread, signum);
 		return OK;
@@ -2128,6 +2126,7 @@ LIB_DEFINE(InitLibKernel_1_Posix) {
 	// Keep its -1/errno ABI distinct from the kernel-error exports below.
 	LIB_FUNC("wuCroIGjt2g", LibKernel::open);
 	LIB_FUNC("bY-PO6JhzhQ", LibKernel::close);
+	LIB_FUNC("FN4gaPmuFV8", LibKernel::write);
 	LIB_FUNC("Oy6IpwgtYOk", Posix::lseek);
 	LIB_FUNC("mqQMh1zPPT8", Posix::fstat);
 	LIB_FUNC("k+AXqu2-eBc", getpagesize);
