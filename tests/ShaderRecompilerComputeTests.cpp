@@ -214,6 +214,11 @@ struct TileManagerTestAccess {
 };
 
 struct TextureCacheTestAccess {
+
+  static bool ReadVideoOutDccClear(TextureCache& cache, const TextureCache::ImageDesc& desc,
+                                  vk::ClearColorValue& clear) {
+    return cache.ReadVideoOutDccClear(desc, clear);
+  }
   static_assert(std::same_as<decltype(TextureCache::m_slot_images),
                              Common::SlotVector<Image>>);
   static_assert(TextureCache::ImagePageTable::kPageBits == 20);
@@ -9051,6 +9056,96 @@ public:
             Libs::LibKernel::Memory::KernelReleaseDirectMemory(
                 direct_offset, allocation_size) == 0,
             "captured scene allocation release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  void CheckVideoOutDccFirstClear() {
+    constexpr const char* name = "VideoOutDccFirstClear";
+    constexpr uint64_t base = 0x205000000ull, allocation_size = 0x40000;
+    constexpr uint64_t metadata_address = base + 0x20000;
+    EnsureRuntimeContext();
+    int64_t direct = -1;
+    Require(name, "allocate", Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+        0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(), allocation_size,
+        0x10000, 0, &direct) == 0, "allocation failed");
+    void* mapped = reinterpret_cast<void*>(base);
+    Require(name, "map", Libs::LibKernel::Memory::KernelMapDirectMemory(
+        &mapped, allocation_size, 0x3, 0x10, direct, 0x10000) == 0,
+        "mapping failed");
+    for (bool gpu : {false, true}) {
+      std::memset(mapped, 0x5a, allocation_size);
+      RenderContext context(m_runtime_context);
+      auto& scheduler = context.GetCommandScheduler();
+      HW::Context registers{}; HW::UserConfig user{}; HW::Shader shaders{};
+      scheduler.Begin(registers, user, shaders);
+      auto& resources = context.GetGpuResources();
+      resources.MapMemory(base, allocation_size);
+      auto& cache = resources.GetTextureCache();
+      auto& buffers = resources.GetBufferCache();
+      TextureCache::ImageDesc desc{};
+      desc.type = TextureCache::BindingType::VideoOut;
+      desc.info.data = {base, 0x10000};
+      desc.info.pixel_format = vk::Format::eR8G8B8A8Srgb;
+      desc.info.guest_format = Prospero::BufferFormat::k8_8_8_8Srgb;
+      desc.info.extent = {64, 64, 1};
+      desc.info.pitch = 64;
+      desc.info.bytes_per_block = 4;
+      desc.info.tile_mode = Prospero::TileMode::kRenderTarget;
+      desc.info.mip_layout[0] = {0, 0x10000, 64, 64};
+      desc.info.metadata.kind = ImageMetadataKind::Dcc;
+      desc.info.metadata.range = {metadata_address, 0x1000};
+      desc.info.metadata.compression = VideoOutCompression::Dcc256_256_0;
+      desc.view_info.format = desc.info.pixel_format;
+      desc.view_info.type = vk::ImageViewType::e2D;
+      desc.view_info.aspect = vk::ImageAspectFlagBits::eColor;
+      desc.view_info.usage = vk::ImageUsageFlagBits::eTransferSrc;
+      vk::ClearColorValue clear{};
+      auto rejected = [&](const TextureCache::ImageDesc& invalid) {
+        Require(name, "reject unsupported metadata",
+          !TextureCacheTestAccess::ReadVideoOutDccClear(cache, invalid, clear),
+          "incomplete or unsupported metadata was interpreted as a clear");
+      };
+      // Non-clear code, clear-to-register (not display-decodable), one corrupt
+      // final byte, missing/partial coverage, overlap and inaccessible mappings.
+      rejected(desc);
+      std::memset(reinterpret_cast<void*>(metadata_address), 0x20, 0x1000);
+      rejected(desc);
+      std::memset(reinterpret_cast<void*>(metadata_address), 0x40, 0x1000);
+      reinterpret_cast<uint8_t*>(metadata_address)[0xfff] = 0x80;
+      rejected(desc);
+      reinterpret_cast<uint8_t*>(metadata_address)[0xfff] = 0x40;
+      for (uint64_t size : {0ull, 0xfffull, 0x1001ull}) {
+        auto invalid = desc; invalid.info.metadata.range.size = size; rejected(invalid);
+      }
+      auto invalid = desc; invalid.info.metadata.range.address = base; rejected(invalid);
+      invalid = desc; invalid.info.metadata.range.address = base + allocation_size; rejected(invalid);
+      if (gpu) {
+        // Keep contradictory CPU backing until the real GPU fill is published.
+        auto [metadata_buffer, metadata_offset] =
+            buffers.ObtainBuffer(metadata_address, 0x1000, true);
+        metadata_buffer->Fill(metadata_offset, 0x1000, 0x80808080u);
+        Require(name, "GPU metadata ownership", buffers.HasGpuDirtyBytes(metadata_address, 0x1000),
+                "fixture did not create pending GPU metadata writes");
+      }
+      const auto image = cache.FindImage(desc);
+      cache.UpdateImage(image);
+      const uint32_t expected = gpu ? 0x00ffffffu : 0xff000000u;
+      Require(name, "first present clear pixels", ReadCachedTexel(name, context, image, {63,63,0}) ==
+          std::vector<u32>{expected}, "presentation failed to decode coherent full DCC clear");
+      Require(name, "native authority", cache.GetImage(image).IsGpuModified() &&
+          !cache.GetImage(image).IsBufferModified(), "clear did not establish native ownership");
+      // Stale metadata must not replace an existing native image on a later flip.
+      std::memset(reinterpret_cast<void*>(metadata_address), 0, 0x1000);
+      Require(name, "owner retained", cache.FindImage(desc) == image &&
+          ReadCachedTexel(name, context, image) == std::vector<u32>{expected},
+          "repeat presentation replayed stale metadata");
+      resources.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    }
+    Require(name, "unmap", Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "unmap failed");
+    Require(name, "release", Libs::LibKernel::Memory::KernelReleaseDirectMemory(direct, allocation_size) == 0,
+            "release failed");
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
@@ -29207,6 +29302,11 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--dcc-slice-range-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckDccClearSliceRanges();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--video-out-dcc-clear-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckVideoOutDccFirstClear();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--compute-meta-clear-only") == 0) {

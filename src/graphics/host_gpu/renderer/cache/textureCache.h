@@ -154,6 +154,7 @@ private:
 	[[nodiscard]] ImageId       ExpandImage(const ImageInfo& info, ImageId source);
 	void                        RefreshImage(ImageId id);
 	void                        PrepareDccClear(ImageId id, const ImageDesc& desc);
+	[[nodiscard]] bool ReadVideoOutDccClear(const ImageDesc& desc, vk::ClearColorValue& clear);
 	void                        InitializeImage(ImageId id);
 	[[nodiscard]] TextureTransferPlan BuildTextureTransfer(const Image& image, BindingType binding,
 	                                                       TransferDirection direction) const;

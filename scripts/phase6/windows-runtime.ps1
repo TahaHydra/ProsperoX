@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory=$true)][Alias('GameDir')][string]$GamePath,
     [Parameter(Mandatory=$true)][string]$EvidenceDir,
-    [ValidateRange(1,1800)][int]$Seconds = 90
+    [ValidateRange(1,1800)][int]$Seconds = 90,
+    [switch]$GraphicsDebugDump
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../phase0/windows-env.ps1"
@@ -43,6 +44,10 @@ $start.RedirectStandardOutput = $true
 $start.RedirectStandardError = $true
 foreach ($arg in @('--game',$game,'--vulkan-validation','true','--printf-direction','File',
                    '--printf-output-file',"$evidence/guest.log")) { $start.ArgumentList.Add($arg) }
+if ($GraphicsDebugDump) {
+    $start.ArgumentList.Add('--graphics-debug-dump')
+    $start.ArgumentList.Add('true')
+}
 $start.ArgumentList | ConvertTo-Json > "$evidence/arguments.json"
 $process = [Diagnostics.Process]::Start($start)
 $outFile = [IO.File]::Create("$evidence/stdout.log")

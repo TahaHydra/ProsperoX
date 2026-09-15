@@ -201,12 +201,39 @@ LIB_DEFINE(Init) {
 	LIB_FUNC("57labkp+rSQ", Graphics::Gen5::AgcDcbAcquireMem);
 	LIB_FUNC("f3dg2CSgRKY", Graphics::Gen5::AgcCreateShader);
 	LIB_FUNC("D9sr1xGUriE", Graphics::Gen5::AgcCreatePrimState);
+	LIB_FUNC("ZvwO9euwYzc", Graphics::Gen5::AgcDcbSetCxRegistersIndirect);
+	LIB_FUNC("-HOOCn0JY48", Graphics::Gen5::AgcDcbSetShRegistersIndirect);
+	LIB_FUNC("hvUfkUIQcOE", Graphics::Gen5::AgcDcbSetUcRegistersIndirect);
+	LIB_FUNC("n2fD4A+pb+g", Graphics::Gen5::AgcCbSetShRegisterRangeDirect);
+	LIB_FUNC("bxGoVxpdSPQ", Graphics::Gen5::AgcCbSetShRegisterRangeDirectGetSize);
+	LIB_FUNC("k3GhuSNmBLU", Graphics::Gen5::AgcCbDispatch);
+	LIB_FUNC("Abendgtz+3o", Graphics::Gen5::AgcCbDispatchGetSize);
+	LIB_FUNC("+kSrjIVxKFE", Graphics::Gen5::AgcDcbPushMarker);
+	LIB_FUNC("H7uZqCoNuWk", Graphics::Gen5::AgcDcbPopMarker);
+	LIB_FUNC("aJf+j5yntiU", Graphics::Gen5::AgcDcbEventWrite);
+	LIB_FUNC("C4l9fB17t8w", Graphics::Gen5::AgcDcbEventWriteGetSize);
+	LIB_FUNC("LtTouSCZjHM", Graphics::Gen5::AgcCbNop);
+	LIB_FUNC("t7PlZ9nt5Lc", Graphics::Gen5::AgcCbNopGetSize);
+	LIB_FUNC("i1jyy49AjXU", Graphics::Gen5::AgcDcbWriteData);
+	LIB_FUNC("p9tI+yTvx68", Graphics::Gen5::AgcDcbWriteDataGetSize);
+	LIB_FUNC("VmW0Tdpy420", Graphics::Gen5::AgcDcbWaitRegMem);
+	LIB_FUNC("43WJ08sSugE", Graphics::Gen5::AgcDcbWaitOnAddressGetSize);
+	LIB_FUNC("V++UgBtQhn0", Graphics::Gen5::AgcGetDataPacketPayloadAddress);
+	LIB_FUNC("fPSCdQxgpSw", Graphics::Gen5::AgcWriteDataPatchSetAddressOrOffset);
+	LIB_FUNC("3KDcnM3lrcU", Graphics::Gen5::AgcWaitRegMemPatchAddress);
+	LIB_FUNC("7nOoijNPvEU", Graphics::Gen5::AgcWaitRegMemPatchReference);
+	LIB_FUNC("0fWWK5uG9rQ", Graphics::Gen5::AgcQueueEndOfPipeActionPatchAddress);
+	LIB_FUNC("MlEw1feXcjg", Graphics::Gen5::AgcQueueEndOfPipeActionPatchData);
+	LIB_FUNC("h9z6+0hEydk", Graphics::Gen5::AgcSuspendPoint);
+	LIB_FUNC("YUeqkyT7mEQ", Graphics::Gen5::AgcDcbSetFlip);
+	LIB_FUNC("TRO721eVt4g", Graphics::Gen5::AgcDcbResetQueue);
 }
 } // namespace AgcQualified
 
 namespace AgcDriverQualified {
 LIB_VERSION("AgcDriver", 1, "AgcDriver", 1, 1);
 LIB_DEFINE(Init) {
+	LIB_FUNC("UglJIZjGssM", Graphics::Gen5Driver::AgcDriverSubmitDcb);
 	LIB_FUNC("XlNp7jzGiPo", Graphics::Gen5Driver::AgcDriverSetTFRing);
 	LIB_FUNC("MM4IZSEYytQ", Graphics::Gen5Driver::AgcDriverSetHsOffchipParam);
 	LIB_FUNC("w2rJhmD+dsE", Graphics::Gen5Driver::AgcDriverAddEqEvent);

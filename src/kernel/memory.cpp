@@ -910,7 +910,9 @@ void WriteBacking(uint64_t vaddr, const void* data, uint64_t size) noexcept {
 }
 
 void InvalidateMemory(uint64_t vaddr, uint64_t size) {
-	if (size == 0) {
+	// Before renderer creation (or in headless filesystem tests), there are no
+	// GPU cache owners to invalidate. Match MapGpuRange/UnmapGpuRange lifetime.
+	if (size == 0 || g_gpu_resources == nullptr) {
 		return;
 	}
 	(void)GetGpuResources().InvalidateMemory(vaddr, size);

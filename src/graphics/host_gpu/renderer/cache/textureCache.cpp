@@ -1386,6 +1386,33 @@ void TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 	RefreshImage(association);
 }
 
+bool TextureCache::ReadVideoOutDccClear(const ImageDesc& desc, vk::ClearColorValue& clear) {
+	const auto& info = desc.info;
+	TileSizeAlign footprint {};
+	if (desc.type != BindingType::VideoOut || info.metadata.kind != ImageMetadataKind::Dcc ||
+	    info.resources != ImageSubresources {1, 1} || info.samples != 1 || info.IsVolume() ||
+	    !TileGetDccSize(info.extent.width, info.extent.height, 1, info.bytes_per_block,
+	                    1, info.tile_mode, footprint) ||
+	    info.metadata.range.size != footprint.size || !info.metadata.range.Valid() ||
+	    (info.metadata.range.address & (footprint.align - 1)) != 0 ||
+	    (info.metadata.range.address < info.data.End() && info.data.address < info.metadata.range.End())) {
+		return false;
+	}
+	// Read the complete proven allocation, outside the tracking lock: GPU-written
+	// metadata must be published before interpreting its contents. A sampled byte
+	// or a shader identity is not evidence of a full-surface fast clear.
+	std::vector<uint8_t> metadata(footprint.size);
+	if (!LibKernel::Memory::TryReadBacking(info.metadata.range.address, metadata.data(), metadata.size())) {
+		return false;
+	}
+	m_buffer_cache.ReadCommandMemory(info.metadata.range.address, metadata.data(), metadata.size());
+	if (!std::all_of(metadata.begin(), metadata.end(),
+	                [&](uint8_t value) { return value == metadata.front(); })) {
+		return false;
+	}
+	return DecodeDccClear(desc, info.pixel_format, metadata.front() * 0x01010101u, clear);
+}
+
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid()) {
@@ -1398,6 +1425,19 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	}
 
 	ImageId result {};
+	vk::ClearValue first_clear {};
+	bool materialize_clear = false;
+	if (desc.type == BindingType::VideoOut &&
+	    desc.info.metadata.compression != VideoOutCompression::Uncompressed) {
+		bool no_owner;
+		{
+			std::scoped_lock lock {m_lock};
+			no_owner = FindImagesInRegion(desc.info.data.address, desc.info.data.size, false).empty();
+		}
+		// Existing native owners may have rendered after a clear without updating
+		// emulated metadata bytes. Never overwrite those owners from stale metadata.
+		materialize_clear = no_owner && ReadVideoOutDccClear(desc, first_clear.color);
+	}
 	{
 		std::scoped_lock lock {m_lock};
 		const auto       candidates =
@@ -1442,6 +1482,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			                                    inserted.info.data.size)) {
 				inserted.MarkBufferModified();
 			}
+			if (materialize_clear) {
+				ClearImage(command, result, {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, first_clear);
+			}
 		}
 		auto& image = m_slot_images[result];
 		if (desc.type == BindingType::VideoOut &&
@@ -1450,6 +1493,19 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			const bool native_current =
 			    (image.usage.render_target || image.IsGpuModified()) && !guest_dirty;
 			if (!native_current) {
+				printf("CompressedVideoOut: data=0x%llx size=0x%llx extent=%ux%u pitch=%u "
+				       "compression=%u metadata=0x%llx metadata_size=0x%llx candidates=%zu "
+				       "render_target=%u gpu_modified=%u buffer_modified=%u cpu_dirty=%u\n",
+				       static_cast<unsigned long long>(desc.info.data.address),
+				       static_cast<unsigned long long>(desc.info.data.size),
+				       desc.info.extent.width, desc.info.extent.height, desc.info.pitch,
+				       static_cast<unsigned>(desc.info.metadata.compression),
+				       static_cast<unsigned long long>(desc.info.metadata.range.address),
+				       static_cast<unsigned long long>(desc.info.metadata.range.size), candidates.size(),
+				       static_cast<unsigned>(image.usage.render_target),
+				       static_cast<unsigned>(image.IsGpuModified()),
+				       static_cast<unsigned>(image.IsBufferModified()),
+				       static_cast<unsigned>(image.IsCpuDirty()));
 				EXIT("TextureCache: compressed video-out read requires clean native GPU "
 				     "contents\n");
 			}

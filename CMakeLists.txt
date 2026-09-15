@@ -599,6 +599,7 @@ if(BUILD_TESTING)
 	add_test(NAME phase6_posix_files COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-posix)
 	add_test(NAME phase6_agc_init COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-agc-valid)
 	add_test(NAME phase6_ring COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-ring)
+	add_test(NAME phase6_driver COMMAND $<TARGET_FILE:phase0_runtime_probes> --phase6-driver)
 	add_test(NAME phase6_tessellation_boundary COMMAND ${CMAKE_COMMAND}
 		-DPROBE=$<TARGET_FILE:shader_recompiler_compute_tests> -P "${KYTY_TESTS_DIR}/ExpectPhase6Tessellation.cmake")
 	add_test(NAME phase6_agc_unsupported COMMAND ${CMAKE_COMMAND} -DPROBE=$<TARGET_FILE:phase0_runtime_probes>
@@ -644,6 +645,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --private-buffer-upload-only)
 	add_test(NAME phase5_dcc_slice_range
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --dcc-slice-range-only)
+	add_test(NAME phase6_video_out_dcc_clear
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --video-out-dcc-clear-only)
 	add_test(NAME compute_meta_clear_classification
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --compute-meta-clear-only)
 	add_test(NAME buffer_cache_dirty_gc
@@ -682,6 +685,8 @@ if(BUILD_TESTING)
 	)
 	include("${CMAKE_CURRENT_SOURCE_DIR}/scripts/phase0/test-labels.cmake")
 	set_tests_properties(phase6_tessellation_boundary PROPERTIES TIMEOUT 100 LABELS "gpu;phase6" RUN_SERIAL TRUE)
+	set_tests_properties(phase6_driver PROPERTIES TIMEOUT 45 LABELS "gpu;phase6" RUN_SERIAL TRUE)
+	set_tests_properties(phase6_video_out_dcc_clear PROPERTIES TIMEOUT 45 LABELS "gpu;phase6" RUN_SERIAL TRUE)
 	set_tests_properties(phase6_ring phase6_agc_init phase6_agc_unsupported phase6_audio_pcm phase6_audio_errors phase6_audio_streaming phase6_self_repack phase6_posix_files phase6_input phase6_media phase6_save_store phase6_save_restart
 		PROPERTIES TIMEOUT 60 LABELS "host;phase6")
 endif()

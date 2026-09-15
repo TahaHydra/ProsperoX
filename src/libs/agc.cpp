@@ -1743,7 +1743,8 @@ int KYTY_SYSV_ABI AgcDriverRegisterWorkloadStream(uint32_t stream_id, const void
 }
 
 uint32_t* KYTY_SYSV_ABI AgcCbNop(CommandBuffer* buf, uint32_t size_in_dwords) {
-	if (buf == nullptr || size_in_dwords < 2) {
+	// Type-3 count encodes total DWORDs minus two in fourteen bits.
+	if (buf == nullptr || size_in_dwords < 2 || size_in_dwords > 0x4001) {
 		return nullptr;
 	}
 
@@ -3779,7 +3780,7 @@ uint32_t* KYTY_SYSV_ABI AgcDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t
 		LOGF_COLOR(Log::Color::Red, "\t invalid arguments\n");
 		return nullptr;
 	}
-	if ((4 + num_dwords - 2u) > 0x3fffu) {
+	if (num_dwords > 0x3ffdu) {
 		LOGF_COLOR(Log::Color::Red, "\t packet is too large\n");
 		return nullptr;
 	}
