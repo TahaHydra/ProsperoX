@@ -1,0 +1,85 @@
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.h b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.h
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.h
+@@ -139,7 +139,8 @@ private:
+ 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
+ 	void DownloadBufferMemory(std::span<const DownloadCopy> copies);
+-	void ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write);
++	void ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write,
++	                     bool exact_window = false);
+ 
+ 	GraphicContext&                                   m_graphics;
+ 	CommandScheduler&                                 m_scheduler;
+diff --git a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+--- a/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
++++ b/src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+@@ -14,6 +14,7 @@
+ #include "kernel/memory.h"
+ 
+ #include <algorithm>
+ #include <cinttypes>
++#include <cstdlib>
+ #include <cstring>
+ #include <memory>
+ #include <utility>
+@@ -24,6 +25,14 @@ namespace {
+ constexpr uint64_t MiB           = 1024 * 1024;
+ constexpr uint64_t GdsBufferSize = 64 * 1024;
+ 
++[[nodiscard]] bool ExactCommandReadbackEnabled() noexcept {
++	static const bool enabled = [] {
++		const char* value = std::getenv("PROSPEROX_PM4_EXACT_READBACK");
++		return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
++	}();
++	return enabled;
++}
++
+ } // namespace
+ 
+ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source,
+@@ -52,8 +61,14 @@ void BufferCache::RecordCompletionValue(uint64_t address, uint64_t value, uint32
+ 
+ void BufferCache::ReadCommandMemory(uint64_t address, void* output, uint64_t size) {
+ 	EXIT_IF(output == nullptr || size == 0 || size > UINT64_MAX - address);
+-	if (IsRegionRegistered(address, size) && HasGpuDirtyBytes(address, size)) {
+-		ReadMemory(address, size);
++	if (IsRegionRegistered(address, size) && HasGpuDirtyBytes(address, size)) {
++		const bool exact_window = ExactCommandReadbackEnabled();
++		m_scheduler.Context().GetGpu().SendCommandSync([this, address, size, exact_window] {
++			ReadMemoryOnGpu(address, size, false, exact_window);
++		});
+ 	}
+ 	if (!LibKernel::Memory::TryReadBacking(address, output, size)) {
+ 		std::memcpy(output, reinterpret_cast<const void*>(address), size);
+@@ -312,10 +327,11 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+ 		     vaddr, size);
+ 	}
+ 	m_scheduler.Context().GetGpu().SendCommandSync(
+-	    [this, vaddr, size, is_write] { ReadMemoryOnGpu(vaddr, size, is_write); });
++	    [this, vaddr, size, is_write] { ReadMemoryOnGpu(vaddr, size, is_write, false); });
+ }
+ 
+-void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) {
++void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write,
++	                              bool exact_window) {
+ 	if (is_write && !IsRegionRegistered(vaddr, size)) {
+ 		return;
+ 	}
+@@ -323,11 +339,19 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write)
+ 
+ 	// Widen nearby CPU reads so they share one GPU drain.
+ 	constexpr uint64_t WindowSize   = 512 * 1024;
+ 	const auto         buffer_begin = buffer.CpuAddress();
+ 	const auto         buffer_end   = buffer_begin + buffer.Size();
+-	const auto         window_begin = std::max(vaddr & ~(WindowSize - 1), buffer_begin);
+-	const auto window_end = std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
++	uint64_t           window_begin = vaddr;
++	uint64_t           window_end   = vaddr + size;
++
++	if (!exact_window) {
++		window_begin = std::max(vaddr & ~(WindowSize - 1), buffer_begin);
++		window_end =
++		    std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
++	}
+ 
+ 	std::vector<DownloadCopy> copies;
