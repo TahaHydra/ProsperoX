@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <nlohmann/json.hpp>
 #include <string>
 
 namespace Loader::ImportAuditRunner {
