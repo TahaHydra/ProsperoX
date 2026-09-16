@@ -88,7 +88,13 @@ public:
 	// is queued ahead of its label/event and never enters fault handling.
 	void               RecordReleaseWriteback();
 	void               RecordCompletionValue(uint64_t address, uint64_t value, uint32_t width);
-	void               ReadCommandMemory(uint64_t address, void* output, uint64_t size);
+	// Exact: the command stream consumes the value (indirect arguments, const
+	// RAM, predication), so GPU-owned bytes must be made visible now.
+	// Poll: a wait predicate re-reads the same address until it changes; the
+	// drain is throttled to device progress instead of to poll frequency.
+	enum class CommandReadMode { Exact, Poll };
+	void ReadCommandMemory(uint64_t address, void* output, uint64_t size,
+	                       CommandReadMode mode = CommandReadMode::Exact);
 	void               RunGarbageCollector();
 
 private:
@@ -128,6 +134,7 @@ private:
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	void DownloadBufferMemory(std::span<const DownloadCopy> copies);
 	void ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write);
+	[[nodiscard]] bool ShouldDrainForPoll();
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
@@ -149,6 +156,10 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+	// Device timeline position at the last drain taken on behalf of a polled
+	// command-memory read, used to throttle those drains to device progress.
+	uint64_t m_command_poll_tick    = 0;
+	bool     m_command_poll_drained = false;
 	std::atomic<uint64_t> m_release_staging_bytes{0};
 };
 

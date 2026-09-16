@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/render.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 
@@ -43,6 +44,14 @@ public:
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
 	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
+	// True when the recording in progress has to reach the device: it carries
+	// recorded work, or a completion callback is waiting on its tick. False
+	// means submitting it would be a no-op.
+	[[nodiscard]] bool HasPendingWork() const noexcept;
+	// True while a completion callback is queued or running. Such a callback
+	// waits on the device timeline itself and publishes as soon as it retires,
+	// so a parked command processor can rely on being signalled by it.
+	[[nodiscard]] bool HasPendingPriorityOperations();
 	void                           CheckActive() const;
 	CommandBuffer&                 Current();
 	[[nodiscard]] uint64_t         CurrentTick() const noexcept { return m_master.CurrentTick(); }
@@ -98,6 +107,9 @@ private:
 	bool                         m_priority_active      = false;
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;
+	// A deferred callback was queued against the tick being recorded, so that
+	// tick must reach the device even when the slice records nothing.
+	std::atomic<bool>            m_tick_in_use {false};
 };
 
 } // namespace Libs::Graphics

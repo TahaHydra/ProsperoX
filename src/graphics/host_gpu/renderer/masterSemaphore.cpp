@@ -54,4 +54,24 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	Refresh();
 }
 
+bool MasterSemaphore::WaitFor(uint64_t tick, uint64_t timeout_nanoseconds) {
+	if (IsFree(tick)) {
+		return true;
+	}
+	Refresh();
+	if (IsFree(tick)) {
+		return true;
+	}
+
+	vk::SemaphoreWaitInfo wait_info {};
+	wait_info.semaphoreCount = 1;
+	wait_info.pSemaphores    = &m_semaphore;
+	wait_info.pValues        = &tick;
+
+	const auto result = m_graphics.device.waitSemaphores(&wait_info, timeout_nanoseconds);
+	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess && result != vk::Result::eTimeout);
+	Refresh();
+	return result == vk::Result::eSuccess;
+}
+
 } // namespace Libs::Graphics

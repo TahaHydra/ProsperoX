@@ -16,6 +16,22 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 
 enum class Pm4ProcessResult { Complete, Blocked };
 
+// The memory predicate a command processor suspended on. It is only ever used
+// as a wake-up hint: a parked GPU thread re-tests it directly instead of
+// sleeping out a timer, and the packet is always re-evaluated through the
+// ordinary path afterwards. A wrong hint therefore costs one cheap retry and
+// can never change what the command stream observes.
+struct Pm4WaitCondition {
+	bool     valid   = false;
+	uint32_t func    = 0;
+	uint32_t width   = 0;
+	uint64_t address = 0;
+	uint64_t ref     = 0;
+	uint64_t mask    = 0;
+};
+
+[[nodiscard]] bool TestPm4WaitCondition(const Pm4WaitCondition& condition);
+
 enum class ContextStateOperation : uint32_t {
 	Clear     = 0,
 	Push      = 1,
@@ -26,6 +42,7 @@ enum class ContextStateOperation : uint32_t {
 class Pm4Execution {
 public:
 	[[nodiscard]] bool MadeProgress() const noexcept { return m_made_progress; }
+	[[nodiscard]] const Pm4WaitCondition& WaitCondition() const noexcept { return m_wait; }
 
 private:
 	friend class CommandProcessor;
@@ -37,6 +54,7 @@ private:
 	};
 
 	std::vector<BufferCursor> m_buffer_stack;
+	Pm4WaitCondition          m_wait;
 	bool                      m_suspended     = false;
 	bool                      m_made_progress = false;
 };
@@ -147,6 +165,7 @@ private:
 	                      uint32_t interrupt_context_id);
 	void ProcessPm4(Pm4Execution& execution, size_t stop_depth);
 	void SuspendPm4();
+	void SuspendPm4(const Pm4WaitCondition& condition);
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
 	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
 	void                CheckBuffer() const { GetScheduler().CheckActive(); }
