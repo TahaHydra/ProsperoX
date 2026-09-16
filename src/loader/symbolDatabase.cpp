@@ -126,6 +126,16 @@ if (const auto* rec =
 return rec;
 }
 
+// Coredump registration is exported by the Coredump library, while newer
+// executables can qualify that library through the libkernel module identity.
+// Keep this compatibility exact to the observed registration NID and versions.
+if (const auto* rec =
+        try_alias("[Coredump_v1][libkernel_v1.1]",
+                  "[Coredump_v1][Coredump_v1.1]", "8zLSfEfW5AU");
+    rec != nullptr) {
+return rec;
+}
+
 // SslInit observed through Ssl module version 2.1. Do not generalize
 // this version compatibility until additional ABI-compatible exports
 // are verified.
