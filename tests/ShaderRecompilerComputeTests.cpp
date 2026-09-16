@@ -2576,41 +2576,126 @@ public:
               "RELEASE_MEM lost its required split/readback, published a label "
               "before its recording retired, or retained a redundant GPU wait");
 
-      // Answering a label wait from submission order is opt-in. With it off the
-      // command processor must still suspend until the completion it recorded
-      // actually retires and publishes, which is the ordering RELEASE_MEM had
-      // before pending completions were tracked at all.
+      const auto make_wait_reg_mem = [](const void *destination, uint32_t value) {
+        const auto address = reinterpret_cast<uint64_t>(destination);
+        std::array<uint32_t, 7> packet{};
+        packet[0] = KYTY_PM4(7, Pm4::IT_WAIT_REG_MEM, 0);
+        packet[1] = 0x10u | 3u; // memory space, compare equal
+        packet[2] = static_cast<uint32_t>(address);
+        packet[3] = static_cast<uint32_t>(address >> 32u);
+        packet[4] = value;
+        packet[5] = UINT32_MAX;
+        return packet;
+      };
+      const auto make_write_data = [](void *destination, uint32_t value) {
+        const auto address = reinterpret_cast<uint64_t>(destination);
+        std::array<uint32_t, 5> packet{};
+        packet[0] = KYTY_PM4(5, Pm4::IT_WRITE_DATA, 0);
+        packet[1] = 0;
+        packet[2] = static_cast<uint32_t>(address);
+        packet[3] = static_cast<uint32_t>(address >> 32u);
+        packet[4] = value;
+        return packet;
+      };
+
+      // A fence this queue produced is ordered by submission order alone: the
+      // command processor continues without suspending. What must not change is
+      // when the guest sees the label - only the retirement callback publishes
+      // it, so it is still zero while the recording is in flight.
       alignas(uint64_t) uint64_t ordered_label = 0;
-      bool label_wait_suspended = false;
+      bool label_wait_in_stream = false;
       gpu.SendCommandSync([&] {
         processor->BufferInit();
         auto release = make_release_mem(1, 0, &ordered_label, 0x5a5a5a5au);
         Pm4Execution release_execution;
         const auto released = processor->Process(release_execution, release);
-
-        const auto label_address = reinterpret_cast<uint64_t>(&ordered_label);
-        std::array<uint32_t, 7> wait{};
-        wait[0] = KYTY_PM4(7, Pm4::IT_WAIT_REG_MEM, 0);
-        wait[1] = 0x10u | 3u; // memory space, compare equal
-        wait[2] = static_cast<uint32_t>(label_address);
-        wait[3] = static_cast<uint32_t>(label_address >> 32u);
-        wait[4] = 0x5a5a5a5au;
-        wait[5] = UINT32_MAX;
+        auto wait = make_wait_reg_mem(&ordered_label, 0x5a5a5a5au);
         Pm4Execution wait_execution;
         const auto waited = processor->Process(wait_execution, wait);
-        label_wait_suspended = released == Pm4ProcessResult::Complete &&
-                               waited == Pm4ProcessResult::Blocked &&
-                               ordered_label == 0;
+        const auto expected = CommandProcessor::InStreamWaitsEnabled()
+                                  ? Pm4ProcessResult::Complete
+                                  : Pm4ProcessResult::Blocked;
+        label_wait_in_stream = released == Pm4ProcessResult::Complete &&
+                               waited == expected && ordered_label == 0;
       });
       gpu.SendCommandSync([&] {
         gpu_scheduler.Finish();
         gpu_scheduler.WaitPriorityOperations(gpu_scheduler.CurrentTick() - 1);
       });
       Require("GpuCommandLane", "label wait ordering",
-              label_wait_suspended &&
+              label_wait_in_stream &&
                   static_cast<uint32_t>(ordered_label) == 0x5a5a5a5au,
-              "a label wait resolved before its completion retired, or the "
-              "completion never reached guest memory");
+              "a same-queue label wait did not follow submission order, "
+              "published its label before the recording retired, or never "
+              "reached guest memory at all");
+
+      // A direct command-stream write takes the address back. The completion
+      // still lands later, but the stream is managing those bytes now, so the
+      // wait must go back to observing guest memory.
+      alignas(uint64_t) uint64_t overwritten_label = 0;
+      bool overwritten_wait_suspends = false;
+      gpu.SendCommandSync([&] {
+        processor->BufferInit();
+        auto release = make_release_mem(1, 0, &overwritten_label, 0x13572468u);
+        Pm4Execution release_execution;
+        (void)processor->Process(release_execution, release);
+        auto reset = make_write_data(&overwritten_label, 0);
+        Pm4Execution reset_execution;
+        (void)processor->Process(reset_execution, reset);
+        auto wait = make_wait_reg_mem(&overwritten_label, 0x13572468u);
+        Pm4Execution wait_execution;
+        overwritten_wait_suspends =
+            processor->Process(wait_execution, wait) == Pm4ProcessResult::Blocked;
+      });
+      gpu.SendCommandSync([&] {
+        gpu_scheduler.Finish();
+        gpu_scheduler.WaitPriorityOperations(gpu_scheduler.CurrentTick() - 1);
+      });
+      Require("GpuCommandLane", "overwritten label wait",
+              overwritten_wait_suspends &&
+                  static_cast<uint32_t>(overwritten_label) == 0x13572468u,
+              "a wait was answered from a completion the command stream had "
+              "already overwritten");
+
+      // Submission order only orders one queue against itself. A completion
+      // another queue recorded proves nothing about this one, so the wait must
+      // suspend and let that queue run.
+      auto compute_processor = std::make_unique<CommandProcessor>(context, 0x20);
+      alignas(uint64_t) uint64_t foreign_label = 0;
+      bool foreign_wait_suspends = false;
+      gpu.SendCommandSync([&] {
+        compute_processor->BufferInit();
+        auto release = make_release_mem(1, 0, &foreign_label, 0x2468ace0u);
+        Pm4Execution release_execution;
+        (void)compute_processor->Process(release_execution, release);
+        processor->BufferInit();
+        auto wait = make_wait_reg_mem(&foreign_label, 0x2468ace0u);
+        Pm4Execution wait_execution;
+        foreign_wait_suspends =
+            processor->Process(wait_execution, wait) == Pm4ProcessResult::Blocked;
+      });
+      gpu.SendCommandSync([&] {
+        gpu_scheduler.Finish();
+        gpu_scheduler.WaitPriorityOperations(gpu_scheduler.CurrentTick() - 1);
+      });
+      Require("GpuCommandLane", "cross-queue label wait",
+              foreign_wait_suspends &&
+                  static_cast<uint32_t>(foreign_label) == 0x2468ace0u,
+              "a wait was answered from a completion another queue recorded");
+
+      // A label no queue has a completion for - the guest CPU writes it - has
+      // nothing to answer it from and must suspend.
+      alignas(uint64_t) uint64_t cpu_label = 0;
+      bool cpu_wait_suspends = false;
+      gpu.SendCommandSync([&] {
+        processor->BufferInit();
+        auto wait = make_wait_reg_mem(&cpu_label, 0x0badf00du);
+        Pm4Execution wait_execution;
+        cpu_wait_suspends =
+            processor->Process(wait_execution, wait) == Pm4ProcessResult::Blocked;
+      });
+      Require("GpuCommandLane", "guest-written label wait", cpu_wait_suspends,
+              "a wait with no recorded completion behind it did not suspend");
     }
 
     alignas(uint32_t) uint32_t packet_marker_a = 0;

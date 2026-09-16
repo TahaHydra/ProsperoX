@@ -86,6 +86,51 @@ void TestDropOnDirectWrite() {
   Check(pending.Size() == 1, "an empty range dropped a completion");
 }
 
+// Ownership is per address and per width. A wait that does not name exactly the
+// bytes a completion writes must fall through to the ordinary path rather than
+// be answered from a neighbouring or differently sized entry.
+void TestOverlappingAddressesAndWidths() {
+  PendingCompletions pending;
+  pending.Record(Label, 8, 0x1122334455667788ull, 3);
+  pending.Record(Label + 8, 4, 0x99aabbccu, 3);
+
+  uint64_t value = 0;
+  Check(!pending.Find(Label + 4, 4, value),
+        "the upper half of a 64-bit completion answered a 32-bit wait");
+  Check(!pending.Find(Label, 4, value),
+        "a 64-bit completion answered a 32-bit wait at the same address");
+  Check(!pending.Find(Label + 8, 8, value),
+        "a 32-bit completion answered a 64-bit wait");
+  Check(pending.Find(Label, 8, value) && value == 0x1122334455667788ull,
+        "an exact 64-bit match was rejected");
+
+  // A write anywhere inside a wide completion takes the whole entry, because
+  // the bytes it describes are no longer only its own.
+  pending.Drop(Label + 7, 2);
+  Check(!pending.Find(Label, 8, value), "a write inside a 64-bit completion did not drop it");
+  Check(!pending.Find(Label + 8, 4, value),
+        "a write spanning two completions dropped only one of them");
+}
+
+// A completion that has already happened must never answer a later wait: the
+// guest is asking about a fence still ahead of it, not the one behind it.
+void TestStaleCompletionsCannotAnswer() {
+  PendingCompletions pending;
+  pending.Record(Label, 4, 1, 5);
+
+  uint64_t value = 0;
+  pending.Prune(5);
+  Check(!pending.Find(Label, 4, value), "a completed fence still answered a wait");
+
+  // The same address and the same value become answerable again only once a new
+  // completion is recorded for them.
+  pending.Record(Label, 4, 1, 6);
+  Check(pending.Find(Label, 4, value) && value == 1,
+        "a freshly recorded completion was not answerable");
+  pending.Prune(5);
+  Check(pending.Find(Label, 4, value), "pruning below the new tick dropped it");
+}
+
 void TestDegenerateRecords() {
   PendingCompletions pending;
   uint64_t value = 0;
@@ -104,6 +149,8 @@ int main() {
   TestRecordAndFind();
   TestPruneRetiredTicks();
   TestDropOnDirectWrite();
+  TestOverlappingAddressesAndWidths();
+  TestStaleCompletionsCannotAnswer();
   TestDegenerateRecords();
   std::printf("PendingCompletionsTests: ok\n");
   return 0;

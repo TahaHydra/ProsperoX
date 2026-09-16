@@ -352,14 +352,15 @@ batched, and a partially filled batch is always submitted before the command pro
 this only trades submission granularity, never completion latency across a guest wait. Set it to
 1 to restore one submission per completion.
 
-`KYTY_GPU_INSTREAM_WAITS` (off by default) lets a `WAIT_REG_MEM` be answered from submission order
-when the completion that produces the awaited value was recorded by the same queue and has not
-retired. The wait then costs nothing instead of a full submit/execute/retire/publish round trip
-through the CPU, which is what otherwise prevents the command processor and the device from running
-at the same time. It never applies to a value another queue or a guest thread produces, and the
-cache barrier RELEASE_MEM asked for is still emitted where the guest put it. Check
-`waits instream_possible` before enabling it: that number is how much of the current wait traffic it
-can remove.
+A `WAIT_REG_MEM` is answered from submission order when the completion that produces the awaited
+value was recorded by the same queue and has not retired. The wait then costs nothing instead of a
+full submit/execute/retire/publish round trip through the CPU, which is what otherwise prevents the
+command processor and the device from running at the same time. It never applies to a value another
+queue or a guest thread produces, to an address the command stream has since written itself, or to a
+completion that has already retired, and the cache barrier RELEASE_MEM asked for is still emitted
+where the guest put it. Set `KYTY_GPU_INSTREAM_WAITS=0` to restore the round trip for a title that
+turns out to need it; `waits instream_possible` and `instream_resolved` report how much of the wait
+traffic this covers.
 
 ### AI Use
 

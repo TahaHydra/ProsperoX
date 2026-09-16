@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -349,7 +350,13 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 }
 
 bool CommandProcessor::InStreamWaitsEnabled() noexcept {
-	static const bool enabled = std::getenv("KYTY_GPU_INSTREAM_WAITS") != nullptr;
+	// On by default. A guest fence is a GPU-internal ordering construct, and
+	// submission order already provides it; opting out restores the round trip
+	// through the CPU for a title that turns out to need something else.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_GPU_INSTREAM_WAITS");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
 	return enabled;
 }
 
