@@ -7,6 +7,7 @@
 #include "common/threads.h"
 #include "loader/symbolDatabase.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <unordered_map>
@@ -138,6 +139,46 @@ struct Program {
 	uint32_t                        custom_call_plt_num         = 0;
 };
 
+enum class ImportResolutionSource {
+	None,
+	ExactHle,
+	CompatibleHle,
+	GuestModule,
+};
+
+struct ImportResolutionInspection {
+	ImportResolutionSource source = ImportResolutionSource::None;
+	SymbolRecord           record {};
+};
+
+[[nodiscard]] inline bool DecodeImportIdentity(const Program& program,
+                                               const std::string& encoded_name,
+                                               SymbolType type, SymbolResolve* out) {
+	if (out == nullptr || program.dynamic_info == nullptr) {
+		return false;
+	}
+
+	const auto ids = Common::Split(encoded_name, '#');
+	if (ids.size() != 3) {
+		return false;
+	}
+
+	const auto lib = std::find_if(program.dynamic_info->import_libs.begin(),
+	                              program.dynamic_info->import_libs.end(),
+	                              [&](const LibraryId& value) { return value.id == ids[1]; });
+	const auto mod = std::find_if(program.dynamic_info->import_modules.begin(),
+	                              program.dynamic_info->import_modules.end(),
+	                              [&](const ModuleId& value) { return value.id == ids[2]; });
+	if (lib == program.dynamic_info->import_libs.end() ||
+	    mod == program.dynamic_info->import_modules.end()) {
+		return false;
+	}
+
+	*out = {ids[0], lib->name, lib->version, mod->name, mod->version_major,
+	        mod->version_minor, type};
+	return true;
+}
+
 class RuntimeLinker {
 public:
 	RuntimeLinker();
@@ -176,7 +217,11 @@ public:
 	uint64_t ResolveImport(uint64_t record_id);
 	[[noreturn]] void RejectLegacyImport(Program* program, uint64_t index, uint64_t caller);
 
-	SymbolDatabase* Symbols() { return m_symbols.get(); }
+	[[nodiscard]] ImportResolutionInspection InspectImport(const Program& requester,
+	                                                       const SymbolResolve& request) const;
+
+	SymbolDatabase*       Symbols() { return m_symbols.get(); }
+	const SymbolDatabase* Symbols() const { return m_symbols.get(); }
 
 	static uint64_t ReadFromElf(Program* program, uint64_t vaddr);
 	Program*        FindProgramByAddr(uint64_t vaddr);
@@ -204,7 +249,7 @@ private:
 
 	std::vector<Program*>           m_programs;
 	std::vector<Program*>           m_started_modules;
-	std::string m_last_load_error;
+	std::string                     m_last_load_error;
 	std::unique_ptr<SymbolDatabase> m_symbols;
 	bool                            m_relocated = false;
 	Common::Mutex                   m_mutex;
@@ -213,6 +258,42 @@ private:
 	application_heap_free_func_t           m_application_heap_free           = nullptr;
 	application_heap_posix_memalign_func_t m_application_heap_posix_memalign = nullptr;
 };
+
+inline ImportResolutionInspection RuntimeLinker::InspectImport(const Program& /*requester*/,
+                                                               const SymbolResolve& request) const {
+	const auto qualified = SymbolDatabase::GenerateName(request);
+	if (m_symbols != nullptr) {
+		if (const auto* exact = m_symbols->FindExact(qualified); exact != nullptr) {
+			return {ImportResolutionSource::ExactHle, *exact};
+		}
+		if (const auto* compatible = m_symbols->FindExactOrCompatible(qualified);
+		    compatible != nullptr) {
+			return {ImportResolutionSource::CompatibleHle, *compatible};
+		}
+	}
+
+	const ModuleId  wanted_module {"", request.module_version_major, request.module_version_minor,
+	                               request.module};
+	const LibraryId wanted_library {"", request.library_version, request.library};
+
+	for (const auto* provider: m_programs) {
+		if (provider == nullptr || provider->dynamic_info == nullptr ||
+		    provider->export_symbols == nullptr) {
+			continue;
+		}
+		const auto& modules = provider->dynamic_info->export_modules;
+		const auto& libs    = provider->dynamic_info->export_libs;
+		if (std::find(modules.begin(), modules.end(), wanted_module) == modules.end() ||
+		    std::find(libs.begin(), libs.end(), wanted_library) == libs.end()) {
+			continue;
+		}
+		if (const auto* record = provider->export_symbols->FindExact(qualified); record != nullptr) {
+			return {ImportResolutionSource::GuestModule, *record};
+		}
+	}
+
+	return {};
+}
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 bool TestMainEntryUsesGuestStack();
