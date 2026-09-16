@@ -5,6 +5,7 @@
 #include "common/subsystems.h"
 #include "kernel/fileSystem.h"
 #include "Phase1RuntimeTests.inc"
+#include "OpenPsIdCompatibilityTests.inc"
 #include "Phase6SelfRepackTests.inc"
 #include "Phase6PosixTests.inc"
 #include "Phase6AgcTests.inc"
@@ -96,9 +97,17 @@ int main(int argc, char** argv) {
         subsystems.Destroy();
         return result;
     }
-    if (std::strcmp(argv[1], "--phase1-imports") == 0 || std::strcmp(argv[1], "--phase1-tls") == 0) {
+    if (std::strcmp(argv[1], "--phase1-imports") == 0) {
         subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
-        const auto result = std::strcmp(argv[1], "--phase1-imports") == 0 ? Phase1::Imports() : Phase1::Tls();
+        auto result = Phase1::Imports();
+        if (result == 0) result = OpenPsIdCompatibility::Run();
+        Common::Singleton<Loader::RuntimeLinker>::Instance()->Clear();
+        subsystems.Destroy();
+        return result;
+    }
+    if (std::strcmp(argv[1], "--phase1-tls") == 0) {
+        subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
+        const auto result = Phase1::Tls();
         Common::Singleton<Loader::RuntimeLinker>::Instance()->Clear();
         subsystems.Destroy();
         return result;
