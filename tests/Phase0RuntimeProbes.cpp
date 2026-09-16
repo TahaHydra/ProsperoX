@@ -4,6 +4,7 @@
 #include "loader/runtimeLinker.cpp"
 #include "common/subsystems.h"
 #include "kernel/fileSystem.h"
+#include <nlohmann/json.hpp>
 #include "Phase1RuntimeTests.inc"
 #include "OpenPsIdCompatibilityTests.inc"
 #include "ImportAuditTests.inc"
