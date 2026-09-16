@@ -9,9 +9,11 @@
 #include "common/virtualMemory.h"
 #include "emulator.h"
 #include "kytyGitVersion.h"
+#include "loader/importAuditRunner.h"
 
 #include <charconv>
 #include <cstdio>
+#include <filesystem>
 #include <fmt/format.h>
 
 using namespace Common;
@@ -40,9 +42,14 @@ static std::string GetBuildString() {
 
 static void PrintUsage() {
 	::printf("%s\n", GetBuildString().c_str());
-	::printf("kyty_emulator --game <dir|elf> [options]\n\n");
+	::printf("kyty_emulator --game <dir|elf> [options]\n");
+	::printf("kyty_emulator --audit-game <dir|elf> [--audit-json <file>]\n");
+	::printf("kyty_emulator --audit-library <root> [--audit-json <file>]\n\n");
 	::printf("Options:\n");
 	::printf("  --game <dir|elf>                     Game directory or ELF to load.\n");
+	::printf("  --audit-game <dir|elf>               Audit one game without executing guest code.\n");
+	::printf("  --audit-library <root>               Recursively audit all game roots under a directory.\n");
+	::printf("  --audit-json <file>                  Write deterministic schema-v1 JSON audit output.\n");
 	::printf("  --game-patch <json>                  ETAHen cheat file.\n");
 	::printf("  --screen-width <num>                 Window width. Default: 1280.\n");
 	::printf("  --screen-height <num>                Window height. Default: 720.\n");
@@ -88,6 +95,69 @@ static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
 
 	index++;
 	out = argv[index];
+	return true;
+}
+
+enum class AuditMode { None, Game, Library };
+
+struct AuditCommand {
+	AuditMode             mode = AuditMode::None;
+	std::filesystem::path input;
+	std::filesystem::path json;
+};
+
+static bool HasAuditSwitch(int argc, char* argv[]) {
+	for (int i = 1; i < argc; ++i) {
+		const std::string arg = argv[i];
+		if (arg == "--audit-game" || arg == "--audit-library" || arg == "--audit-json") {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ParseAuditArgs(int argc, char* argv[], AuditCommand& command, bool& show_help) {
+	show_help = false;
+	for (int i = 1; i < argc; ++i) {
+		const std::string arg = argv[i];
+		if (arg == "--help" || arg == "-h") {
+			show_help = true;
+			continue;
+		}
+		if (arg == "--game") {
+			::printf("--game is mutually exclusive with audit modes\n");
+			return false;
+		}
+		if (arg != "--audit-game" && arg != "--audit-library" && arg != "--audit-json") {
+			::printf("audit mode does not accept option: %s\n", arg.c_str());
+			return false;
+		}
+		std::string value;
+		if (!NextArg(argc, argv, i, value)) {
+			::printf("missing value for %s\n", arg.c_str());
+			return false;
+		}
+		if (arg == "--audit-json") {
+			if (!command.json.empty()) {
+				::printf("--audit-json can only be specified once\n");
+				return false;
+			}
+			command.json = Common::FixFilenameSlash(value);
+			continue;
+		}
+		const auto requested = arg == "--audit-game" ? AuditMode::Game : AuditMode::Library;
+		if (command.mode != AuditMode::None) {
+			::printf("--audit-game and --audit-library are mutually exclusive\n");
+			return false;
+		}
+		command.mode  = requested;
+		command.input = Common::FixFilenameSlash(value);
+	}
+	if (show_help) return true;
+	if (command.mode == AuditMode::None || command.input.empty()) {
+		::printf("--audit-json requires --audit-game or --audit-library\n");
+		return false;
+	}
 	return true;
 }
 
@@ -288,7 +358,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--printf-direction") {
 			if (!ParseEnum(value, options.config.printf_direction)) {
-				::printf("invalid printf direction: %s\n", value.c_str());
+				::printf("invalid printf direction: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--printf-output-file") {
@@ -332,25 +402,38 @@ int main(int argc, char* argv[]) {
 	VirtualMemory::Init();
 	InitializeThreads();
 
-	RunOptions options;
-	bool       show_help = false;
-
 	if (argc < 2) {
 		PrintUsage();
 		return 0;
 	}
 
+	if (HasAuditSwitch(argc, argv)) {
+		AuditCommand command;
+		bool         show_help = false;
+		if (!ParseAuditArgs(argc, argv, command, show_help)) {
+			PrintUsage();
+			return 2;
+		}
+		if (show_help) {
+			PrintUsage();
+			return 0;
+		}
+		if (command.mode == AuditMode::Game) {
+			return Loader::ImportAuditRunner::RunGameAudit(command.input, command.json);
+		}
+		return Loader::ImportAuditRunner::RunLibraryAudit(command.input, command.json);
+	}
+
+	RunOptions options;
+	bool       show_help = false;
 	if (!ParseArgs(argc, argv, options, show_help)) {
 		PrintUsage();
 		return 1;
 	}
-
 	if (show_help) {
 		PrintUsage();
 		return 0;
 	}
-
 	Run(options);
-
 	return 0;
 }
