@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "common/uniqueFunction.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
+#include "graphics/host_gpu/renderer/publicationBatch.h"
 #include "graphics/host_gpu/renderer/render.h"
 
 #include <atomic>
@@ -30,6 +31,13 @@ public:
 	void           Flush(SubmitInfo& submit);
 	void           FlushAndWait();
 	void           Finish();
+	// Records an end-of-pipe completion against the current recording and
+	// submits when the batch policy says the guest could be waiting for it.
+	void           PublishEndOfPipe();
+	// Marks the current recording as carrying a completion a guest thread can be
+	// blocked on right now (an interrupt or a flip), so it is never batched.
+	void           RequirePromptSubmission() noexcept { m_publications.RequirePrompt(); }
+	[[nodiscard]] const PublicationBatch& Publications() const noexcept { return m_publications; }
 	CommandBuffer& BeginCommand();
 	uint64_t       Submit(SubmitInfo submit = {});
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
@@ -110,6 +118,9 @@ private:
 	// A deferred callback was queued against the tick being recorded, so that
 	// tick must reach the device even when the slice records nothing.
 	std::atomic<bool>            m_tick_in_use {false};
+	PublicationBatch             m_publications {ConfiguredPublicationLimit()};
+
+	static uint32_t ConfiguredPublicationLimit() noexcept;
 };
 
 } // namespace Libs::Graphics

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 namespace Libs::Graphics {
@@ -31,6 +32,21 @@ void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint3
 }
 
 } // namespace
+
+uint32_t CommandScheduler::ConfiguredPublicationLimit() noexcept {
+	static const uint32_t limit = [] {
+		const char* value = std::getenv("KYTY_GPU_EOP_BATCH");
+		if (value == nullptr) {
+			return PublicationBatch::DefaultLimit;
+		}
+		const auto parsed = std::strtoul(value, nullptr, 10);
+		if (parsed == 0 || parsed > 4096) {
+			return PublicationBatch::DefaultLimit;
+		}
+		return static_cast<uint32_t>(parsed);
+	}();
+	return limit;
+}
 
 CommandScheduler::CommandPool::CommandPool(GraphicContext& graphics, MasterSemaphore& master)
     : m_graphics(graphics), m_master(master) {
@@ -202,6 +218,20 @@ void CommandScheduler::Finish() {
 		BeginNext();
 	}
 	PopPendingOperations();
+}
+
+void CommandScheduler::PublishEndOfPipe() {
+	Stats::Add(Stats::Counter::EndOfPipePublications);
+	if (!m_publications.Record()) {
+		// The completion is only observable by polling, and the poller cannot
+		// get ahead of the GPU anyway. The slice-end flush guarantees it reaches
+		// the device before the command processor yields.
+		Stats::Add(Stats::Counter::EndOfPipeBatched);
+		return;
+	}
+	Stats::Add(m_publications.Prompt() ? Stats::Counter::EndOfPipePromptSubmits
+	                                   : Stats::Counter::EndOfPipeLimitSubmits);
+	Flush();
 }
 
 bool CommandScheduler::HasPendingWork() const noexcept {
@@ -381,6 +411,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	// Begin() itself touches the handle; the slice starts empty regardless.
 	m_command.m_has_recorded_work = false;
 	m_tick_in_use.store(false, std::memory_order_relaxed);
+	m_publications.Reset();
 	return m_command;
 }
 

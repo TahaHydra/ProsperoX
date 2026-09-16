@@ -2277,7 +2277,8 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 			default: EXIT("unknown release_mem interrupt selector\n");
 		}
 		if (queued) {
-			cp.BufferFlush();
+			// The interrupt marks the recording prompt, so this submits now.
+			cp.BufferPublish();
 		}
 	};
 
@@ -2318,7 +2319,10 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 		cp.WriteAtEndOfPipe32(cache_policy, event_write_dest, eop_event_type, cache_action,
 		                      event_index, event_source, dst_gpu_addr, static_cast<uint32_t>(value),
 		                      interrupt_selector, interrupt_context_id);
-		cp.BufferFlush();
+		// A bare 32-bit label write is observed by polling; it only has to reach
+		// the device before the command processor yields. One that also raises an
+		// interrupt marks the recording prompt and submits here.
+		cp.BufferPublish();
 
 		return 7;
 	}
@@ -2336,7 +2340,7 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 		                      event_index, event_source, dst_gpu_addr, static_cast<uint32_t>(value),
 		                      interrupt_selector, interrupt_context_id);
 		if (interrupt_selector == 0x01) {
-			cp.BufferFlush();
+			cp.BufferPublish();
 		}
 
 		return 7;

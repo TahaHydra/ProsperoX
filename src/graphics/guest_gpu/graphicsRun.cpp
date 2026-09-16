@@ -277,6 +277,10 @@ void CommandProcessor::BufferFlush() {
 	GetScheduler().Flush();
 }
 
+void CommandProcessor::BufferPublish() {
+	GetScheduler().PublishEndOfPipe();
+}
+
 void CommandProcessor::BufferFlushAndWait() {
 	GetScheduler().FlushAndWait();
 }
@@ -1320,6 +1324,9 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
 	BufferFlush();
 
+	// Everything recorded so far is on its way to the device; from here the
+	// command processor is waiting on presentation, not on itself.
+	Stats::ScopedTimer timer(Stats::Timer::FlipWait);
 	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
 	                                      static_cast<int>(display_buffer_index));
 }

@@ -79,6 +79,9 @@ public:
 
 	void            BufferInit();
 	void            BufferFlush();
+	// Records an end-of-pipe completion. Submits now when a guest thread can be
+	// blocked on it, otherwise lets it ride the slice's own flush.
+	void            BufferPublish();
 	void            BufferFlushAndWait();
 	void            BufferWait();
 	HW::Context&    GetCtx() { return m_ctx; }

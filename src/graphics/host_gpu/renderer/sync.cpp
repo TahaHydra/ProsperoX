@@ -111,6 +111,12 @@ static void RecordEndOfPipeWrite(uint64_t submit_id, CommandBuffer& buffer, uint
 	    action == EndOfPipeWriteAction::InterruptWriteBack) {
 		renderer.GetBufferCache().RecordReleaseWriteback();
 	}
+	if (TriggersInterrupt(action)) {
+		// An event-queue wake can already have a guest thread parked on it, and
+		// nothing else will move this recording along. A plain label write is
+		// polled instead, so it can ride the next submission.
+		scheduler.RequirePromptSubmission();
+	}
 	scheduler.DeferPriorityOperation([&renderer, destination, value, width, action,
 	                                  interrupt_event_id, context_id, guest_backed] {
 		PublishCompletion(destination, value, width, guest_backed);
@@ -164,6 +170,9 @@ void WriteCompletionClock(CommandBuffer& buffer, uint64_t* destination,
 		return;
 	}
 	if (writeback) renderer.GetBufferCache().RecordReleaseWriteback();
+	if (interrupt) {
+		renderer.GetCommandScheduler().RequirePromptSubmission();
+	}
 	renderer.GetCommandScheduler().DeferPriorityOperation(
 	    [&renderer, destination, interrupt, event_id, context_id, guest_backed] {
 		    // Host reference clock in 100 MHz units, sampled at retirement/publication.
@@ -187,6 +196,8 @@ void CompleteFlipAtEndOfPipe(CommandBuffer& buffer, uint32_t* label, uint32_t va
 		renderer.GetBufferCache().RecordCompletionValue(reinterpret_cast<uint64_t>(label), value, 4);
 		renderer.GetBufferCache().RecordReleaseWriteback();
 	}
+	// A flip completion releases a video-out buffer and can wake an event queue.
+	scheduler.RequirePromptSubmission();
 	scheduler.DeferPriorityOperation([label, value, guest_backed, complete = std::move(complete)]() mutable {
 		if (label != nullptr) PublishCompletion(reinterpret_cast<uint64_t>(label), value, 4, guest_backed);
 		complete();
@@ -313,6 +324,7 @@ void TriggerEopEventAtEndOfPipe(CommandBuffer& buffer, int event_id, uint32_t co
 	auto& renderer  = buffer.GetContext();
 	auto& scheduler = renderer.GetCommandScheduler();
 	EXIT_IF(!scheduler.Active() || &buffer != &scheduler.Current());
+	scheduler.RequirePromptSubmission();
 	scheduler.DeferPriorityOperation(
 	    [&renderer, event_id, context_id] { renderer.TriggerInterrupt(event_id, context_id); });
 }

@@ -27,12 +27,35 @@ enum class Counter : uint32_t {
 	SchedulerFinishes,  // CommandScheduler::Finish calls
 	GpuThreadWakeups,   // parks that ended on a publication rather than a timeout
 	GpuThreadTimeouts,  // parks that ended on the safety-net timeout
+
+	// End-of-pipe submission policy: how many completions were recorded, how
+	// many were batched, and what forced the submissions that did happen.
+	EndOfPipePublications,
+	EndOfPipeBatched,
+	EndOfPipePromptSubmits, // an interrupt or flip a guest thread can wait on
+	EndOfPipeLimitSubmits,  // the batch limit
+
+	// CPU access to GPU-owned guest memory and the readbacks it forces.
+	CpuReadFaults,
+	CpuWriteFaults,
+	ReadbackDrains, // DownloadBufferMemory batches, each one a device drain
+	ReadbackBytes,
+
+	// Release-boundary writeback and garbage collection, to tell whether either
+	// is participating in the submission or readback chains.
+	ReleaseWritebacks,      // RecordReleaseWriteback calls that found dirty bytes
+	ReleaseWritebackCopies, // staging copies those calls queued
+	GarbageCollections,
 	Count,
 };
 
 enum class Timer : uint32_t {
 	SchedulerFinish, // time spent inside CommandScheduler::Finish
 	GpuThreadParked, // time the GPU thread spent parked on an unsatisfied wait
+	// The command processor blocked on presentation. This is the one stall that
+	// is outside the GPU thread's control, so it separates an emulator
+	// synchronization problem from a presentation or display-path one.
+	FlipWait,
 	Count,
 };
 

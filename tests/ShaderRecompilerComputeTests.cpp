@@ -1934,6 +1934,77 @@ public:
     std::printf("[host]    %-32s ok\n", name);
   }
 
+  // End-of-pipe completions become guest-visible when their tick retires, so
+  // each one needs its recording submitted - but not a submission of its own.
+  // A completion a guest thread can already be parked on (an interrupt, a flip)
+  // must submit immediately; a plain label write is polled and only has to
+  // reach the device before the command processor yields.
+  void CheckEndOfPipePublication(CommandScheduler &scheduler) {
+    constexpr const char *name = "SchedulerTimeline";
+    const auto limit = scheduler.Publications().Limit();
+    Require(name, "publication limit", limit >= 1,
+            "the publication batch limit was not clamped");
+
+    const auto batch_tick = scheduler.CurrentTick();
+    std::atomic<uint32_t> published{0};
+    for (uint32_t i = 0; i < limit; i++) {
+      scheduler.DeferPriorityOperation(
+          [&published] { published.fetch_add(1, std::memory_order_relaxed); });
+      const auto before = scheduler.CurrentTick();
+      scheduler.PublishEndOfPipe();
+      const bool at_limit = (i + 1 == limit);
+      Require(name, at_limit ? "publication limit submit" : "publication batching",
+              scheduler.CurrentTick() == (at_limit ? before + 1 : before),
+              at_limit ? "reaching the batch limit did not submit the recording"
+                       : "a polled label completion forced its own submission");
+    }
+    scheduler.DrainPriorityOperations();
+    Require(name, "batched completions retire",
+            published.load() == limit &&
+                scheduler.CurrentTick() == batch_tick + 1,
+            "batched completions did not all retire on one submission");
+
+    const auto prompt_tick = scheduler.CurrentTick();
+    std::atomic<bool> prompt_published{false};
+    scheduler.DeferPriorityOperation(
+        [&prompt_published] { prompt_published = true; });
+    scheduler.RequirePromptSubmission();
+    scheduler.PublishEndOfPipe();
+    Require(name, "prompt publication",
+            scheduler.CurrentTick() == prompt_tick + 1,
+            "a completion a guest thread can be parked on was batched");
+    scheduler.DrainPriorityOperations();
+    Require(name, "prompt completion retires", prompt_published.load(),
+            "a prompt completion did not retire on its own submission");
+
+    if (limit > 1) {
+      // The bound on a deferred completion is the command processor's own
+      // flush, not a timer: a partially filled batch still reaches the device
+      // when the slice ends.
+      const auto partial_tick = scheduler.CurrentTick();
+      std::atomic<bool> partial_published{false};
+      scheduler.DeferPriorityOperation(
+          [&partial_published] { partial_published = true; });
+      scheduler.PublishEndOfPipe();
+      Require(name, "partial batch deferred",
+              scheduler.CurrentTick() == partial_tick,
+              "a single polled label completion submitted early");
+      scheduler.Flush();
+      scheduler.DrainPriorityOperations();
+      Require(name, "partial batch flushed",
+              partial_published.load() &&
+                  scheduler.CurrentTick() == partial_tick + 1,
+              "a batched completion did not reach the device at the slice flush");
+    }
+
+    // Submitting starts a new recording, so the prompt requirement must not
+    // leak into it and make every later label completion submit on its own.
+    Require(name, "publication reset",
+            scheduler.Publications().Pending() == 0 &&
+                !scheduler.Publications().Prompt(),
+            "a new recording inherited the previous publication batch");
+  }
+
   void CheckSchedulerTimeline() {
     EnsureRuntimeContext();
     CommandScheduler scheduler(Renderer(), m_runtime_context);
@@ -2057,13 +2128,19 @@ public:
             "failed to signal the external timeline semaphore");
     scheduler.Wait(last_blocked_tick);
     m_runtime_context.device.destroySemaphore(external_timeline, nullptr);
+    // Recording is what makes a flush a submission: a slice that recorded
+    // nothing and has no completion waiting on its tick is elided on purpose.
+    (void)scheduler.Current().Handle();
     scheduler.Flush();
+    (void)scheduler.Current().Handle();
     scheduler.Flush();
     Require(
         "SchedulerTimeline", "timeline pool reuse",
         std::ranges::find(blocked_handles, scheduler.Current().Handle()) !=
             blocked_handles.end(),
         "completed command buffers were not reused after timeline progress");
+
+    CheckEndOfPipePublication(scheduler);
     scheduler.Shutdown();
 
     CommandScheduler draining(Renderer(), m_runtime_context);
@@ -2432,16 +2509,30 @@ public:
       alignas(uint64_t) uint64_t release_label = 0;
       alignas(uint64_t) uint64_t gds_label = UINT64_MAX;
       bool release_mem_submission_counts = false;
+      bool release_mem_label_batched = false;
       gpu.SendCommandSync([&] {
         processor->BufferInit();
 
+        // A bare 32-bit label write raises no interrupt, so no guest thread can
+        // be parked on it: it is observed by polling, and a poller cannot get
+        // ahead of the GPU. It therefore rides the next submission instead of
+        // forcing one - but it must stay pending against the recording, and it
+        // must not be published before that recording retires.
         auto immediate = make_release_mem(1, 0, &release_label, 0x11223344u);
         Pm4Execution immediate_execution;
         const auto immediate_tick = gpu_scheduler.CurrentTick();
+        const auto immediate_pending = gpu_scheduler.Publications().Pending();
         const auto immediate_result =
             processor->Process(immediate_execution, immediate);
+        const bool batches_labels = gpu_scheduler.Publications().Limit() > 1;
         const bool immediate_split_once =
-            gpu_scheduler.CurrentTick() == immediate_tick + 1;
+            batches_labels
+                ? (gpu_scheduler.CurrentTick() == immediate_tick &&
+                   gpu_scheduler.Publications().Pending() ==
+                       immediate_pending + 1)
+                : (gpu_scheduler.CurrentTick() == immediate_tick + 1);
+        release_mem_label_batched =
+            immediate_split_once && release_label == 0;
 
         auto gds = make_release_mem(5, 0, &gds_label, 1ull << 16u);
         Pm4Execution gds_execution;
@@ -2479,11 +2570,11 @@ public:
         gpu_scheduler.WaitPriorityOperations(gpu_scheduler.CurrentTick() - 1);
       });
       Require("GpuCommandLane", "RELEASE_MEM submission counts",
-              release_mem_submission_counts &&
+              release_mem_submission_counts && release_mem_label_batched &&
                   static_cast<uint32_t>(release_label) == 0x11223344u &&
                   static_cast<uint32_t>(gds_label) == 0,
-              "RELEASE_MEM lost its required split/readback or retained a "
-              "redundant GPU wait");
+              "RELEASE_MEM lost its required split/readback, published a label "
+              "before its recording retired, or retained a redundant GPU wait");
     }
 
     alignas(uint32_t) uint32_t packet_marker_a = 0;

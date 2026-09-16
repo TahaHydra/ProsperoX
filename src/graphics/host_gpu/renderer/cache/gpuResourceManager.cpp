@@ -1,8 +1,10 @@
 #include "graphics/host_gpu/renderer/cache/gpuResourceManager.h"
 
 #include "common/assert.h"
+#include "graphics/gpuStats.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+
 namespace Libs::Graphics {
 
 GpuResourceManager::GpuResourceManager(GraphicContext& graphics, CommandScheduler& scheduler)
@@ -21,9 +23,11 @@ bool GpuResourceManager::HandleFault(PageFaultAccess access, uint64_t fault_vadd
 	// A partial CPU write must first preserve the other GPU-authored pixels too.
 	SynchronizeCpuImages(fault_vaddr, fault_size);
 	if (access == PageFaultAccess::Write) {
+		Stats::Add(Stats::Counter::CpuWriteFaults);
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
+		Stats::Add(Stats::Counter::CpuReadFaults);
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
 	return true;

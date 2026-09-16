@@ -314,13 +314,30 @@ SDL_VULKAN_LIBRARY=/path/to/libMoltenVK.dylib ./kyty_emulator --game "/games/Exa
 Run `kyty_emulator --help` to see the available graphics, logging, validation, profiling, and
 debugging options.
 
-Setting `KYTY_GPU_STATS=1` prints one line per second summarizing the guest-GPU execution
-pipeline: guest submissions, command-processor slices, slices that suspended on a wait, failed
-`WAIT_REG_MEM` predicates, device drains taken to re-read a wait label, `vkQueueSubmit` calls,
-elided submissions, `CommandScheduler::Finish` calls, and the time the GPU thread spent draining
-or parked. It is the quickest way to tell a genuine GPU bottleneck from synchronization overhead:
-in a healthy frame the blocked-slice, drain, and queue-submit counts stay within a small multiple
-of the guest submission count.
+Setting `KYTY_GPU_STATS=1` prints a summary of the guest-GPU execution pipeline once per second,
+grouped by the mechanism each number belongs to:
+
+* `pm4` - guest submissions, command-processor slices, slices that suspended on a wait, failed
+  `WAIT_REG_MEM` predicates, and device drains taken to re-read a wait label.
+* `submit` - `vkQueueSubmit` calls, submissions elided because the slice recorded nothing, and
+  `CommandScheduler::Finish` calls with the wall-clock time spent inside them.
+* `eop` - end-of-pipe completions recorded, how many were batched onto a later submission, and
+  what forced the submissions that did happen: a completion a guest thread can be parked on
+  (`prompt`) or the batch limit (`limit`).
+* `readback` - CPU read and write faults on GPU-owned guest memory, the device drains those
+  faults forced, and the bytes downloaded.
+* `upkeep` - release-boundary writebacks and the staging copies they queued, garbage-collection
+  runs, and the time the GPU thread spent parked on a wait.
+
+It is the quickest way to tell a genuine GPU bottleneck from synchronization overhead: in a
+healthy frame the blocked-slice, drain, fault, and queue-submit counts stay within a small
+multiple of the guest submission count.
+
+`KYTY_GPU_EOP_BATCH` sets how many polled end-of-pipe label writes may share one submission
+(default 8). A completion a guest thread can be blocked on - an interrupt or a flip - is never
+batched, and a partially filled batch is always submitted before the command processor yields, so
+this only trades submission granularity, never completion latency across a guest wait. Set it to
+1 to restore one submission per completion.
 
 ### AI Use
 

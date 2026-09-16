@@ -77,23 +77,36 @@ void Report() noexcept {
         return static_cast<double>(nanoseconds) / 1e6 / seconds;
 	};
 
-	char line[512];
-	std::snprintf(line, sizeof(line),
-	              "gpu stats (per second): submit=%.1f process=%.1f blocked=%.1f waitfail=%.1f "
-	              "drains=%.1f vksubmit=%.1f elided=%.1f finish=%.1f finish_ms=%.1f "
-	              "parked_ms=%.1f wake=%.1f timeout=%.1f\n",
-	              per_second(counters[static_cast<uint32_t>(Counter::GuestSubmissions)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::ProcessAttempts)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::BlockedAttempts)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::WaitRegMemFailures)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::WaitDrains)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::QueueSubmits)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::ElidedSubmits)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::SchedulerFinishes)]),
-	              millis(timers[static_cast<uint32_t>(Timer::SchedulerFinish)]),
-	              millis(timers[static_cast<uint32_t>(Timer::GpuThreadParked)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::GpuThreadWakeups)]),
-	              per_second(counters[static_cast<uint32_t>(Counter::GpuThreadTimeouts)]));
+	const auto count = [&counters](Counter counter) {
+		return counters[static_cast<uint32_t>(counter)];
+	};
+	const auto time = [&timers](Timer timer) { return timers[static_cast<uint32_t>(timer)]; };
+
+	char line[1024];
+	std::snprintf(
+	    line, sizeof(line),
+	    "gpu stats (per second):\n"
+	    "  pm4      submit=%.1f process=%.1f blocked=%.1f waitfail=%.1f drains=%.1f\n"
+	    "  submit   vksubmit=%.1f elided=%.1f finish=%.1f finish_ms=%.1f\n"
+	    "  eop      publish=%.1f batched=%.1f prompt=%.1f limit=%.1f\n"
+	    "  readback readfault=%.1f writefault=%.1f drains=%.1f MiB=%.2f\n"
+	    "  upkeep   writeback=%.1f copies=%.1f gc=%.1f parked_ms=%.1f wake=%.1f timeout=%.1f\n"
+	    "  present  flipwait_ms=%.1f\n",
+	    per_second(count(Counter::GuestSubmissions)), per_second(count(Counter::ProcessAttempts)),
+	    per_second(count(Counter::BlockedAttempts)), per_second(count(Counter::WaitRegMemFailures)),
+	    per_second(count(Counter::WaitDrains)), per_second(count(Counter::QueueSubmits)),
+	    per_second(count(Counter::ElidedSubmits)), per_second(count(Counter::SchedulerFinishes)),
+	    millis(time(Timer::SchedulerFinish)), per_second(count(Counter::EndOfPipePublications)),
+	    per_second(count(Counter::EndOfPipeBatched)),
+	    per_second(count(Counter::EndOfPipePromptSubmits)),
+	    per_second(count(Counter::EndOfPipeLimitSubmits)), per_second(count(Counter::CpuReadFaults)),
+	    per_second(count(Counter::CpuWriteFaults)), per_second(count(Counter::ReadbackDrains)),
+	    per_second(count(Counter::ReadbackBytes)) / (1024.0 * 1024.0),
+	    per_second(count(Counter::ReleaseWritebacks)),
+	    per_second(count(Counter::ReleaseWritebackCopies)),
+	    per_second(count(Counter::GarbageCollections)), millis(time(Timer::GpuThreadParked)),
+	    per_second(count(Counter::GpuThreadWakeups)), per_second(count(Counter::GpuThreadTimeouts)),
+	    millis(time(Timer::FlipWait)));
 
 	LOGF("%s", line);
 	std::fputs(line, stdout);

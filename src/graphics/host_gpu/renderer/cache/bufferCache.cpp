@@ -52,9 +52,25 @@ struct BufferCache::DownloadCopy {
 
 void BufferCache::RecordCompletionValue(uint64_t address, uint64_t value, uint32_t width) {
 	if (!IsRegionRegistered(address, width)) return;
-	auto [buffer, offset] = ObtainBuffer(address, width, true);
-	(void)offset;
-	WriteDataBuffer(*buffer, address, &value, width);
+	if (m_scheduler.Current().IsInvalid()) {
+		EXIT("BufferCache: completion value requires a recording command buffer\n");
+	}
+	auto& buffer = m_slot_buffers[FindBuffer(address, width)];
+	TouchBuffer(buffer);
+	// Bring pending CPU writes in first so a later upload of the same page cannot
+	// reorder ahead of the mirrored value, then mirror it for device readers.
+	//
+	// Ownership of the page is deliberately NOT transferred to the GPU. Every
+	// caller queues, against this same tick, a retirement callback that writes
+	// the identical value into guest memory (Sync::PublishCompletion). Guest
+	// memory therefore holds the architecturally correct value at every instant:
+	// the pre-completion value until the tick retires, the completion value
+	// after. It is never recoverable only from the device, so it must never be
+	// recovered from the device - claiming the page would instead force every
+	// CPU read of the 4 KiB it lands in through a page fault and a full device
+	// drain to rebuild a value the emulator already knows.
+	(void)SynchronizeBuffer(buffer, address, width, false, false);
+	WriteDataBuffer(buffer, address, &value, width);
 }
 
 void BufferCache::ReadCommandMemory(uint64_t address, void* output, uint64_t size,
@@ -95,6 +111,7 @@ void BufferCache::RecordReleaseWriteback() {
 	if (m_gpu_modified_ranges.Empty()) {
 		return;
 	}
+	Stats::Add(Stats::Counter::ReleaseWritebacks);
 	// Keep dirty ownership until an ordinary GPU-thread readback/invalidation.
 	// Clearing it here would let a CPU read overtake this pending submission.
 	// Dedicated staging allocations cannot wrap or be overwritten by later work.
@@ -114,6 +131,7 @@ void BufferCache::RecordReleaseWriteback() {
 					m_scheduler.Finish();
 					m_scheduler.WaitPriorityOperations(tick);
 				}
+				Stats::Add(Stats::Counter::ReleaseWritebackCopies);
 				m_release_staging_bytes.fetch_add(size);
 				auto staging = std::make_shared<Buffer>(m_graphics, m_scheduler,
 				    MemoryUsage::Download, 0, vk::BufferUsageFlagBits::eTransferDst, size);
@@ -235,6 +253,8 @@ void BufferCache::DownloadBufferMemory(std::span<const DownloadCopy> copies) {
 			cursor += AlignDownload(envelope_size);
 		}
 		download.Commit();
+		Stats::Add(Stats::Counter::ReadbackDrains);
+		Stats::Add(Stats::Counter::ReadbackBytes, packed_size);
 		const auto completion_tick = m_scheduler.CurrentTick();
 		m_scheduler.Finish();
 		m_scheduler.WaitPriorityOperations(completion_tick);
@@ -724,6 +744,7 @@ bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::RunGarbageCollector() {
+	Stats::Add(Stats::Counter::GarbageCollections);
 	const auto tick = m_gc_tick++;
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();

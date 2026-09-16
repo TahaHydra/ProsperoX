@@ -409,6 +409,11 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
+add_executable(publication_batch_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PublicationBatchTests.cpp"
+)
+target_include_directories(publication_batch_tests PRIVATE ${inc_headers})
+
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
 	"${KYTY_SOURCE_DIR}/libs/imeCommon.cpp"
@@ -585,6 +590,7 @@ if(BUILD_TESTING)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
+	add_test(NAME publication_batch COMMAND $<TARGET_FILE:publication_batch_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
