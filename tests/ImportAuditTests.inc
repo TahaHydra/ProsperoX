@@ -2,6 +2,9 @@
 #include "loader/importAudit.h"
 #include "libs/libs.h"
 
+#include <chrono>
+#include <fstream>
+
 namespace PhaseImportAudit {
 
 static Loader::SymbolResolve MakeRequest(const char* nid, const char* library,
@@ -83,7 +86,48 @@ int Run() {
     Phase1::Check(key == "AuditMissingNid|Func|AuditLib@1|AuditMod@1.1",
                   "audit import key is deterministic and qualification-complete");
 
-    std::puts("IMPORT_AUDIT_PASS resolution and classification");
+    // Global aggregation counts games once while preserving every static reference.
+    auto g1_record = missing;
+    g1_record.references = 2;
+    auto g2_record = missing;
+    g2_record.references = 3;
+    GameResult g1;
+    g1.root = "synthetic/A";
+    g1.title_id = "AUDIT00001";
+    g1.binaries.push_back({"eboot.bin", true, "", {g1_record}});
+    GameResult g2;
+    g2.root = "synthetic/B";
+    g2.title_id = "AUDIT00002";
+    g2.binaries.push_back({"eboot.bin", true, "", {g2_record}});
+    auto aggregated = Aggregate({g2, g1});
+    Phase1::Check(aggregated.global_imports.size() == 1 &&
+                      aggregated.global_imports[0].games.size() == 2,
+                  "global audit counts affected games rather than relocations");
+    Phase1::Check(aggregated.global_imports[0].import.references == 5,
+                  "global audit preserves total static reference count");
+
+    const auto json_a = ToJson(aggregated).dump();
+    const auto json_b = ToJson(Aggregate({g1, g2})).dump();
+    Phase1::Check(json_a == json_b,
+                  "audit JSON ordering is deterministic regardless of discovery order");
+
+    // Recursive discovery is based only on directories that actually contain eboot.bin.
+    const auto temp = std::filesystem::temp_directory_path() /
+        ("prosperox-audit-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(temp / "A");
+    std::filesystem::create_directories(temp / "B" / "deeper");
+    std::filesystem::create_directories(temp / "not-a-game");
+    { std::ofstream(temp / "A" / "eboot.bin", std::ios::binary); }
+    { std::ofstream(temp / "B" / "deeper" / "eboot.bin", std::ios::binary); }
+    { std::ofstream(temp / "not-a-game" / "random.bin", std::ios::binary); }
+    const auto roots = DiscoverGameRoots(temp);
+    Phase1::Check(roots.size() == 2 && roots[0].filename() == "A" &&
+                      roots[1].filename() == "deeper",
+                  "library audit discovers every and only synthetic game root");
+    std::filesystem::remove_all(temp);
+
+    std::puts("IMPORT_AUDIT_PASS resolution classification aggregation JSON discovery");
     return 0;
 }
 
