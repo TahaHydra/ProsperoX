@@ -54,7 +54,7 @@ void SymbolDatabase::DbgDump(const std::string& folder, const std::string& file_
 }
 
 const SymbolRecord* SymbolDatabase::Find(const SymbolResolve& s) const {
-	return FindExact(GenerateName(s));
+	return FindExactOrCompatible(GenerateName(s));
 }
 
 const SymbolRecord* SymbolDatabase::FindExact(const std::string& qualified_name) const {
