@@ -88,7 +88,7 @@ void Report() noexcept {
 	    "gpu stats (per second):\n"
 	    "  pm4      submit=%.1f process=%.1f blocked=%.1f waitfail=%.1f drains=%.1f\n"
 	    "  waits    instream_possible=%.1f instream_resolved=%.1f\n"
-	    "  submit   vksubmit=%.1f elided=%.1f finish=%.1f finish_ms=%.1f\n"
+	    "  submit   vksubmit=%.1f elided=%.1f starved=%.1f finish=%.1f finish_ms=%.1f\n"
 	    "  eop      publish=%.1f batched=%.1f prompt=%.1f limit=%.1f\n"
 	    "  readback readfault=%.1f writefault=%.1f flushed=%.1f drains=%.1f MiB=%.2f\n"
 	    "  work     draws=%.1f dispatches=%.1f\n"
@@ -106,7 +106,8 @@ void Report() noexcept {
 	    per_second(count(Counter::WaitDrains)),
 	    per_second(count(Counter::WaitResolvableInStream)),
 	    per_second(count(Counter::WaitResolvedInStream)), per_second(count(Counter::QueueSubmits)),
-	    per_second(count(Counter::ElidedSubmits)), per_second(count(Counter::SchedulerFinishes)),
+	    per_second(count(Counter::ElidedSubmits)), per_second(count(Counter::SubmitDeviceIdle)),
+	    per_second(count(Counter::SchedulerFinishes)),
 	    millis(time(Timer::SchedulerFinish)), per_second(count(Counter::EndOfPipePublications)),
 	    per_second(count(Counter::EndOfPipeBatched)),
 	    per_second(count(Counter::EndOfPipePromptSubmits)),

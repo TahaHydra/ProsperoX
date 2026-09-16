@@ -417,6 +417,14 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
+	if (Stats::Enabled()) {
+		// Sampled before the hand-off: if everything submitted so far has already
+		// retired, the device ran dry waiting for this recording.
+		m_master.Refresh();
+		if (m_master.KnownGpuTick() + 1 >= CurrentTick()) {
+			Stats::Add(Stats::Counter::SubmitDeviceIdle);
+		}
+	}
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 

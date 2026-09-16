@@ -88,6 +88,12 @@ enum class Counter : uint32_t {
 	FinishUnmap,            // guest unmapped memory the device still owns
 	PredicationWaits,       // SET_PREDICATION asked the CP to wait on the device
 	StreamBufferWaits,      // a stream ring wrapped onto work still in flight
+
+	// Submissions handed to a device that had already retired everything else.
+	// Against QueueSubmits this says whether the device is starved between
+	// submissions, which is what decides whether completions may be batched
+	// harder: coarser batching helps only if the device is never waiting.
+	SubmitDeviceIdle,
 	Count,
 };
 

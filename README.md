@@ -333,6 +333,9 @@ grouped by the mechanism each number belongs to:
   up or created.
 * `upkeep` - release-boundary writebacks and the staging copies they queued, and garbage-collection
   runs.
+* `submit starved` - submissions handed to a device that had already retired everything else.
+  Against `vksubmit` this is what decides whether end-of-pipe completions may be batched harder:
+  coarser batching only helps when the device is never waiting for work.
 * `finish` - why the device was drained, by caller: a buffer or image readback, release-writeback
   staging running out of budget, a RELEASE_MEM sourcing its value from GDS, a timestamp written into
   a cached destination, or a guest unmap. `pred` and `stream` count the other two places the command
