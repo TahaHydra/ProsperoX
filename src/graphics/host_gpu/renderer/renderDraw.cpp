@@ -919,6 +919,7 @@ bool RenderExecutor::PrepareDrawRenderState(uint64_t submit_id, CommandBuffer& b
                                             const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
                                             bool log_setup_phases, DrawRenderState& state) {
+	Stats::ScopedTimer timer(Stats::Timer::DrawRenderTargets);
 	auto& ctx = buffer.GetRegisters();
 
 	if (ResolveColorTargets(submit_id, buffer, render_target_slice_offset)) {
@@ -972,6 +973,7 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw, bool
 	if (log_phases) {
 		LogDrawPhase(draw.name, "GetGraphicsPrograms");
 	}
+	Stats::ScopedTimer timer(Stats::Timer::DrawShaderLookup);
 	state.programs = pipeline_cache.GetGraphicsPrograms(
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
 	    target_export_mapping, state.ps_active, state.vs_input_info, state.ps_input_info);
@@ -1125,26 +1127,34 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                              index_source.guest_element_size);
 	}
 	LogDrawPhase(draw.name, "PrepareBindings");
-	auto bindings = PrepareGraphicsBindings(state.vs_input_info.stage, state.ps_input_info.stage,
-	                                        state.ps_active);
+	auto bindings = [&] {
+		Stats::ScopedTimer timer(Stats::Timer::DrawBindingsPrepare);
+		return PrepareGraphicsBindings(state.vs_input_info.stage, state.ps_input_info.stage,
+		                               state.ps_active);
+	}();
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
 		LogDrawPhase(draw.name, "PrepareVertexBuffers");
+		Stats::ScopedTimer timer(Stats::Timer::DrawVertexIndex);
 		vertex_bindings = AcquireVertexBuffers(buffer, state.vs_input_info);
 		index_binding   = PrepareIndexBuffer(buffer, index_source);
 	}
-	const auto rendering =
-	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
-	                         bindings.pixel);
+	const auto rendering = [&] {
+		Stats::ScopedTimer timer(Stats::Timer::DrawRenderTargets);
+		return AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
+		                            bindings.pixel);
+	}();
 
 	if (log_pipeline_phase) {
 		LogDrawPhase(draw.name, "CreatePipeline");
 	}
+	Stats::ScopedTimer pipeline_timer(Stats::Timer::DrawPipelineLookup);
 	auto& pipeline = m_context.GetPipelineCache().CreateGraphicsPipeline(
 	    std::span {state.color_info, state.color_count}, state.depth_info, state.vs_input_info, buffer,
 	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
 	    state.programs.vertex, state.programs.pixel);
+	pipeline_timer.End();
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest

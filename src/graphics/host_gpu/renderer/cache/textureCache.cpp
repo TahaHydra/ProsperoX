@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 
+#include "graphics/gpuStats.h"
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -2055,6 +2056,7 @@ void TextureCache::ReadMemory(uint64_t address, uint64_t size) {
 			     "\n",
 			     range.address);
 		}
+		Stats::Add(Stats::Counter::FinishImageReadback);
 		const auto tick = m_scheduler.CurrentTick();
 		m_scheduler.Finish();
 		// GPU completion alone does not publish the deferred WriteBacking operation.

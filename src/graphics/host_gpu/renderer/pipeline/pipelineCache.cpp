@@ -305,8 +305,11 @@ struct PipelineCache::ProgramCache {
 		if (entry != programs.end()) {
 			Stats::Add(Stats::Counter::ShaderSourceHits);
 			Stats::Add(Stats::Counter::ResourceMaterializations);
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    entry->second.resource_plan, runtime, resources, specialization));
+			{
+				Stats::ScopedTimer timer(Stats::Timer::DrawResourceMaterialize);
+				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+				    entry->second.resource_plan, runtime, resources, specialization));
+			}
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations,
 			        [&](const Permutation& candidate) {

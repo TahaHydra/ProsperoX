@@ -76,6 +76,18 @@ enum class Counter : uint32_t {
 	// measures the result.
 	WaitResolvableInStream,
 	WaitResolvedInStream,
+
+	// Why the device was drained. Every one of these serializes the command
+	// processor against the device, so knowing which is responsible decides
+	// whether a remaining drain is unavoidable or a design choice.
+	FinishBufferReadback,   // CPU read of GPU-owned buffer bytes
+	FinishImageReadback,    // CPU read of a GPU-owned image
+	FinishReleaseWriteback, // release-boundary staging ran out of budget
+	FinishGdsRead,          // RELEASE_MEM sourcing its value from GDS
+	FinishCompletionClock,  // a timestamp written into a cached destination
+	FinishUnmap,            // guest unmapped memory the device still owns
+	PredicationWaits,       // SET_PREDICATION asked the CP to wait on the device
+	StreamBufferWaits,      // a stream ring wrapped onto work still in flight
 	Count,
 };
 
@@ -90,6 +102,17 @@ enum class Timer : uint32_t {
 	// this is the one measurement that separates "the emulator is CPU-bound in
 	// the draw path" from "the emulator is waiting for the device".
 	GpuThreadRecording,
+
+	// Decomposition of the draw recording path, in the order a draw walks it.
+	// These are wall-clock and they nest: DrawShaderLookup contains
+	// DrawResourceMaterialize, and all of them sit inside GpuThreadRecording.
+	DrawRenderTargets,       // resolving colour/depth targets and the render state
+	DrawShaderLookup,        // program cache lookup, per stage
+	DrawResourceMaterialize, // ... of which, resolving the shader's resources
+	DrawVertexIndex,         // vertex and index buffer acquisition
+	DrawPipelineLookup,      // host pipeline key build and lookup
+	DrawBindingsPrepare,     // descriptor preparation and publication
+	DrawBindingsCommit,      // descriptor writes and the bind itself
 	Count,
 };
 
@@ -109,10 +132,15 @@ public:
 			m_start = std::chrono::steady_clock::now();
 		}
 	}
-	~ScopedTimer() noexcept {
+	~ScopedTimer() noexcept { End(); }
+
+	// Stops early, so a timer can cover less than its enclosing scope. Further
+	// calls, including the destructor's, do nothing.
+	void End() noexcept {
 		if (!m_enabled) {
 			return;
 		}
+		m_enabled          = false;
 		const auto elapsed = std::chrono::steady_clock::now() - m_start;
 		AddTime(m_timer, static_cast<uint64_t>(
 		                     std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()));

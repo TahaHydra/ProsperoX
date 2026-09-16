@@ -333,6 +333,14 @@ grouped by the mechanism each number belongs to:
   up or created.
 * `upkeep` - release-boundary writebacks and the staging copies they queued, and garbage-collection
   runs.
+* `finish` - why the device was drained, by caller: a buffer or image readback, release-writeback
+  staging running out of budget, a RELEASE_MEM sourcing its value from GDS, a timestamp written into
+  a cached destination, or a guest unmap. `pred` and `stream` count the other two places the command
+  processor waits on the device: SET_PREDICATION and a stream ring wrapping onto work in flight.
+* `draw_ms` - where recording time goes, in the order a draw walks it: resolving render targets,
+  the program-cache lookup (and, of that, resolving the shader's resources), vertex and index buffer
+  acquisition, the host pipeline lookup, descriptor preparation, and the descriptor writes. These
+  nest inside `recording_ms`.
 * `time` - how the GPU thread spent its second: `recording_ms` inside PM4 execution, `parked_ms`
   waiting on an unsatisfied guest wait, `flipwait_ms` blocked on presentation. These three are the
   fastest way to tell a CPU-bound draw path from a stalled one.

@@ -81,6 +81,7 @@ void GpuResourceManager::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	}
 	const auto unmap = [this, vaddr, size] {
 		if (m_scheduler.Active()) {
+			Stats::Add(Stats::Counter::FinishUnmap);
 			const auto tick = m_scheduler.CurrentTick();
 			m_scheduler.Finish();
 			m_scheduler.WaitPriorityOperations(tick);

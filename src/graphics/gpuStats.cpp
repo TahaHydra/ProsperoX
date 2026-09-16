@@ -82,7 +82,7 @@ void Report() noexcept {
 	};
 	const auto time = [&timers](Timer timer) { return timers[static_cast<uint32_t>(timer)]; };
 
-	char line[1536];
+	char line[2048];
 	std::snprintf(
 	    line, sizeof(line),
 	    "gpu stats (per second):\n"
@@ -96,6 +96,10 @@ void Report() noexcept {
 	    "material=%.1f\n"
 	    "  pipeline lookups=%.1f gfxnew=%.1f csnew=%.1f\n"
 	    "  upkeep   writeback=%.1f copies=%.1f gc=%.1f\n"
+	    "  finish   buf=%.1f img=%.1f wb=%.1f gds=%.1f clock=%.1f unmap=%.1f pred=%.1f "
+	    "stream=%.1f\n"
+	    "  draw_ms  targets=%.1f shader=%.1f (material=%.1f) vtx=%.1f pipe=%.1f bind=%.1f "
+	    "commit=%.1f\n"
 	    "  time     recording_ms=%.1f parked_ms=%.1f flipwait_ms=%.1f wake=%.1f timeout=%.1f\n",
 	    per_second(count(Counter::GuestSubmissions)), per_second(count(Counter::ProcessAttempts)),
 	    per_second(count(Counter::BlockedAttempts)), per_second(count(Counter::WaitRegMemFailures)),
@@ -121,7 +125,17 @@ void Report() noexcept {
 	    per_second(count(Counter::ComputePipelineCreations)),
 	    per_second(count(Counter::ReleaseWritebacks)),
 	    per_second(count(Counter::ReleaseWritebackCopies)),
-	    per_second(count(Counter::GarbageCollections)), millis(time(Timer::GpuThreadRecording)),
+	    per_second(count(Counter::GarbageCollections)),
+	    per_second(count(Counter::FinishBufferReadback)),
+	    per_second(count(Counter::FinishImageReadback)),
+	    per_second(count(Counter::FinishReleaseWriteback)),
+	    per_second(count(Counter::FinishGdsRead)), per_second(count(Counter::FinishCompletionClock)),
+	    per_second(count(Counter::FinishUnmap)), per_second(count(Counter::PredicationWaits)),
+	    per_second(count(Counter::StreamBufferWaits)), millis(time(Timer::DrawRenderTargets)),
+	    millis(time(Timer::DrawShaderLookup)), millis(time(Timer::DrawResourceMaterialize)),
+	    millis(time(Timer::DrawVertexIndex)), millis(time(Timer::DrawPipelineLookup)),
+	    millis(time(Timer::DrawBindingsPrepare)), millis(time(Timer::DrawBindingsCommit)),
+	    millis(time(Timer::GpuThreadRecording)),
 	    millis(time(Timer::GpuThreadParked)), millis(time(Timer::FlipWait)),
 	    per_second(count(Counter::GpuThreadWakeups)), per_second(count(Counter::GpuThreadTimeouts)));
 

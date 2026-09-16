@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/sync.h"
 
+#include "graphics/gpuStats.h"
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/logging/log.h"
@@ -160,6 +161,7 @@ void WriteCompletionClock(CommandBuffer& buffer, uint64_t* destination,
 		// value to the device mirror and guest backing through the ordinary path.
 		// This conservative cost is restricted to cached clock destinations.
 		auto& scheduler = renderer.GetCommandScheduler();
+		Stats::Add(Stats::Counter::FinishCompletionClock);
 		const auto tick = scheduler.CurrentTick();
 		scheduler.Finish();
 		scheduler.WaitPriorityOperations(tick);

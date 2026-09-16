@@ -1058,6 +1058,7 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
                                       const volatile void* address, uint32_t count_in_dwords) {
 	if (wait_op != 0) {
+		Stats::Add(Stats::Counter::PredicationWaits);
 		BufferFlushAndWait();
 	}
 
@@ -1480,6 +1481,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			if constexpr (sizeof(T) == sizeof(uint32_t)) {
 				if (eop_event_type == 0x2f && cache_action == 0x00 && event_index == 0x06) {
 					auto* dst = static_cast<uint32_t*>(dst_gpu_addr);
+					Stats::Add(Stats::Counter::FinishGdsRead);
 					SynchronizeGpu();
 					Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(), dst, value & 0xffffu,
 					              value >> 16u);

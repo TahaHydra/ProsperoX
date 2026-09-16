@@ -127,6 +127,7 @@ void BufferCache::RecordReleaseWriteback() {
 				// Bounded backpressure only when staging is exhausted; no idle per
 				// release packet. Retirement callbacks return the reserved bytes.
 				if (m_release_staging_bytes.load() + size > 64 * MiB) {
+					Stats::Add(Stats::Counter::FinishReleaseWriteback);
 					const auto tick = m_scheduler.CurrentTick();
 					m_scheduler.Finish();
 					m_scheduler.WaitPriorityOperations(tick);
@@ -254,6 +255,7 @@ void BufferCache::DownloadBufferMemory(std::span<const DownloadCopy> copies) {
 		}
 		download.Commit();
 		Stats::Add(Stats::Counter::ReadbackDrains);
+		Stats::Add(Stats::Counter::FinishBufferReadback);
 		Stats::Add(Stats::Counter::ReadbackBytes, packed_size);
 		const auto completion_tick = m_scheduler.CurrentTick();
 		m_scheduler.Finish();

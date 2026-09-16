@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
+#include "graphics/gpuStats.h"
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/file.h"
@@ -949,6 +950,7 @@ void RenderExecutor::PublishBuffers(PreparedBindings& prepared) {
 //
 // One call, so a caller cannot rebind without publishing.
 void RenderExecutor::FinalizeBindings(std::span<PreparedBindings* const> stages) {
+	Stats::ScopedTimer timer(Stats::Timer::DrawBindingsPrepare);
 	KYTY_PROFILER_FUNCTION();
 	for (auto* stage: stages) {
 		if (stage != nullptr) {
@@ -1052,6 +1054,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
 	KYTY_PROFILER_FUNCTION();
+	Stats::ScopedTimer timer(Stats::Timer::DrawBindingsCommit);
 	auto   vk_buffer        = buffer.Handle();
 	size_t descriptor_count = 0;
 	size_t write_count      = 0;
