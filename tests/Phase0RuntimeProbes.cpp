@@ -6,6 +6,7 @@
 #include "kernel/fileSystem.h"
 #include "Phase1RuntimeTests.inc"
 #include "OpenPsIdCompatibilityTests.inc"
+#include "ImportAuditTests.inc"
 #include "Phase6SelfRepackTests.inc"
 #include "Phase6PosixTests.inc"
 #include "Phase6AgcTests.inc"
@@ -101,6 +102,7 @@ int main(int argc, char** argv) {
         subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
         auto result = Phase1::Imports();
         if (result == 0) result = OpenPsIdCompatibility::Run();
+        if (result == 0) result = PhaseImportAudit::Run();
         Common::Singleton<Loader::RuntimeLinker>::Instance()->Clear();
         subsystems.Destroy();
         return result;
