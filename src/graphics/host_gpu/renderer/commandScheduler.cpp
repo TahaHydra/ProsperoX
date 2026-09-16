@@ -2,7 +2,9 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "graphics/gpuStats.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/renderContext.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -166,6 +168,13 @@ void CommandScheduler::EndRendering() {
 }
 
 void CommandScheduler::Flush() {
+	// A PM4 slice that suspended on an unsatisfied wait records nothing and has
+	// nobody waiting on its tick. Submitting it would cost a vkQueueSubmit and a
+	// fresh pool buffer per retry without advancing any device work.
+	if (!m_command.IsInvalid() && !HasPendingWork()) {
+		Stats::Add(Stats::Counter::ElidedSubmits);
+		return;
+	}
 	SubmitInfo submit;
 	Flush(submit);
 }
@@ -183,12 +192,25 @@ void CommandScheduler::FlushAndWait() {
 
 void CommandScheduler::Finish() {
 	CheckActive();
-	if (!m_command.IsInvalid()) {
+	Stats::Add(Stats::Counter::SchedulerFinishes);
+	Stats::ScopedTimer timer(Stats::Timer::SchedulerFinish);
+	if (!m_command.IsInvalid() && HasPendingWork()) {
 		Submit();
 	}
 	m_master.Wait(CurrentTick() - 1);
-	BeginNext();
+	if (m_command.IsInvalid()) {
+		BeginNext();
+	}
 	PopPendingOperations();
+}
+
+bool CommandScheduler::HasPendingWork() const noexcept {
+	return m_command.HasRecordedWork() || m_tick_in_use.load(std::memory_order_relaxed);
+}
+
+bool CommandScheduler::HasPendingPriorityOperations() {
+	std::lock_guard lock(m_operation_mutex);
+	return m_priority_active || !m_priority_operations.empty();
 }
 
 void CommandScheduler::Wait(uint64_t tick) {
@@ -237,6 +259,9 @@ void CommandScheduler::DeferOperation(Common::UniqueFunction<void>&& operation) 
 	std::unique_lock lock(m_operation_mutex);
 	if (m_operation_state == OperationState::Open) {
 		m_pending_operations.push({std::move(operation), CurrentTick()});
+		// The callback fires when this tick retires, so the tick has to be
+		// submitted even if the slice records no device work.
+		m_tick_in_use.store(true, std::memory_order_relaxed);
 		return;
 	}
 	if (g_deferred_callback_scheduler == this) {
@@ -256,6 +281,7 @@ void CommandScheduler::DeferPriorityOperation(Common::UniqueFunction<void>&& ope
 	std::unique_lock lock(m_operation_mutex);
 	if (m_operation_state == OperationState::Open) {
 		m_priority_operations.push({std::move(operation), CurrentTick()});
+		m_tick_in_use.store(true, std::memory_order_relaxed);
 		lock.unlock();
 		m_operation_available.notify_one();
 		return;
@@ -290,6 +316,12 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 		m_master.Wait(operation.tick);
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));
+			// Completion callbacks are what publish end-of-pipe and flip labels
+			// into guest memory. A command processor parked on WAIT_REG_MEM for
+			// one of them has to learn about it now rather than time its park
+			// out. Only this thread runs callbacks asynchronously; the ones the
+			// GPU thread pops itself need no wake-up.
+			m_context.NotifyGuestMemoryPublished();
 		}
 		{
 			std::lock_guard lock(m_operation_mutex);
@@ -346,6 +378,9 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
+	// Begin() itself touches the handle; the slice starts empty regardless.
+	m_command.m_has_recorded_work = false;
+	m_tick_in_use.store(false, std::memory_order_relaxed);
 	return m_command;
 }
 
@@ -384,6 +419,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 
 		result = graphics.queue.submit(1, &submit_info, nullptr);
 	}
+	Stats::Add(Stats::Counter::QueueSubmits);
 
 	if (result != vk::Result::eSuccess) {
 		ReportVulkanFatal("vkQueueSubmit", result, tick, m_command.m_debug_op,

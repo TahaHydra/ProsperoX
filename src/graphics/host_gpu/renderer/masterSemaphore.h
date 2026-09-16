@@ -30,6 +30,9 @@ public:
 
 	void Refresh();
 	void Wait(uint64_t tick);
+	// Bounded variant used when a wait has to stay responsive to a value the
+	// device will never produce. Returns true when the tick was reached.
+	bool WaitFor(uint64_t tick, uint64_t timeout_nanoseconds);
 
 private:
 	GraphicContext&       m_graphics;

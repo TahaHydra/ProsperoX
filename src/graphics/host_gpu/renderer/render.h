@@ -113,6 +113,10 @@ public:
 	void EndRendering() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const;
+	// True once anything has been recorded into the buffer since it was begun.
+	// Every recording path goes through Handle(), so this is the single place
+	// that can tell an empty slice from one carrying device work.
+	[[nodiscard]] bool              HasRecordedWork() const noexcept { return m_has_recorded_work; }
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
@@ -141,7 +145,8 @@ private:
 	uint32_t            m_debug_arg3      = 0;
 	uint64_t            m_debug_arg4      = 0;
 	mutable RenderState m_render_state;
-	mutable bool        m_rendering   = false;
+	mutable bool        m_rendering          = false;
+	mutable bool        m_has_recorded_work  = false;
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;

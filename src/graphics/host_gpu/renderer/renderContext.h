@@ -15,6 +15,7 @@
 #include "kernel/eventQueue.h"
 #include "graphics/guest_gpu/tessellationState.h"
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -52,6 +53,10 @@ public:
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
 	void DeleteInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
 	void TriggerInterrupt(int event_id, uint32_t context_id);
+	// Wakes a command processor parked on a memory wait after a completion
+	// callback published a guest-visible value. Safe on any thread and at any
+	// point of the GPU lifetime, including before startup and after shutdown.
+	void NotifyGuestMemoryPublished();
 
 private:
 	struct InterruptEqRegistration {
@@ -69,6 +74,10 @@ private:
 	SamplerCache              m_sampler_cache;
 	GpuResourceManager        m_gpu_resources;
 	std::unique_ptr<GuestGpu> m_gpu;
+	// Notification handle for threads outside the GPU lifetime's ownership: the
+	// deferred-completion runner can outlive a shutdown request that already
+	// released m_gpu.
+	std::atomic<GuestGpu*>    m_gpu_notify {nullptr};
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 
 	Common::Mutex                        m_interrupt_mutex;

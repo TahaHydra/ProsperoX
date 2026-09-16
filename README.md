@@ -314,6 +314,14 @@ SDL_VULKAN_LIBRARY=/path/to/libMoltenVK.dylib ./kyty_emulator --game "/games/Exa
 Run `kyty_emulator --help` to see the available graphics, logging, validation, profiling, and
 debugging options.
 
+Setting `KYTY_GPU_STATS=1` prints one line per second summarizing the guest-GPU execution
+pipeline: guest submissions, command-processor slices, slices that suspended on a wait, failed
+`WAIT_REG_MEM` predicates, device drains taken to re-read a wait label, `vkQueueSubmit` calls,
+elided submissions, `CommandScheduler::Finish` calls, and the time the GPU thread spent draining
+or parked. It is the quickest way to tell a genuine GPU bottleneck from synchronization overhead:
+in a healthy frame the blocked-slice, drain, and queue-submit counts stay within a small multiple
+of the guest submission count.
+
 ### AI Use
 
 AI tools may be used for research, reverse engineering, and development assistance. Contributors

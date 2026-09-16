@@ -6,6 +6,7 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "graphics/gpuStats.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -100,6 +101,7 @@ void GuestGpu::Shutdown() {
 		Common::LockGuard lock(m_queue_mutex);
 		m_accepting = false;
 		m_stopping  = true;
+		m_wake_generation.fetch_add(1, std::memory_order_release);
 		m_work_available.SignalAll();
 	}
 	if (m_thread.joinable()) {
@@ -123,6 +125,13 @@ void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
 	EXIT_IF(!m_accepting);
 	m_commands.push_back(std::move(command));
 	m_pending_commands.fetch_add(1, std::memory_order_release);
+	m_wake_generation.fetch_add(1, std::memory_order_release);
+	m_work_available.Signal();
+}
+
+void GuestGpu::NotifyGuestMemoryPublished() {
+	Common::LockGuard lock(m_queue_mutex);
+	m_wake_generation.fetch_add(1, std::memory_order_release);
 	m_work_available.Signal();
 }
 
@@ -343,9 +352,16 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 
 	(void)poll;
 	T observed{};
-	m_renderer.GetBufferCache().ReadCommandMemory(reinterpret_cast<uint64_t>(addr), &observed, sizeof(observed));
+	// A wait predicate is re-evaluated until it passes, so it reads in polling
+	// mode: the device drain that makes GPU-produced bytes visible is taken on
+	// device progress rather than once per retry.
+	m_renderer.GetBufferCache().ReadCommandMemory(reinterpret_cast<uint64_t>(addr), &observed,
+	                                              sizeof(observed),
+	                                              BufferCache::CommandReadMode::Poll);
 	if (!TestWaitRegMemValue(observed, ref, mask, func)) {
-		SuspendPm4();
+		Stats::Add(Stats::Counter::WaitRegMemFailures);
+		SuspendPm4(Pm4WaitCondition {true, func, sizeof(T), reinterpret_cast<uint64_t>(addr),
+		                             static_cast<uint64_t>(ref), static_cast<uint64_t>(mask)});
 	}
 }
 
@@ -449,11 +465,63 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 
 void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
+	Stats::Add(Stats::Counter::GuestSubmissions);
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
 	m_queues[submission.queue_id].push_back(std::move(submission));
 	m_submission_count++;
+	// New work can carry the label another queue is parked on, so this counts
+	// as a publication for the purposes of re-arming parked submissions.
+	m_wake_generation.fetch_add(1, std::memory_order_release);
 	m_work_available.Signal();
+}
+
+bool GuestGpu::Park(uint64_t generation, std::span<const Pm4WaitCondition> conditions) {
+	Stats::ScopedTimer timer(Stats::Timer::GpuThreadParked);
+
+	// A guest CPU thread writing a completion label leaves no trace the emulator
+	// can subscribe to, so the only way to notice one promptly is to look. Every
+	// queue is parked at this point, so a short bounded re-test costs nothing
+	// that could have been spent on real work, and a false positive only buys
+	// one cheap re-evaluation of the packet.
+	if (!conditions.empty()) {
+		for (uint32_t i = 0; i < ParkSpinIterations; i++) {
+			if (Published(generation)) {
+				return true;
+			}
+			for (const auto& condition: conditions) {
+				if (TestPm4WaitCondition(condition)) {
+					return true;
+				}
+			}
+			std::this_thread::yield();
+		}
+	}
+	if (Published(generation)) {
+		return true;
+	}
+
+	auto& scheduler = m_renderer.GetCommandScheduler();
+	auto& master    = scheduler.GetMasterSemaphore();
+
+	// Beyond that, nothing the emulator controls can satisfy the wait until
+	// either a completion callback publishes a value - which signals this queue
+	// directly - or outstanding device work retires. When no callback is queued
+	// to do the waiting for us, block on the device timeline so the retry lands
+	// at retirement instead of at an arbitrary point on a clock.
+	if (!scheduler.HasPendingPriorityOperations()) {
+		const auto submitted = scheduler.CurrentTick() - 1;
+		if (!master.IsFree(submitted)) {
+			master.WaitFor(submitted, ParkTimelineTimeoutNs);
+		}
+	}
+
+	Common::LockGuard lock(m_queue_mutex);
+	if (Published(generation)) {
+		return true;
+	}
+	m_work_available.WaitFor(&m_queue_mutex, ParkTimeoutUs);
+	return Published(generation);
 }
 
 void GuestGpu::WaitForIdle() {
@@ -471,10 +539,14 @@ void GuestGpu::ThreadRun(void* data) {
 	g_gpu_state  = gpu;
 
 	for (;;) {
+		Stats::Report();
+
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
-		bool                         has_submission = false;
-		bool                         should_stop    = false;
+		bool                         has_submission  = false;
+		bool                         should_stop     = false;
+		bool                         should_park     = false;
+		uint64_t                     wake_generation = 0;
 		{
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) {
@@ -499,32 +571,64 @@ void GuestGpu::ThreadRun(void* data) {
 				EXIT_IF(gpu->m_pending_commands.fetch_sub(1, std::memory_order_acq_rel) == 0);
 				gpu->m_processing = true;
 			} else {
+				const auto current_generation =
+				    gpu->m_wake_generation.load(std::memory_order_relaxed);
 				int selected_queue = -1;
 				for (uint32_t offset = 0; offset < QueueCount; offset++) {
-					const auto id = (gpu->m_next_queue + offset) % QueueCount;
-					if (!gpu->m_queues[id].empty() && !gpu->m_queues[id].front().blocked) {
+					const auto  id    = (gpu->m_next_queue + offset) % QueueCount;
+					const auto& queue = gpu->m_queues[id];
+					if (queue.empty()) {
+						continue;
+					}
+					// A parked submission becomes runnable again as soon as
+					// anything has been published since its wait was last
+					// evaluated; only an unchanged world lets it stay parked.
+					const auto& front = queue.front();
+					if (!front.blocked || front.wake_generation != current_generation) {
 						selected_queue = static_cast<int>(id);
 						break;
 					}
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
-					for (auto& queue: gpu->m_queues) {
-						if (!queue.empty()) {
-							queue.front().blocked = false;
+					should_park       = true;
+					wake_generation   = current_generation;
+					gpu->m_park_conditions.clear();
+					for (const auto& queue: gpu->m_queues) {
+						if (!queue.empty() && queue.front().wait.valid) {
+							gpu->m_park_conditions.push_back(queue.front().wait);
 						}
 					}
-					continue;
+				} else {
+					auto& queue = gpu->m_queues[static_cast<uint32_t>(selected_queue)];
+					submission  = std::move(queue.front());
+					queue.pop_front();
+					gpu->m_submission_count--;
+					gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
+					gpu->m_processing = true;
+					has_submission    = true;
+					// Sampled before the wait predicate is evaluated, so a
+					// publication racing the evaluation cannot be missed.
+					wake_generation = current_generation;
 				}
-				auto& queue = gpu->m_queues[static_cast<uint32_t>(selected_queue)];
-				submission  = std::move(queue.front());
-				queue.pop_front();
-				gpu->m_submission_count--;
-				gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
-				gpu->m_processing = true;
-				has_submission    = true;
 			}
+		}
+
+		if (should_park) {
+			if (gpu->Park(wake_generation, gpu->m_park_conditions)) {
+				Stats::Add(Stats::Counter::GpuThreadWakeups);
+			} else {
+				Stats::Add(Stats::Counter::GpuThreadTimeouts);
+			}
+			// Re-arm every parked front either way: the publication counter only
+			// covers what the emulator itself writes.
+			Common::LockGuard lock(gpu->m_queue_mutex);
+			for (auto& queue: gpu->m_queues) {
+				if (!queue.empty()) {
+					queue.front().blocked = false;
+				}
+			}
+			continue;
 		}
 		if (should_stop) {
 			gpu->m_gfx_cp->BufferWait();
@@ -551,7 +655,8 @@ void GuestGpu::ThreadRun(void* data) {
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
-			submission.blocked = true;
+			submission.blocked         = true;
+			submission.wake_generation = wake_generation;
 			gpu->m_queues[submission.queue_id].push_front(std::move(submission));
 			gpu->m_submission_count++;
 		} else {
@@ -569,6 +674,7 @@ void GuestGpu::ThreadRun(void* data) {
 }
 
 bool GuestGpu::Process(Submission& submission) {
+	Stats::Add(Stats::Counter::ProcessAttempts);
 	const bool first_slice = !submission.started;
 	auto& cp = GetProcessor(submission.queue_id);
 
@@ -653,6 +759,16 @@ bool GuestGpu::Process(Submission& submission) {
 			break;
 	}
 
+	if (!complete) {
+		Stats::Add(Stats::Counter::BlockedAttempts);
+		// Remember what the slice is waiting for so a parked GPU thread can
+		// watch it directly. The draw engine's wait is the interesting one; the
+		// constant engine only blocks on counters the same submission advances.
+		submission.wait = submission.command_execution.WaitCondition();
+		if (!submission.wait.valid) {
+			submission.wait = submission.constant_execution.WaitCondition();
+		}
+	}
 	return complete;
 }
 
@@ -666,6 +782,7 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 	}
 	execution.m_suspended     = false;
 	execution.m_made_progress = false;
+	execution.m_wait          = {};
 
 	struct ExecutionScope {
 		ExecutionScope(CommandProcessor& processor, Pm4Execution& execution)
@@ -702,6 +819,27 @@ void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands)
 void CommandProcessor::SuspendPm4() {
 	EXIT_IF(g_current_execution == nullptr);
 	g_current_execution->m_suspended = true;
+}
+
+void CommandProcessor::SuspendPm4(const Pm4WaitCondition& condition) {
+	EXIT_IF(g_current_execution == nullptr);
+	g_current_execution->m_suspended = true;
+	g_current_execution->m_wait      = condition;
+}
+
+bool TestPm4WaitCondition(const Pm4WaitCondition& condition) {
+	if (!condition.valid) {
+		return false;
+	}
+	uint64_t observed = 0;
+	if (!LibKernel::Memory::TryReadBacking(condition.address, &observed, condition.width)) {
+		if (condition.width == sizeof(uint32_t)) {
+			observed = *reinterpret_cast<const volatile uint32_t*>(condition.address);
+		} else {
+			observed = *reinterpret_cast<const volatile uint64_t*>(condition.address);
+		}
+	}
+	return TestWaitRegMemValue(observed, condition.ref, condition.mask, condition.func);
 }
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {

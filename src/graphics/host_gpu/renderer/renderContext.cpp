@@ -28,10 +28,14 @@ void RenderContext::InitializeGpu(VideoOut::VideoOutDriver* video_out) {
 	m_video_out = video_out;
 	m_gpu       = std::make_unique<GuestGpu>(*this);
 	m_gpu_resources.SetGpu(m_gpu.get());
+	m_gpu_notify.store(m_gpu.get(), std::memory_order_release);
 }
 
 void RenderContext::ShutdownGpu() {
 	if (m_gpu != nullptr) {
+		// Stop notifying before the queue state is torn down; shutdown drains
+		// the remaining work explicitly and needs no wake-ups.
+		m_gpu_notify.store(nullptr, std::memory_order_release);
 		m_gpu_resources.SetGpu(nullptr);
 		m_gpu->Shutdown();
 		m_gpu.reset();
@@ -49,6 +53,12 @@ void RenderContext::ShutdownGpu() {
 GuestGpu& RenderContext::GetGpu() const {
 	EXIT_IF(m_gpu == nullptr);
 	return *m_gpu;
+}
+
+void RenderContext::NotifyGuestMemoryPublished() {
+	if (auto* gpu = m_gpu_notify.load(std::memory_order_acquire); gpu != nullptr) {
+		gpu->NotifyGuestMemoryPublished();
+	}
 }
 
 VideoOut::VideoOutDriver& RenderContext::GetVideoOut() const {

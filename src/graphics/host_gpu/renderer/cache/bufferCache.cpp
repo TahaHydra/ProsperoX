@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "graphics/gpuStats.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
@@ -56,17 +57,44 @@ void BufferCache::RecordCompletionValue(uint64_t address, uint64_t value, uint32
 	WriteDataBuffer(*buffer, address, &value, width);
 }
 
-void BufferCache::ReadCommandMemory(uint64_t address, void* output, uint64_t size) {
+void BufferCache::ReadCommandMemory(uint64_t address, void* output, uint64_t size,
+                                    CommandReadMode mode) {
 	EXIT_IF(output == nullptr || size == 0 || size > UINT64_MAX - address);
 	if (IsRegionRegistered(address, size) && HasGpuDirtyBytes(address, size)) {
-		ReadMemory(address, size);
+		if (mode == CommandReadMode::Exact || ShouldDrainForPoll()) {
+			ReadMemory(address, size);
+			auto& master = m_scheduler.GetMasterSemaphore();
+			master.Refresh();
+			m_command_poll_tick    = master.KnownGpuTick();
+			m_command_poll_drained = true;
+		}
 	}
 	if (!LibKernel::Memory::TryReadBacking(address, output, size)) {
 		std::memcpy(output, reinterpret_cast<const void*>(address), size);
 	}
 }
 
+bool BufferCache::ShouldDrainForPoll() {
+	// A polled wait re-reads the same label until it changes. Draining the
+	// device makes every GPU-produced byte up to the current timeline position
+	// visible, so a second drain can only reveal something new once the device
+	// has retired further work. Re-draining before then costs a full
+	// CPU/GPU serialization and observes exactly the state it just forced.
+	auto& master = m_scheduler.GetMasterSemaphore();
+	master.Refresh();
+	if (m_command_poll_drained && master.KnownGpuTick() == m_command_poll_tick) {
+		return false;
+	}
+	Stats::Add(Stats::Counter::WaitDrains);
+	return true;
+}
+
 void BufferCache::RecordReleaseWriteback() {
+	// Release packets are frequent; walking every registered buffer for a set
+	// that is usually empty is not.
+	if (m_gpu_modified_ranges.Empty()) {
+		return;
+	}
 	// Keep dirty ownership until an ordinary GPU-thread readback/invalidation.
 	// Clearing it here would let a CPU read overtake this pending submission.
 	// Dedicated staging allocations cannot wrap or be overwritten by later work.

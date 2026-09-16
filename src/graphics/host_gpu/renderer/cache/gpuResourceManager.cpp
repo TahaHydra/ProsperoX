@@ -109,6 +109,12 @@ void GpuResourceManager::RunGarbageCollector() {
 	m_texture_cache.ProcessDownloadImages();
 	m_texture_cache.RunGarbageCollector();
 	m_buffer_cache.RunGarbageCollector();
+	// Retire completion callbacks at every submission boundary. They used to be
+	// drained only from CommandScheduler::Finish, which a healthy frame no
+	// longer reaches, and deferred resource releases would otherwise pile up.
+	if (m_scheduler.Active()) {
+		m_scheduler.PopPendingOperations();
+	}
 }
 
 } // namespace Libs::Graphics

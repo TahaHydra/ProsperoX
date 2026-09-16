@@ -25,6 +25,9 @@ bool CommandBuffer::IsInvalid() const {
 
 vk::CommandBuffer CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
+	// Handing out the raw handle is the only way to record into the buffer, so
+	// it is also the only place that has to mark the slice as carrying work.
+	m_has_recorded_work = true;
 	return m_buffer;
 }
 
