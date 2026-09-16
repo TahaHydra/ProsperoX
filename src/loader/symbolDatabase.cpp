@@ -116,6 +116,16 @@ if (const auto* rec =
 return rec;
 }
 
+// OpenPsId is provided by the libkernel module but can be imported through
+// the OpenPsId library identity. Keep this compatibility exact to the verified
+// NID and module/library versions rather than widening libkernel resolution.
+if (const auto* rec =
+        try_alias("[OpenPsId_v1][libkernel_v1.1]",
+                  "[libkernel_v1][libkernel_v1.1]", "DLORcroUqbc");
+    rec != nullptr) {
+return rec;
+}
+
 // SslInit observed through Ssl module version 2.1. Do not generalize
 // this version compatibility until additional ABI-compatible exports
 // are verified.
