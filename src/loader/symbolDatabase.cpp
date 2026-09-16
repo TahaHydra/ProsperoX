@@ -133,6 +133,44 @@ const SymbolRecord* SymbolDatabase::FindExactOrCompatible(const std::string& qua
 		return rec;
 	}
 
+	// Additional identities discovered by the static import auditor are kept
+	// exact to the observed NID and full source/target qualification. These are
+	// deliberately not broad library aliases: an unrelated symbol must still fail.
+	struct ExactAlias {
+		const char* nid;
+		const char* from;
+		const char* to;
+	};
+	static constexpr ExactAlias audited_aliases[] = {
+	    {"AhGvpITrf4M", "[AgcDriver_v1][AgcDriver_v1.1]",
+	     "[Graphics5Driver_v1][Graphics5Driver_v1.1]"},
+	    {"D-CzAxQL0XI", "[UserServicePlatformPrivacyWs1_v1][UserService_v1.1]",
+	     "[UserService_v1][UserService_v1.1]"},
+	    {"NhpspxdjEKU", "[libkernel_v1][libkernel_v1.1]",
+	     "[Posix_v1][libkernel_v1.1]"},
+	    {"TDfQqO-gMbY", "[Ssl_v1][Ssl_v2.1]",
+	     "[Ssl_v1][Ssl_v1.1]"},
+	    {"U8IfNl6-Css", "[VoiceQoS_v1][VoiceQoS_v1.1]",
+	     "[VoiceQoS_v1][VoiceQoS_v0.0]"},
+	    {"W5z4eZrjEas", "[AgcDriver_v1][AgcDriver_v1.1]",
+	     "[Graphics5_v1][Graphics5_v1.1]"},
+	    {"X-Nm5KLREeg", "[AgcDriver_v1][AgcDriver_v1.1]",
+	     "[Graphics5_v1][Graphics5_v1.1]"},
+	    {"al3JzFI9MQ0", "[LibcInternalExt_v1][LibcInternal_v1.1]",
+	     "[LibcInternal_v1][LibcInternal_v1.1]"},
+	    {"cfwBSQyr5Ys", "[libkernel_v1][libkernel_v1.1]",
+	     "[Posix_v1][libkernel_v1.1]"},
+	    {"gSRnr79F8tQ", "[AgcDriver_v1][AgcDriver_v1.1]",
+	     "[Graphics5Driver_v1][Graphics5Driver_v1.1]"},
+	    {"yS8U2TGCe1A", "[libkernel_v1][libkernel_v1.1]",
+	     "[Posix_v1][libkernel_v1.1]"},
+	};
+	for (const auto& alias: audited_aliases) {
+		if (const auto* rec = try_alias(alias.from, alias.to, alias.nid); rec != nullptr) {
+			return rec;
+		}
+	}
+
 	return nullptr;
 }
 
