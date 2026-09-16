@@ -387,7 +387,12 @@ void CommandProcessor::PrunePendingCompletions() {
 bool CommandProcessor::WaitSatisfiedInStream(uint64_t address, uint32_t width, uint64_t ref,
                                              uint64_t mask, uint32_t func) {
 	uint64_t pending = 0;
-	if (!m_pending_completions.Find(address, width, pending) ||
+	// The cached device position is enough: it only lags while a completion is
+	// retiring, and answering from a completion that is retiring right now is
+	// answering from one the device has reached, which is what the guest asked
+	// for. Anything older has been refreshed by an intervening submission.
+	const auto retired = GetScheduler().GetMasterSemaphore().KnownGpuTick();
+	if (!m_pending_completions.Find(address, width, retired, pending) ||
 	    !TestWaitRegMemValue(pending, ref, mask, func)) {
 		return false;
 	}
