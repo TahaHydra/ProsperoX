@@ -46,6 +46,36 @@ enum class Counter : uint32_t {
 	ReleaseWritebacks,      // RecordReleaseWriteback calls that found dirty bytes
 	ReleaseWritebackCopies, // staging copies those calls queued
 	GarbageCollections,
+
+	// Invalidations that still found GPU-authored bytes and had to flush them
+	// back. Every other write fault is a protection change that costs nothing,
+	// so a high write-fault rate only matters if this number is large with it.
+	CpuWriteFaultFlushes,
+
+	// Guest draw and dispatch work, so per-frame CPU cost can be divided by the
+	// work that caused it rather than by the frame.
+	DrawCalls,
+	DispatchCalls,
+
+	// Shader program lookup outcomes, per stage per draw.
+	ShaderLookups,           // GetGraphicsPrograms/GetComputeProgram stage lookups
+	ShaderSourceHits,        // the program key was already known
+	ShaderPermutationMisses, // ... but no permutation matched the specialization
+	ShaderTranslations,      // RDNA2 -> IR translations performed
+	ShaderModulesCreated,    // vkCreateShaderModule calls
+	ResourceMaterializations, // MaterializeResources calls (every lookup, hit or miss)
+
+	// Host pipeline objects.
+	GraphicsPipelineLookups,
+	GraphicsPipelineCreations,
+	ComputePipelineCreations,
+
+	// WAIT_REG_MEM predicates that a completion this same queue has already
+	// recorded would satisfy. Resolvable is counted whether or not in-stream
+	// resolution is enabled, so one run measures the opportunity and the next
+	// measures the result.
+	WaitResolvableInStream,
+	WaitResolvedInStream,
 	Count,
 };
 
@@ -56,6 +86,10 @@ enum class Timer : uint32_t {
 	// is outside the GPU thread's control, so it separates an emulator
 	// synchronization problem from a presentation or display-path one.
 	FlipWait,
+	// Time the GPU thread spent actually running PM4. Against GpuThreadParked
+	// this is the one measurement that separates "the emulator is CPU-bound in
+	// the draw path" from "the emulator is waiting for the device".
+	GpuThreadRecording,
 	Count,
 };
 

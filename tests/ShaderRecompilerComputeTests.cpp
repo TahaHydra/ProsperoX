@@ -2575,6 +2575,42 @@ public:
                   static_cast<uint32_t>(gds_label) == 0,
               "RELEASE_MEM lost its required split/readback, published a label "
               "before its recording retired, or retained a redundant GPU wait");
+
+      // Answering a label wait from submission order is opt-in. With it off the
+      // command processor must still suspend until the completion it recorded
+      // actually retires and publishes, which is the ordering RELEASE_MEM had
+      // before pending completions were tracked at all.
+      alignas(uint64_t) uint64_t ordered_label = 0;
+      bool label_wait_suspended = false;
+      gpu.SendCommandSync([&] {
+        processor->BufferInit();
+        auto release = make_release_mem(1, 0, &ordered_label, 0x5a5a5a5au);
+        Pm4Execution release_execution;
+        const auto released = processor->Process(release_execution, release);
+
+        const auto label_address = reinterpret_cast<uint64_t>(&ordered_label);
+        std::array<uint32_t, 7> wait{};
+        wait[0] = KYTY_PM4(7, Pm4::IT_WAIT_REG_MEM, 0);
+        wait[1] = 0x10u | 3u; // memory space, compare equal
+        wait[2] = static_cast<uint32_t>(label_address);
+        wait[3] = static_cast<uint32_t>(label_address >> 32u);
+        wait[4] = 0x5a5a5a5au;
+        wait[5] = UINT32_MAX;
+        Pm4Execution wait_execution;
+        const auto waited = processor->Process(wait_execution, wait);
+        label_wait_suspended = released == Pm4ProcessResult::Complete &&
+                               waited == Pm4ProcessResult::Blocked &&
+                               ordered_label == 0;
+      });
+      gpu.SendCommandSync([&] {
+        gpu_scheduler.Finish();
+        gpu_scheduler.WaitPriorityOperations(gpu_scheduler.CurrentTick() - 1);
+      });
+      Require("GpuCommandLane", "label wait ordering",
+              label_wait_suspended &&
+                  static_cast<uint32_t>(ordered_label) == 0x5a5a5a5au,
+              "a label wait resolved before its completion retired, or the "
+              "completion never reached guest memory");
     }
 
     alignas(uint32_t) uint32_t packet_marker_a = 0;

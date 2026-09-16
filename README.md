@@ -326,8 +326,21 @@ grouped by the mechanism each number belongs to:
   (`prompt`) or the batch limit (`limit`).
 * `readback` - CPU read and write faults on GPU-owned guest memory, the device drains those
   faults forced, and the bytes downloaded.
-* `upkeep` - release-boundary writebacks and the staging copies they queued, garbage-collection
-  runs, and the time the GPU thread spent parked on a wait.
+* `work` / `shaders` / `pipeline` - guest draws and dispatches, and the per-stage shader lookups
+  they caused: how many found a known program source, how many still needed a new permutation, how
+  many needed a fresh RDNA2 translation or shader module, how many resolved their resources
+  (`material`, which runs on every lookup including hits), and how many host pipelines were looked
+  up or created.
+* `upkeep` - release-boundary writebacks and the staging copies they queued, and garbage-collection
+  runs.
+* `time` - how the GPU thread spent its second: `recording_ms` inside PM4 execution, `parked_ms`
+  waiting on an unsatisfied guest wait, `flipwait_ms` blocked on presentation. These three are the
+  fastest way to tell a CPU-bound draw path from a stalled one.
+* `waits` - `instream_possible` counts failing `WAIT_REG_MEM` predicates that a completion the same
+  queue has already recorded would satisfy, whether or not in-stream resolution is enabled. Compare
+  it against `waitfail`: if the two are close, essentially every guest wait is for this queue's own
+  end-of-pipe label and is being answered by a round trip to the CPU that submission order already
+  guarantees.
 
 It is the quickest way to tell a genuine GPU bottleneck from synchronization overhead: in a
 healthy frame the blocked-slice, drain, fault, and queue-submit counts stay within a small
@@ -338,6 +351,15 @@ multiple of the guest submission count.
 batched, and a partially filled batch is always submitted before the command processor yields, so
 this only trades submission granularity, never completion latency across a guest wait. Set it to
 1 to restore one submission per completion.
+
+`KYTY_GPU_INSTREAM_WAITS` (off by default) lets a `WAIT_REG_MEM` be answered from submission order
+when the completion that produces the awaited value was recorded by the same queue and has not
+retired. The wait then costs nothing instead of a full submit/execute/retire/publish round trip
+through the CPU, which is what otherwise prevents the command processor and the device from running
+at the same time. It never applies to a value another queue or a guest thread produces, and the
+cache barrier RELEASE_MEM asked for is still emitted where the guest put it. Check
+`waits instream_possible` before enabling it: that number is how much of the current wait traffic it
+can remove.
 
 ### AI Use
 

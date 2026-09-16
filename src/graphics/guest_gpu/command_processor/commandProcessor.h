@@ -2,6 +2,7 @@
 #define GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_COMMAND_PROCESSOR_H
 
 #include "common/assert.h"
+#include "graphics/guest_gpu/command_processor/pendingCompletions.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -141,6 +142,8 @@ public:
 
 	template <typename T>
 	void WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t poll, uint32_t wait_op);
+	// True when in-stream resolution of GPU-internal label waits is enabled.
+	[[nodiscard]] static bool InStreamWaitsEnabled() noexcept;
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control);
 	void WriteReferenceClock(uint64_t dst_address, uint32_t num_bytes);
 	void DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cache_policy,
@@ -169,6 +172,12 @@ private:
 	void ProcessPm4(Pm4Execution& execution, size_t stop_depth);
 	void SuspendPm4();
 	void SuspendPm4(const Pm4WaitCondition& condition);
+
+	void RecordPendingCompletion(const void* address, uint32_t width, uint64_t value);
+	void DropPendingCompletions(uint64_t address, uint64_t size);
+	void PrunePendingCompletions();
+	[[nodiscard]] bool WaitSatisfiedInStream(uint64_t address, uint32_t width, uint64_t ref,
+	                                         uint64_t mask, uint32_t func);
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
 	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
 	void                CheckBuffer() const { GetScheduler().CheckActive(); }
@@ -197,6 +206,7 @@ private:
 
 	FlipInfo  m_flip;
 	const int m_interrupt_event_id;
+	PendingCompletions m_pending_completions;
 	uint64_t  m_submit_id                   = 0;
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;

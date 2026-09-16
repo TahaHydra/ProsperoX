@@ -5,6 +5,7 @@
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "graphics/gpuStats.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -254,6 +255,7 @@ struct PipelineCache::ProgramCache {
 		create_info.codeSize    = result.spirv.size() * sizeof(uint32_t);
 		create_info.pCode       = result.spirv.data();
 		vk::ShaderModule module = nullptr;
+		Stats::Add(Stats::Counter::ShaderModulesCreated);
 		RequireVulkanSuccess(device.createShaderModule(&create_info, nullptr, &module),
 		                     "create recompiled shader module");
 		EXIT_IF(module == nullptr);
@@ -289,6 +291,7 @@ struct PipelineCache::ProgramCache {
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = static_cast<uint32_t>(params.user_data.size());
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
+		Stats::Add(Stats::Counter::ShaderLookups);
 		BuildStageStaticKey(input_info, lookup_key.static_state);
 		auto                                         entry = programs.find(lookup_key);
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
@@ -300,6 +303,8 @@ struct PipelineCache::ProgramCache {
 		          .max_images                 = max_images,
 		};
 		if (entry != programs.end()) {
+			Stats::Add(Stats::Counter::ShaderSourceHits);
+			Stats::Add(Stats::Counter::ResourceMaterializations);
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    entry->second.resource_plan, runtime, resources, specialization));
 			if (const auto permutation = std::ranges::find_if(
@@ -317,6 +322,9 @@ struct PipelineCache::ProgramCache {
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				return permutation->handle;
 			}
+			// The source is known but no compiled permutation matches the
+			// specialization this draw resolved to: a new variant is compiled.
+			Stats::Add(Stats::Counter::ShaderPermutationMisses);
 		}
 
 		ShaderStageInputInfo stage_input {};
@@ -355,9 +363,11 @@ struct PipelineCache::ProgramCache {
 		} else {
 			options.wave_size = input_info.wave_size;
 		}
+		Stats::Add(Stats::Counter::ShaderTranslations);
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		if (entry == programs.end()) {
 			auto resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+			Stats::Add(Stats::Counter::ResourceMaterializations);
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
 			                                                    specialization));
 			entry = programs.try_emplace(lookup_key, std::move(resource_plan)).first;
@@ -779,9 +789,11 @@ PipelineCache::Pipeline& PipelineCache::CreateGraphicsPipeline(
 		EXIT_IF(attributes_num != static_cast<uint32_t>(vs_input_info.resources_num));
 	}
 
+	Stats::Add(Stats::Counter::GraphicsPipelineLookups);
 	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
 		return *iter->second;
 	}
+	Stats::Add(Stats::Counter::GraphicsPipelineCreations);
 
 	if (graphics_debug_dump_enabled()) {
 		ShaderDbgDumpInputInfo(vs_input_info);
@@ -822,6 +834,7 @@ PipelineCache::CreateComputePipeline(const ShaderComputeInputInfo& input_info,
 	    iter != m_compute_pipelines.end()) {
 		return *iter->second;
 	}
+	Stats::Add(Stats::Counter::ComputePipelineCreations);
 
 	if (graphics_debug_dump_enabled()) {
 		ShaderDbgDumpInputInfo(input_info);

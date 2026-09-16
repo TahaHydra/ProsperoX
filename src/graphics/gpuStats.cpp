@@ -82,31 +82,48 @@ void Report() noexcept {
 	};
 	const auto time = [&timers](Timer timer) { return timers[static_cast<uint32_t>(timer)]; };
 
-	char line[1024];
+	char line[1536];
 	std::snprintf(
 	    line, sizeof(line),
 	    "gpu stats (per second):\n"
 	    "  pm4      submit=%.1f process=%.1f blocked=%.1f waitfail=%.1f drains=%.1f\n"
+	    "  waits    instream_possible=%.1f instream_resolved=%.1f\n"
 	    "  submit   vksubmit=%.1f elided=%.1f finish=%.1f finish_ms=%.1f\n"
 	    "  eop      publish=%.1f batched=%.1f prompt=%.1f limit=%.1f\n"
-	    "  readback readfault=%.1f writefault=%.1f drains=%.1f MiB=%.2f\n"
-	    "  upkeep   writeback=%.1f copies=%.1f gc=%.1f parked_ms=%.1f wake=%.1f timeout=%.1f\n"
-	    "  present  flipwait_ms=%.1f\n",
+	    "  readback readfault=%.1f writefault=%.1f flushed=%.1f drains=%.1f MiB=%.2f\n"
+	    "  work     draws=%.1f dispatches=%.1f\n"
+	    "  shaders  lookups=%.1f srchit=%.1f permmiss=%.1f translate=%.1f module=%.1f "
+	    "material=%.1f\n"
+	    "  pipeline lookups=%.1f gfxnew=%.1f csnew=%.1f\n"
+	    "  upkeep   writeback=%.1f copies=%.1f gc=%.1f\n"
+	    "  time     recording_ms=%.1f parked_ms=%.1f flipwait_ms=%.1f wake=%.1f timeout=%.1f\n",
 	    per_second(count(Counter::GuestSubmissions)), per_second(count(Counter::ProcessAttempts)),
 	    per_second(count(Counter::BlockedAttempts)), per_second(count(Counter::WaitRegMemFailures)),
-	    per_second(count(Counter::WaitDrains)), per_second(count(Counter::QueueSubmits)),
+	    per_second(count(Counter::WaitDrains)),
+	    per_second(count(Counter::WaitResolvableInStream)),
+	    per_second(count(Counter::WaitResolvedInStream)), per_second(count(Counter::QueueSubmits)),
 	    per_second(count(Counter::ElidedSubmits)), per_second(count(Counter::SchedulerFinishes)),
 	    millis(time(Timer::SchedulerFinish)), per_second(count(Counter::EndOfPipePublications)),
 	    per_second(count(Counter::EndOfPipeBatched)),
 	    per_second(count(Counter::EndOfPipePromptSubmits)),
 	    per_second(count(Counter::EndOfPipeLimitSubmits)), per_second(count(Counter::CpuReadFaults)),
-	    per_second(count(Counter::CpuWriteFaults)), per_second(count(Counter::ReadbackDrains)),
+	    per_second(count(Counter::CpuWriteFaults)), per_second(count(Counter::CpuWriteFaultFlushes)),
+	    per_second(count(Counter::ReadbackDrains)),
 	    per_second(count(Counter::ReadbackBytes)) / (1024.0 * 1024.0),
+	    per_second(count(Counter::DrawCalls)), per_second(count(Counter::DispatchCalls)),
+	    per_second(count(Counter::ShaderLookups)), per_second(count(Counter::ShaderSourceHits)),
+	    per_second(count(Counter::ShaderPermutationMisses)),
+	    per_second(count(Counter::ShaderTranslations)),
+	    per_second(count(Counter::ShaderModulesCreated)),
+	    per_second(count(Counter::ResourceMaterializations)),
+	    per_second(count(Counter::GraphicsPipelineLookups)),
+	    per_second(count(Counter::GraphicsPipelineCreations)),
+	    per_second(count(Counter::ComputePipelineCreations)),
 	    per_second(count(Counter::ReleaseWritebacks)),
 	    per_second(count(Counter::ReleaseWritebackCopies)),
-	    per_second(count(Counter::GarbageCollections)), millis(time(Timer::GpuThreadParked)),
-	    per_second(count(Counter::GpuThreadWakeups)), per_second(count(Counter::GpuThreadTimeouts)),
-	    millis(time(Timer::FlipWait)));
+	    per_second(count(Counter::GarbageCollections)), millis(time(Timer::GpuThreadRecording)),
+	    millis(time(Timer::GpuThreadParked)), millis(time(Timer::FlipWait)),
+	    per_second(count(Counter::GpuThreadWakeups)), per_second(count(Counter::GpuThreadTimeouts)));
 
 	LOGF("%s", line);
 	std::fputs(line, stdout);

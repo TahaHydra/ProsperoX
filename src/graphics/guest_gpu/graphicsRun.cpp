@@ -25,6 +25,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -271,6 +272,7 @@ void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operatio
 
 void CommandProcessor::BufferInit() {
 	GetScheduler().Begin(m_ctx, m_ucfg, m_sh_ctx);
+	PrunePendingCompletions();
 }
 
 void CommandProcessor::BufferFlush() {
@@ -346,6 +348,57 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 	return false;
 }
 
+bool CommandProcessor::InStreamWaitsEnabled() noexcept {
+	static const bool enabled = std::getenv("KYTY_GPU_INSTREAM_WAITS") != nullptr;
+	return enabled;
+}
+
+void CommandProcessor::RecordPendingCompletion(const void* address, uint32_t width,
+                                               uint64_t value) {
+	if (address == nullptr) {
+		return;
+	}
+	m_pending_completions.Record(reinterpret_cast<uint64_t>(address), width, value,
+	                             GetScheduler().CurrentTick());
+}
+
+void CommandProcessor::DropPendingCompletions(uint64_t address, uint64_t size) {
+	// The command stream is writing these bytes itself, so what the guest will
+	// observe there is no longer described by the queued completion.
+	m_pending_completions.Drop(address, size);
+}
+
+void CommandProcessor::PrunePendingCompletions() {
+	if (m_pending_completions.Empty()) {
+		return;
+	}
+	auto& master = GetScheduler().GetMasterSemaphore();
+	master.Refresh();
+	m_pending_completions.Prune(master.KnownGpuTick());
+}
+
+bool CommandProcessor::WaitSatisfiedInStream(uint64_t address, uint32_t width, uint64_t ref,
+                                             uint64_t mask, uint32_t func) {
+	uint64_t pending = 0;
+	if (!m_pending_completions.Find(address, width, pending) ||
+	    !TestWaitRegMemValue(pending, ref, mask, func)) {
+		return false;
+	}
+	// This queue recorded the completion that produces the awaited value, and it
+	// has not retired, so it is still ahead of this point in the same host
+	// submission order. Everything recorded from here therefore executes after
+	// it, which is exactly what the guest asked the command processor to wait
+	// for; RELEASE_MEM already emitted the cache barrier its GCR bits requested
+	// at the right place. Waiting for the CPU to observe the label as well would
+	// add a full device round trip that the command stream does not need.
+	Stats::Add(Stats::Counter::WaitResolvableInStream);
+	if (!InStreamWaitsEnabled()) {
+		return false;
+	}
+	Stats::Add(Stats::Counter::WaitResolvedInStream);
+	return true;
+}
+
 template <typename T>
 void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t poll,
                                   uint32_t wait_op) {
@@ -364,6 +417,10 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	                                              BufferCache::CommandReadMode::Poll);
 	if (!TestWaitRegMemValue(observed, ref, mask, func)) {
 		Stats::Add(Stats::Counter::WaitRegMemFailures);
+		if (WaitSatisfiedInStream(reinterpret_cast<uint64_t>(addr), sizeof(T),
+		                          static_cast<uint64_t>(ref), static_cast<uint64_t>(mask), func)) {
+			return;
+		}
 		SuspendPm4(Pm4WaitCondition {true, func, sizeof(T), reinterpret_cast<uint64_t>(addr),
 		                             static_cast<uint64_t>(ref), static_cast<uint64_t>(mask)});
 	}
@@ -395,8 +452,11 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		for (uint32_t i = 0; i < dw_num; i++) {
 			dst[0] = src[i];
 		}
+		DropPendingCompletions(reinterpret_cast<uint64_t>(dst), sizeof(uint32_t));
 	} else {
 		memcpy(dst, src, static_cast<size_t>(dw_num) * sizeof(uint32_t));
+		DropPendingCompletions(reinterpret_cast<uint64_t>(dst),
+		                       static_cast<uint64_t>(dw_num) * sizeof(uint32_t));
 	}
 }
 
@@ -408,6 +468,7 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 	}
 	const auto value = Sync::ReadReferenceClock();
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
+	DropPendingCompletions(dst_address, num_bytes);
 	LOGF("\t copy_data reference clock: dst=0x%016" PRIx64 " value=0x%016" PRIx64 " size=%u\n",
 	     dst_address, value, num_bytes);
 }
@@ -450,6 +511,9 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 		EXIT("unsupported dmaData destination selector 0x%02" PRIx8 "\n", dst_sel);
 	}
 	auto& buffer_cache = GetGpuResources().GetBufferCache();
+	if (!dst_gds) {
+		DropPendingCompletions(dst_address_or_offset, num_bytes);
+	}
 	if (src_sel == 2) {
 		buffer_cache.FillBuffer(
 		    dst_address_or_offset, num_bytes,
@@ -679,6 +743,9 @@ void GuestGpu::ThreadRun(void* data) {
 
 bool GuestGpu::Process(Submission& submission) {
 	Stats::Add(Stats::Counter::ProcessAttempts);
+	// Against GpuThreadParked this says whether the thread is running PM4 or
+	// waiting for the device.
+	Stats::ScopedTimer recording_timer(Stats::Timer::GpuThreadRecording);
 	const bool first_slice = !submission.started;
 	auto& cp = GetProcessor(submission.queue_id);
 
@@ -1383,6 +1450,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 	auto write32 = [&](bool with_writeback) {
 		auto* dst  = static_cast<uint32_t*>(dst_gpu_addr);
 		auto  data = static_cast<uint32_t>(value);
+		RecordPendingCompletion(dst, sizeof(uint32_t), data);
 
 		if (with_interrupt) {
 			if (with_writeback) {
@@ -1432,6 +1500,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			} else {
 				auto write64 = [&](bool with_writeback) {
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
+					RecordPendingCompletion(dst, sizeof(uint64_t), value);
 
 					if (with_interrupt) {
 						if (with_writeback) {

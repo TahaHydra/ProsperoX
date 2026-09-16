@@ -347,8 +347,13 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
-	m_memory_tracker.InvalidateRegion(vaddr, size,
-	                                  [this, vaddr, size] { ReadMemory(vaddr, size, true); });
+	// The tracker only invokes this when the range still holds GPU-authored
+	// bytes. Every other invalidation is a protection change and costs nothing,
+	// so counting here separates an expensive write fault from a cheap one.
+	m_memory_tracker.InvalidateRegion(vaddr, size, [this, vaddr, size] {
+		Stats::Add(Stats::Counter::CpuWriteFaultFlushes);
+		ReadMemory(vaddr, size, true);
+	});
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
