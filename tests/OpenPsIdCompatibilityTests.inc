@@ -52,7 +52,46 @@ int Run() {
     Phase1::Check(coredump_found.vaddr != 0,
                   "Coredump-qualified libkernel import resolves");
 
-    std::puts("PHASE1_PASS qualified libkernel compatibility routes resolve canonical implementations");
+    struct AliasCase {
+        const char* requested;
+        const char* canonical;
+    };
+    static constexpr AliasCase audited_aliases[] = {
+        {"AhGvpITrf4M[AgcDriver_v1][AgcDriver_v1.1][Func]",
+         "AhGvpITrf4M[Graphics5Driver_v1][Graphics5Driver_v1.1][Func]"},
+        {"D-CzAxQL0XI[UserServicePlatformPrivacyWs1_v1][UserService_v1.1][Func]",
+         "D-CzAxQL0XI[UserService_v1][UserService_v1.1][Func]"},
+        {"NhpspxdjEKU[libkernel_v1][libkernel_v1.1][Func]",
+         "NhpspxdjEKU[Posix_v1][libkernel_v1.1][Func]"},
+        {"TDfQqO-gMbY[Ssl_v1][Ssl_v2.1][Func]",
+         "TDfQqO-gMbY[Ssl_v1][Ssl_v1.1][Func]"},
+        {"U8IfNl6-Css[VoiceQoS_v1][VoiceQoS_v1.1][Func]",
+         "U8IfNl6-Css[VoiceQoS_v1][VoiceQoS_v0.0][Func]"},
+        {"W5z4eZrjEas[AgcDriver_v1][AgcDriver_v1.1][Func]",
+         "W5z4eZrjEas[Graphics5_v1][Graphics5_v1.1][Func]"},
+        {"X-Nm5KLREeg[AgcDriver_v1][AgcDriver_v1.1][Func]",
+         "X-Nm5KLREeg[Graphics5_v1][Graphics5_v1.1][Func]"},
+        {"al3JzFI9MQ0[LibcInternalExt_v1][LibcInternal_v1.1][Func]",
+         "al3JzFI9MQ0[LibcInternal_v1][LibcInternal_v1.1][Func]"},
+        {"cfwBSQyr5Ys[libkernel_v1][libkernel_v1.1][Func]",
+         "cfwBSQyr5Ys[Posix_v1][libkernel_v1.1][Func]"},
+        {"gSRnr79F8tQ[AgcDriver_v1][AgcDriver_v1.1][Func]",
+         "gSRnr79F8tQ[Graphics5Driver_v1][Graphics5Driver_v1.1][Func]"},
+        {"yS8U2TGCe1A[libkernel_v1][libkernel_v1.1][Func]",
+         "yS8U2TGCe1A[Posix_v1][libkernel_v1.1][Func]"},
+    };
+    for (const auto& alias: audited_aliases) {
+        const auto* resolved = linker->Symbols()->FindExactOrCompatible(alias.requested);
+        Phase1::Check(resolved != nullptr && resolved->vaddr != 0 && resolved->name == alias.canonical,
+                      "audited compatibility alias resolves only to its canonical export");
+    }
+
+    Phase1::Check(
+        linker->Symbols()->FindExactOrCompatible(
+            "PhaseUnrelatedNid[AgcDriver_v1][AgcDriver_v1.1][Func]") == nullptr,
+        "audited compatibility aliases do not widen whole-library resolution");
+
+    std::puts("PHASE1_PASS qualified compatibility routes resolve canonical implementations");
     return 0;
 }
 
