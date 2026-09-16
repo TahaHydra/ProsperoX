@@ -41,7 +41,18 @@ int Run() {
     Phase1::Check(linker->Symbols()->FindExactOrCompatible(SymbolDatabase::GenerateName(wrong)) == nullptr,
                   "OpenPsId compatibility is library-version-bounded");
 
-    std::puts("PHASE1_PASS OpenPsId-qualified libkernel export resolves to canonical implementation");
+    Program coredump_program;
+    coredump_program.rt = linker;
+    coredump_program.dynamic_info = std::make_unique<DynamicInfo>();
+    coredump_program.dynamic_info->import_libs.push_back({"C", 1, "Coredump"});
+    coredump_program.dynamic_info->import_modules.push_back({"K", 1, 1, "libkernel"});
+
+    SymbolRecord coredump_found{};
+    linker->Resolve("8zLSfEfW5AU#C#K", SymbolType::Func, &coredump_program, &coredump_found, nullptr);
+    Phase1::Check(coredump_found.vaddr != 0,
+                  "Coredump-qualified libkernel import resolves");
+
+    std::puts("PHASE1_PASS qualified libkernel compatibility routes resolve canonical implementations");
     return 0;
 }
 
