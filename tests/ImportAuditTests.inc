@@ -1,7 +1,9 @@
 // Original synthetic conformance inputs; no SDK, firmware, or commercial artifacts.
 #include "loader/importAudit.h"
+#include "loader/elf.h"
 #include "libs/libs.h"
 
+#include <array>
 #include <chrono>
 #include <fstream>
 
@@ -86,6 +88,50 @@ int Run() {
     Phase1::Check(key == "AuditMissingNid|Func|AuditLib@1|AuditMod@1.1",
                   "audit import key is deterministic and qualification-complete");
 
+    // Exercise bounded relocation extraction directly from synthetic DynamicInfo.
+    Program synthetic;
+    synthetic.rt = rt;
+    synthetic.file_name = std::filesystem::path("synthetic") / "eboot.bin";
+    synthetic.dynamic_info = std::make_unique<DynamicInfo>();
+    std::array<char, 32> names{};
+    const char encoded[] = "AuditStaticNid#L#M";
+    std::memcpy(names.data() + 1, encoded, sizeof(encoded));
+    Elf64_Sym symbol{};
+    symbol.st_name = 1;
+    symbol.st_info = static_cast<unsigned char>((STB_GLOBAL << 4) | STT_FUNC);
+    symbol.st_shndx = 0;
+    std::array<Elf64_Rela, 2> relas{};
+    for (size_t i = 0; i < relas.size(); ++i) {
+        relas[i].r_offset = 0x1000 + i * 8;
+        relas[i].r_info = static_cast<uint64_t>(R_X86_64_JUMP_SLOT);
+    }
+    auto& dyn = *synthetic.dynamic_info;
+    dyn.str_table = names.data();
+    dyn.str_table_size = names.size();
+    dyn.symbol_table = &symbol;
+    dyn.symbol_table_total_size = sizeof(symbol);
+    dyn.symbol_table_entry_size = sizeof(symbol);
+    dyn.jmprela_table = relas.data();
+    dyn.jmprela_table_size = sizeof(relas);
+    dyn.rela_table_entry_size = sizeof(Elf64_Rela);
+    dyn.import_libs.push_back({"L", 1, "AuditLib"});
+    dyn.import_modules.push_back({"M", 1, 1, "AuditMod"});
+
+    const auto extracted = AuditProgram(*rt, synthetic, "synthetic");
+    Phase1::Check(extracted.parsed && extracted.imports.size() == 1,
+                  "audit extracts and deduplicates synthetic imported relocations");
+    Phase1::Check(extracted.imports[0].qualified_name ==
+                      "AuditStaticNid[AuditLib_v1][AuditMod_v1.1][Func]" &&
+                      extracted.imports[0].references == 2 &&
+                      extracted.imports[0].status == Status::MissingHle,
+                  "audit preserves qualified identity reference count and missing status");
+
+    relas[0].r_info = (uint64_t(1) << 32) | R_X86_64_JUMP_SLOT;
+    const auto malformed = AuditProgram(*rt, synthetic, "synthetic");
+    Phase1::Check(!malformed.parsed && !malformed.diagnostic.empty(),
+                  "audit rejects out-of-range relocation symbol indexes with a diagnostic");
+    relas[0].r_info = R_X86_64_JUMP_SLOT;
+
     // Global aggregation counts games once while preserving every static reference.
     auto g1_record = missing;
     g1_record.references = 2;
@@ -127,7 +173,7 @@ int Run() {
                   "library audit discovers every and only synthetic game root");
     std::filesystem::remove_all(temp);
 
-    std::puts("IMPORT_AUDIT_PASS resolution classification aggregation JSON discovery");
+    std::puts("IMPORT_AUDIT_PASS resolution classification extraction aggregation JSON discovery");
     return 0;
 }
 
