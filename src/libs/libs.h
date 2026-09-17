@@ -47,17 +47,24 @@
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_FUNC(n, f) LIB_ADD(n, f, Loader::SymbolType::Func)
 
+// PRINT_NAME is used by a very large number of HLE entry points. Some functions
+// expand it more than once in the same C++ scope, so the diagnostic RAII object
+// must have a unique identifier for every expansion.
+#define KYTY_RUNTIME_DIAG_CONCAT_INNER(a, b) a##b
+#define KYTY_RUNTIME_DIAG_CONCAT(a, b) KYTY_RUNTIME_DIAG_CONCAT_INNER(a, b)
+
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define PRINT_NAME()                                                                               \
-	[[maybe_unused]] ::Libs::RuntimeDiagnostics::HleScope runtime_diag_scope(                     \
-	    static_cast<uint32_t>(Common::Thread::GetThreadIdUnique()), g_library, g_module, __func__); \
-	if (PRINT_NAME_ENABLED) {                                                                      \
-		if (Log::GetDirection() != Log::Direction::Silent) {                                       \
-			const auto print_name_time = Loader::Timer::GetTime().ToString("HH24:MI:SS.FFF");      \
-			LOGF_COLOR(Log::Color::Cyan, "[%d][%s] %s::%s::%s()\n",                                \
-			           Common::Thread::GetThreadIdUnique(), print_name_time.c_str(), g_library,    \
-			           g_module, __func__);                                                        \
-		}                                                                                          \
+#define PRINT_NAME()                                                                                   \
+	[[maybe_unused]] ::Libs::RuntimeDiagnostics::HleScope                                             \
+	    KYTY_RUNTIME_DIAG_CONCAT(runtime_diag_scope_, __LINE__)(                                      \
+	        static_cast<uint32_t>(Common::Thread::GetThreadIdUnique()), g_library, g_module, __func__); \
+	if (PRINT_NAME_ENABLED) {                                                                          \
+		if (Log::GetDirection() != Log::Direction::Silent) {                                           \
+			const auto print_name_time = Loader::Timer::GetTime().ToString("HH24:MI:SS.FFF");          \
+			LOGF_COLOR(Log::Color::Cyan, "[%d][%s] %s::%s::%s()\n",                                    \
+			           Common::Thread::GetThreadIdUnique(), print_name_time.c_str(), g_library,        \
+			           g_module, __func__);                                                            \
+		}                                                                                              \
 	}
 
 namespace Loader {
