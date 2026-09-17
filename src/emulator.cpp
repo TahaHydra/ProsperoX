@@ -34,9 +34,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <windows.h>
 #include <tlhelp32.h>
 #include <wct.h>
-#include <windows.h>
 #endif
 
 namespace Emulator {
@@ -59,8 +59,13 @@ static std::string WideToUtf8(const wchar_t* text) {
 		return {};
 	}
 
-	std::string result(static_cast<size_t>(size - 1), '\0');
-	WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
+	std::string result(static_cast<size_t>(size), '\0');
+	const int written =
+	    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
+	if (written <= 1) {
+		return {};
+	}
+	result.resize(static_cast<size_t>(written - 1));
 	return result;
 }
 
