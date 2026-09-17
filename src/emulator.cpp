@@ -37,6 +37,9 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wct.h>
+#ifdef DeleteFile
+#undef DeleteFile
+#endif
 #endif
 
 namespace Emulator {
