@@ -56,7 +56,7 @@
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                                   \
 	[[maybe_unused]] ::Libs::RuntimeDiagnostics::HleScope                                             \
-	    KYTY_RUNTIME_DIAG_CONCAT(runtime_diag_scope_, __LINE__)(                                      \
+	    KYTY_RUNTIME_DIAG_CONCAT(runtime_diag_scope_, __COUNTER__)(                                   \
 	        static_cast<uint32_t>(Common::Thread::GetThreadIdUnique()), g_library, g_module, __func__); \
 	if (PRINT_NAME_ENABLED) {                                                                          \
 		if (Log::GetDirection() != Log::Direction::Silent) {                                           \
