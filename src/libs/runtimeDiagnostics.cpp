@@ -1,13 +1,20 @@
 #include "libs/runtimeDiagnostics.h"
 
-#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace Libs::RuntimeDiagnostics {
 
 namespace {
+
+std::atomic_bool g_enabled {false};
+std::once_flag   g_initialize_once;
 
 uint64_t AgeMs(uint64_t now_us, uint64_t then_us) {
 	return now_us >= then_us ? (now_us - then_us) / 1000 : 0;
@@ -15,6 +22,23 @@ uint64_t AgeMs(uint64_t now_us, uint64_t then_us) {
 
 const char* Safe(const char* value) {
 	return value != nullptr ? value : "<null>";
+}
+
+bool EnvEnabled(const char* name) {
+	const auto* value = std::getenv(name);
+	return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+}
+
+void AppendSnapshot(uint64_t sequence) {
+	std::ofstream output("_RuntimeDiag.txt", std::ios::out | std::ios::app);
+	if (!output.is_open()) {
+		return;
+	}
+	const auto now_us = NowUs();
+	output << "========== PROSPEROX RUNTIME DIAG #" << sequence << " t_ms=" << (now_us / 1000)
+	       << " ==========\n";
+	output << GlobalState().BuildReport(now_us);
+	output << "============================================================\n";
 }
 
 } // namespace
@@ -170,6 +194,60 @@ std::string State::BuildReport(uint64_t now_us) const {
 size_t State::RecentEventCount() const {
 	std::lock_guard lock(m_mutex);
 	return m_recent_events.size();
+}
+
+bool Enabled() noexcept {
+	return g_enabled.load(std::memory_order_acquire);
+}
+
+uint64_t NowUs() noexcept {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                 std::chrono::steady_clock::now().time_since_epoch())
+	                                 .count());
+}
+
+State& GlobalState() {
+	static State state(128);
+	return state;
+}
+
+void Initialize() {
+	std::call_once(g_initialize_once, [] {
+		if (!EnvEnabled("PROSPEROX_RUNTIME_DIAG")) {
+			return;
+		}
+
+		(void)GlobalState();
+		{
+			std::ofstream output("_RuntimeDiag.txt", std::ios::out | std::ios::trunc);
+			if (output.is_open()) {
+				output << "ProsperoX passive runtime diagnostics enabled\n";
+			}
+		}
+		g_enabled.store(true, std::memory_order_release);
+
+		std::thread([] {
+			uint64_t sequence = 0;
+			while (Enabled()) {
+				std::this_thread::sleep_for(std::chrono::seconds(2));
+				if (Enabled()) {
+					AppendSnapshot(++sequence);
+				}
+			}
+		}).detach();
+	});
+}
+
+HleScope::HleScope(uint32_t thread_id, const char* library, const char* module, const char* function) {
+	if (Enabled()) {
+		m_token = GlobalState().EnterHle(thread_id, library, module, function, NowUs());
+	}
+}
+
+HleScope::~HleScope() {
+	if (m_token != 0) {
+		GlobalState().ExitHle(m_token, NowUs());
+	}
 }
 
 } // namespace Libs::RuntimeDiagnostics
