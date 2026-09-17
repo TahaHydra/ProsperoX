@@ -9,6 +9,19 @@ namespace LibGen5 {
 
 LIB_VERSION("VideoOut", 1, "VideoOut", 1, 1);
 
+// The host presenter currently exposes a fixed refresh path rather than a guest-controlled
+// VRR transport. These PS5 entry points are therefore synchronization/configuration hints:
+// validate the VideoOut handle and otherwise complete successfully without mutating the
+// existing flip-rate state. This matches the behavior used by other PS5 HLE implementations
+// for hosts without a steerable VRR output.
+static KYTY_SYSV_ABI int VideoOutVrrFixedRate(int handle) {
+	const int pending = VideoOut::VideoOutIsFlipPending(handle);
+	if (pending < 0) {
+		return pending;
+	}
+	return 0;
+}
+
 LIB_DEFINE(InitVideoOut_1) {
 	PRINT_NAME_ENABLE(true);
 
@@ -39,6 +52,8 @@ LIB_DEFINE(InitVideoOut_1) {
 	LIB_FUNC("+I4K03i3EL0", VideoOut::VideoOutInitializeOutputOptions);
 	LIB_FUNC("Nv8c-Kb+DUM", VideoOut::VideoOutIsOutputSupported);
 	LIB_FUNC("w0hLuNarQxY", VideoOut::VideoOutConfigureOutput);
+	LIB_FUNC("5tRaBjtdTzY", VideoOutVrrFixedRate);
+	LIB_FUNC("T4ucGB8CsnM", VideoOutVrrFixedRate);
 	LIB_FUNC("eb-gvTYQcoY", VideoOut::VideoOutLatencyControlWaitBeforeInput);
 	LIB_FUNC("MCJ8SkzsQxY", VideoOut::VideoOutLatencyMeasureSetStartPoint);
 	LIB_FUNC("DYhhWbJSeRg", VideoOut::VideoOutColorSettingsSetGamma);
