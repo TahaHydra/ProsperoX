@@ -25,163 +25,11 @@
 #include "loader/systemContent.h"
 #include "loader/timer.h"
 
-#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <thread>
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <tlhelp32.h>
-#include <wct.h>
-#ifdef DeleteFile
-#undef DeleteFile
-#endif
-#endif
-
 namespace Emulator {
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-namespace {
-
-using OpenThreadWaitChainSessionFn = HWCT(WINAPI*)(DWORD, PWAITCHAINCALLBACK);
-using GetThreadWaitChainFn = BOOL(WINAPI*)(HWCT, DWORD_PTR, DWORD, DWORD, LPDWORD,
-                                           PWAITCHAIN_NODE_INFO, LPBOOL);
-using CloseThreadWaitChainSessionFn = VOID(WINAPI*)(HWCT);
-
-static std::string WideToUtf8(const wchar_t* text) {
-	if (text == nullptr || text[0] == L'\0') {
-		return {};
-	}
-
-	const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
-	if (size <= 1) {
-		return {};
-	}
-
-	std::string result(static_cast<size_t>(size), '\0');
-	const int written =
-	    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
-	if (written <= 1) {
-		return {};
-	}
-	result.resize(static_cast<size_t>(written - 1));
-	return result;
-}
-
-static void DumpWindowsWaitChains() {
-	HMODULE advapi = LoadLibraryW(L"advapi32.dll");
-	if (advapi == nullptr) {
-		LOGF("WAITCHAIN_DIAG error=LoadLibraryW(advapi32.dll) failed code=%lu\n",
-		     GetLastError());
-		return;
-	}
-
-	auto open_session = reinterpret_cast<OpenThreadWaitChainSessionFn>(
-	    GetProcAddress(advapi, "OpenThreadWaitChainSession"));
-	auto get_chain = reinterpret_cast<GetThreadWaitChainFn>(
-	    GetProcAddress(advapi, "GetThreadWaitChain"));
-	auto close_session = reinterpret_cast<CloseThreadWaitChainSessionFn>(
-	    GetProcAddress(advapi, "CloseThreadWaitChainSession"));
-
-	if (open_session == nullptr || get_chain == nullptr || close_session == nullptr) {
-		LOGF("WAITCHAIN_DIAG error=wait-chain API unavailable\n");
-		FreeLibrary(advapi);
-		return;
-	}
-
-	HWCT session = open_session(0, nullptr);
-	if (session == nullptr) {
-		LOGF("WAITCHAIN_DIAG error=OpenThreadWaitChainSession failed code=%lu\n",
-		     GetLastError());
-		FreeLibrary(advapi);
-		return;
-	}
-
-	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-	if (snapshot == INVALID_HANDLE_VALUE) {
-		LOGF("WAITCHAIN_DIAG error=CreateToolhelp32Snapshot failed code=%lu\n",
-		     GetLastError());
-		close_session(session);
-		FreeLibrary(advapi);
-		return;
-	}
-
-	const DWORD process_id = GetCurrentProcessId();
-	THREADENTRY32 entry {};
-	entry.dwSize = sizeof(entry);
-	uint32_t thread_count = 0;
-	uint32_t blocked_count = 0;
-
-	LOGF("WAITCHAIN_DIAG_BEGIN pid=%lu\n", process_id);
-
-	if (Thread32First(snapshot, &entry) != FALSE) {
-		do {
-			if (entry.th32OwnerProcessID != process_id) {
-				continue;
-			}
-			thread_count++;
-
-			DWORD node_count = WCT_MAX_NODE_COUNT;
-			WAITCHAIN_NODE_INFO nodes[WCT_MAX_NODE_COUNT] {};
-			BOOL cycle = FALSE;
-			if (get_chain(session, 0, WCTP_GETINFO_ALL_FLAGS, entry.th32ThreadID, &node_count,
-			              nodes, &cycle) == FALSE) {
-				LOGF("WAITCHAIN thread=%lu error=%lu\n", entry.th32ThreadID, GetLastError());
-				continue;
-			}
-
-			if (node_count <= 1 && cycle == FALSE) {
-				continue;
-			}
-			blocked_count++;
-			LOGF("WAITCHAIN thread=%lu nodes=%lu cycle=%s\n", entry.th32ThreadID, node_count,
-			     cycle != FALSE ? "yes" : "no");
-
-			for (DWORD i = 0; i < node_count; i++) {
-				const auto& node = nodes[i];
-				if (node.ObjectType == WctThreadType) {
-					LOGF("  node[%lu] thread pid=%lu tid=%lu wait_ms=%lu switches=%lu status=%d\n",
-					     i, node.ThreadObject.ProcessId, node.ThreadObject.ThreadId,
-					     node.ThreadObject.WaitTime, node.ThreadObject.ContextSwitches,
-					     static_cast<int>(node.ObjectStatus));
-				} else {
-					const auto object_name = WideToUtf8(node.LockObject.ObjectName);
-					LOGF("  node[%lu] object type=%d status=%d name=%s alertable=%s\n", i,
-					     static_cast<int>(node.ObjectType), static_cast<int>(node.ObjectStatus),
-					     object_name.empty() ? "-" : object_name.c_str(),
-					     node.LockObject.Alertable != FALSE ? "yes" : "no");
-				}
-			}
-		} while (Thread32Next(snapshot, &entry) != FALSE);
-	}
-
-	LOGF("WAITCHAIN_DIAG_END threads=%u blocked_chains=%u\n", thread_count, blocked_count);
-
-	CloseHandle(snapshot);
-	close_session(session);
-	FreeLibrary(advapi);
-}
-
-static void StartWaitChainDiagnosticWatchdog() {
-	const char* enabled = std::getenv("KYTY_WAITCHAIN_DIAG");
-	if (enabled == nullptr || enabled[0] == '\0' || enabled[0] == '0') {
-		return;
-	}
-
-	std::thread([] {
-		std::this_thread::sleep_for(std::chrono::seconds(10));
-		DumpWindowsWaitChains();
-	}).detach();
-}
-
-} // namespace
-#else
-static void StartWaitChainDiagnosticWatchdog() {}
-#endif
 
 static void PrintSystemInfo() {
 	const Common::SystemInfo info = Common::GetSystemInfo();
@@ -329,7 +177,6 @@ static void Execute(const std::filesystem::path& game_patch) {
 		    rt->Execute(*static_cast<const std::filesystem::path*>(param));
 	    },
 	    &patch_path);
-	StartWaitChainDiagnosticWatchdog();
 	Libs::Graphics::WindowRun();
 	std::quick_exit(0);
 }
