@@ -15,9 +15,13 @@ LIB_VERSION("VideoOut", 1, "VideoOut", 1, 1);
 // existing flip-rate state. This matches the behavior used by other PS5 HLE implementations
 // for hosts without a steerable VRR output.
 static KYTY_SYSV_ABI int VideoOutVrrFixedRate(int handle) {
-	const int pending = VideoOut::VideoOutIsFlipPending(handle);
-	if (pending < 0) {
-		return pending;
+	// Validate only the port itself. Do not query flip state here: that acquires the
+	// per-port presentation mutex and can turn an otherwise harmless VRR hint into a
+	// synchronization dependency on an in-flight present. Output-support validation only
+	// checks that the VideoOut handle is open and leaves the flip queue untouched.
+	const int supported = VideoOut::VideoOutIsOutputSupported(handle, 1, nullptr, nullptr, 0);
+	if (supported < 0) {
+		return supported;
 	}
 	return 0;
 }
