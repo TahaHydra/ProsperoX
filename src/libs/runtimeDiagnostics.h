@@ -92,4 +92,20 @@ private:
 	LastShaderPhase m_last_shader_phase;
 };
 
+[[nodiscard]] bool Enabled() noexcept;
+[[nodiscard]] uint64_t NowUs() noexcept;
+State& GlobalState();
+void Initialize();
+
+class HleScope final {
+public:
+	HleScope(uint32_t thread_id, const char* library, const char* module, const char* function);
+	~HleScope();
+	HleScope(const HleScope&) = delete;
+	HleScope& operator=(const HleScope&) = delete;
+
+private:
+	HleCallToken m_token = 0;
+};
+
 } // namespace Libs::RuntimeDiagnostics
