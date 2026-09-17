@@ -91,6 +91,15 @@ int Run() {
             "PhaseUnrelatedNid[AgcDriver_v1][AgcDriver_v1.1][Func]") == nullptr,
         "audited compatibility aliases do not widen whole-library resolution");
 
+    for (const char* symbol: {
+             "5tRaBjtdTzY[VideoOut_v1][VideoOut_v1.1][Func]",
+             "T4ucGB8CsnM[VideoOut_v1][VideoOut_v1.1][Func]",
+         }) {
+        const auto* resolved = linker->Symbols()->FindExact(symbol);
+        Phase1::Check(resolved != nullptr && resolved->vaddr != 0,
+                      "VideoOut VRR fixed-rate export resolves exactly");
+    }
+
     std::puts("PHASE1_PASS qualified compatibility routes resolve canonical implementations");
     return 0;
 }
