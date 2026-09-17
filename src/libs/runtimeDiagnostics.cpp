@@ -1,5 +1,7 @@
 #include "libs/runtimeDiagnostics.h"
 
+#include "graphics/gpuStats.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -38,6 +40,12 @@ void AppendSnapshot(uint64_t sequence) {
 	output << "========== PROSPEROX RUNTIME DIAG #" << sequence << " t_ms=" << (now_us / 1000)
 	       << " ==========\n";
 	output << GlobalState().BuildReport(now_us);
+	const auto gpu_report = Graphics::Stats::LatestReport();
+	if (!gpu_report.empty()) {
+		output << "GPU_STATS_LAST\n" << gpu_report;
+	} else {
+		output << "GPU_STATS_LAST none\n";
+	}
 	output << "============================================================\n";
 }
 
