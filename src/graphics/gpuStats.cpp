@@ -25,7 +25,8 @@ std::string                            g_latest_report;
 } // namespace
 
 bool Enabled() noexcept {
-	static const bool enabled = std::getenv("KYTY_GPU_STATS") != nullptr;
+	static const bool enabled = std::getenv("KYTY_GPU_STATS") != nullptr ||
+	                            std::getenv("PROSPEROX_RUNTIME_DIAG") != nullptr;
 	return enabled;
 }
 
