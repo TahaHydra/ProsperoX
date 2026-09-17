@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "libs/runtimeDiagnostics.h"
 #include "loader/timer.h" // IWYU pragma: keep
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -48,6 +49,8 @@
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                               \
+	[[maybe_unused]] ::Libs::RuntimeDiagnostics::HleScope runtime_diag_scope(                     \
+	    static_cast<uint32_t>(Common::Thread::GetThreadIdUnique()), g_library, g_module, __func__); \
 	if (PRINT_NAME_ENABLED) {                                                                      \
 		if (Log::GetDirection() != Log::Direction::Silent) {                                       \
 			const auto print_name_time = Loader::Timer::GetTime().ToString("HH24:MI:SS.FFF");      \
