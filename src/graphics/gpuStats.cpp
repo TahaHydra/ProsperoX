@@ -17,14 +17,16 @@ constexpr auto TimerCount   = static_cast<uint32_t>(Timer::Count);
 std::array<std::atomic<uint64_t>, CounterCount> g_counters {};
 std::array<std::atomic<uint64_t>, TimerCount>   g_timers {};
 
-std::mutex                            g_report_mutex;
+std::mutex                             g_report_mutex;
 std::chrono::steady_clock::time_point g_window_start;
-bool                                  g_window_started = false;
+bool                                   g_window_started = false;
+std::string                            g_latest_report;
 
 } // namespace
 
 bool Enabled() noexcept {
-	static const bool enabled = std::getenv("KYTY_GPU_STATS") != nullptr;
+	static const bool enabled = std::getenv("KYTY_GPU_STATS") != nullptr ||
+	                            std::getenv("PROSPEROX_RUNTIME_DIAG") != nullptr;
 	return enabled;
 }
 
@@ -74,7 +76,7 @@ void Report() noexcept {
 
 	const auto per_second = [seconds](uint64_t value) { return static_cast<double>(value) / seconds; };
 	const auto millis     = [seconds](uint64_t nanoseconds) {
-        return static_cast<double>(nanoseconds) / 1e6 / seconds;
+		return static_cast<double>(nanoseconds) / 1e6 / seconds;
 	};
 
 	const auto count = [&counters](Counter counter) {
@@ -136,13 +138,25 @@ void Report() noexcept {
 	    millis(time(Timer::DrawShaderLookup)), millis(time(Timer::DrawResourceMaterialize)),
 	    millis(time(Timer::DrawVertexIndex)), millis(time(Timer::DrawPipelineLookup)),
 	    millis(time(Timer::DrawBindingsPrepare)), millis(time(Timer::DrawBindingsCommit)),
-	    millis(time(Timer::GpuThreadRecording)),
-	    millis(time(Timer::GpuThreadParked)), millis(time(Timer::FlipWait)),
-	    per_second(count(Counter::GpuThreadWakeups)), per_second(count(Counter::GpuThreadTimeouts)));
+	    millis(time(Timer::GpuThreadRecording)), millis(time(Timer::GpuThreadParked)),
+	    millis(time(Timer::FlipWait)), per_second(count(Counter::GpuThreadWakeups)),
+	    per_second(count(Counter::GpuThreadTimeouts)));
+
+	try {
+		std::lock_guard lock(g_report_mutex);
+		g_latest_report = line;
+	} catch (...) {
+		// Diagnostics must never turn telemetry allocation failure into an emulator failure.
+	}
 
 	LOGF("%s", line);
 	std::fputs(line, stdout);
 	std::fflush(stdout);
+}
+
+std::string LatestReport() {
+	std::lock_guard lock(g_report_mutex);
+	return g_latest_report;
 }
 
 } // namespace Libs::Graphics::Stats

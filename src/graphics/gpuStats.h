@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <string>
 
 namespace Libs::Graphics::Stats {
 
@@ -130,6 +131,11 @@ void AddTime(Timer timer, uint64_t nanoseconds) noexcept;
 // Emits a summary line at most once per second and resets the window. Cheap
 // enough to call from the GPU thread's main loop.
 void Report() noexcept;
+
+// Returns the most recently completed one-second GPU report without changing
+// counters. Runtime diagnostics use this to preserve the last known GPU state
+// even when the GPU thread subsequently blocks.
+[[nodiscard]] std::string LatestReport();
 
 class ScopedTimer final {
 public:

@@ -21,6 +21,7 @@
 #include "libs/controller.h"
 #include "libs/libs.h"
 #include "libs/network.h"
+#include "libs/runtimeDiagnostics.h"
 #include "loader/runtimeLinker.h"
 #include "loader/systemContent.h"
 #include "loader/timer.h"
@@ -214,6 +215,7 @@ void Run(const RunOptions& options) {
 	Libs::InitAll(rt->Symbols());
 
 	LoadElf(options.elf);
+	Libs::RuntimeDiagnostics::Initialize();
 
 	Execute(options.game_patch);
 }

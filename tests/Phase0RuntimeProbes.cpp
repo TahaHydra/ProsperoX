@@ -8,6 +8,7 @@
 #include "Phase1RuntimeTests.inc"
 #include "OpenPsIdCompatibilityTests.inc"
 #include "ImportAuditTests.inc"
+#include "RuntimeDiagnosticsTests.inc"
 #include "Phase6SelfRepackTests.inc"
 #include "Phase6PosixTests.inc"
 #include "Phase6AgcTests.inc"
@@ -104,6 +105,7 @@ int main(int argc, char** argv) {
         auto result = Phase1::Imports();
         if (result == 0) result = OpenPsIdCompatibility::Run();
         if (result == 0) result = PhaseImportAudit::Run();
+        if (result == 0) result = RuntimeDiagnosticsTests::Run();
         Common::Singleton<Loader::RuntimeLinker>::Instance()->Clear();
         subsystems.Destroy();
         return result;
