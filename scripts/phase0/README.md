@@ -21,6 +21,22 @@ installer or modify system PATH. Existing Visual Studio supplies Ninja and the C
 From the repository root in PowerShell:
 
 ```powershell
+# First time in a clone, and any time a configure fails with
+# "CMAKE_C_COMPILER: clang-cl ... was not found in the PATH":
+./scripts/phase0/build-windows.ps1 -Bootstrap
+```
+
+`build-windows.ps1` prepares the environment and then builds. The
+`phase0-windows` preset names the compiler `clang-cl`, which only resolves
+once the pinned LLVM in `_Build/tools` is on `PATH`; a shell prepared with
+`VsDevCmd.bat` alone has MSVC but not that LLVM. CMake regenerates on its own
+when the source globs change -- switching branches is enough -- so a build
+started in a half-prepared shell fails at the regenerate step rather than at
+the first configure, which makes it look like a source problem.
+
+The individual steps, if you prefer to run them by hand:
+
+```powershell
 ./scripts/phase0/bootstrap-windows.ps1
 . ./scripts/phase0/windows-env.ps1
 git submodule update --init --recursive --jobs 6
