@@ -3,6 +3,7 @@
 #include "common/magicEnum.h"
 #include "common/stringUtils.h"
 #include "kernel/fileSystem.h"
+#include "libs/avPlayerClock.h"
 #include "kernel/pthread.h"
 #include "libs/audio.h"
 #include "libs/libs.h"
@@ -14,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -313,6 +315,14 @@ static std::string fferr(int e) {
 	av_make_error_string(buf, sizeof(buf), e);
 	return buf;
 }
+// Media lifecycle tracing. Off unless KYTY_AVPLAYER_STATS is set, because the
+// interesting events (start, end of stream, loop, seek) are exactly the ones a
+// title emits in bursts; leaving them on by default would bury a normal run.
+static bool media_trace_enabled() {
+	static const bool enabled = std::getenv("KYTY_AVPLAYER_STATS") != nullptr;
+	return enabled;
+}
+
 static uint64_t to_ms(int64_t v, AVRational tb) {
 	return v == AV_NOPTS_VALUE ? 0
 	                           : static_cast<uint64_t>(std::max<int64_t>(
@@ -535,6 +545,15 @@ public:
 	bool Empty() const {
 		std::lock_guard lock(mutex);
 		return queue.empty();
+	}
+	// Inspects the head without removing it. The visitor runs under the queue
+	// lock, so it must not call back into the queue.
+	template <typename Visitor>
+	void Peek(Visitor&& visitor) const {
+		std::lock_guard lock(mutex);
+		if (!queue.empty()) {
+			std::forward<Visitor>(visitor)(queue.front());
+		}
 	}
 	void Clear() {
 		std::lock_guard lock(mutex);
@@ -784,24 +803,40 @@ public:
 				return AVPLAYER_ERROR_NO_MEMORY;
 			}
 			SeekNoLock(ms);
-			start_time_ms = ms;
-			clock_start   = std::chrono::steady_clock::now();
-			paused_extra  = {};
-			paused        = paused_after_start;
-			pause_time    = clock_start;
+			video_tolerance_ms = VideoToleranceForStreamNoLock();
+			const auto now_us  = NowUs();
+			media_clock.Start(ms, now_us);
+			paused = paused_after_start;
+			if (paused) {
+				media_clock.Pause(now_us);
+			}
 			seek_video_frame_pending =
 			    paused_after_start && show_seek_frame && video_id.has_value();
-			stopped = false;
 		}
 
+		// `stopped` is what makes the source live to the guest, and Active()
+		// reads it without the lifecycle lock. Publishing it before the worker
+		// state is armed would let a concurrent sceAvPlayerIsActive observe a
+		// started source with every completion flag still set, i.e. report end
+		// of stream immediately after start.
 		if (!StartWorkers()) {
 			std::lock_guard lock(mutex);
-			stopped = true;
 			ResetNoLock(true);
+			media_clock.Stop();
 			result = AVPLAYER_ERROR_OPERATION_FAILED;
+		} else {
+			std::lock_guard lock(mutex);
+			stopped = false;
 		}
 		if (result == 0 && video_id) {
 			::printf("AvPlayer video started playing\n");
+		}
+		if (media_trace_enabled()) {
+			LOGF("\t avplayer start: position=%" PRIu64 " ms paused=%d video=%d audio=%d "
+			     "sync_mode=%u loop=%d result=%d\n",
+			     ms, static_cast<int>(paused_after_start), static_cast<int>(video_id.has_value()),
+			     static_cast<int>(audio_id.has_value()), sync_mode, static_cast<int>(loop.load()),
+			     result);
 		}
 		return result;
 	}
@@ -826,15 +861,13 @@ public:
 	void Pause() {
 		std::scoped_lock lifecycle_lock(lifecycle_mutex);
 		std::lock_guard  lock(mutex);
-		paused     = true;
-		pause_time = std::chrono::steady_clock::now();
+		paused = true;
+		media_clock.Pause(NowUs());
 	}
 	void Resume() {
 		std::scoped_lock lifecycle_lock(lifecycle_mutex);
 		std::lock_guard  lock(mutex);
-		if (paused) {
-			paused_extra += std::chrono::steady_clock::now() - pause_time;
-		}
+		media_clock.Resume(NowUs());
 		paused                   = false;
 		seek_video_frame_pending = false;
 	}
@@ -849,9 +882,22 @@ public:
 	}
 	bool Active() const {
 		std::lock_guard lock(mutex);
-		return !stopped && !pipeline_failed &&
-		       (!demux_eof || !video_done || !audio_done || !video_frames.Empty() ||
-		        !audio_frames.Empty());
+		const bool active = !stopped && !pipeline_failed &&
+		                    (!demux_eof || !video_done || !audio_done || !video_frames.Empty() ||
+		                     !audio_frames.Empty());
+		// End of stream is the state a title acts on, so record when it is
+		// first observed and at what media position. A source that ends early
+		// shows up here as an EOS well before the stream duration.
+		if (!active && !stopped && !media_eos_reported) {
+			media_eos_reported = true;
+			if (media_trace_enabled()) {
+				LOGF("\t avplayer eos: position=%" PRIu64 " ms video_delivered=%" PRIu64
+				     " video_dropped=%" PRIu64 " audio_delivered=%" PRIu64 " failed=%d\n",
+				     CurrentTimeNoLock(), media_video_delivered, media_video_dropped,
+				     media_audio_delivered, static_cast<int>(pipeline_failed.load()));
+			}
+		}
+		return active;
 	}
 	uint64_t CurrentTime() const {
 		std::lock_guard lock(mutex);
@@ -866,16 +912,12 @@ public:
 		}
 		return StartImpl(ms, was_paused, true);
 	}
-	uint64_t CurrentTimeNoLock() const {
-		if (stopped) {
-			return 0;
-		}
+	static uint64_t NowUs() {
 		using namespace std::chrono;
-		auto now = paused ? pause_time : steady_clock::now();
-		return start_time_ms +
-		       static_cast<uint64_t>(
-		           duration_cast<milliseconds>(now - clock_start - paused_extra).count());
+		return static_cast<uint64_t>(
+		    duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
 	}
+	uint64_t CurrentTimeNoLock() const { return media_clock.PositionMs(NowUs()); }
 	int Info(uint32_t id, AvPlayerStreamInfo* out) const {
 		if (out == nullptr) {
 			return AVPLAYER_ERROR_INVALID_PARAMS;
@@ -899,6 +941,41 @@ public:
 		FillCommon(id, &out->type, &out->duration, nullptr, &out->details);
 		return 0;
 	}
+	// The first decoded timestamp is what actually defines where the timeline
+	// starts: seeking lands on the keyframe at or before the requested
+	// position, and a container's first presentation timestamp need not be
+	// zero. Anchoring to it keeps a stream whose timestamps do not start at the
+	// requested position from stalling every frame gate.
+	// Half the stream's own frame interval, so frame selection picks the frame
+	// nearest the clock instead of beating against it at matched rates.
+	uint64_t VideoToleranceForStreamNoLock() const {
+		if (!video_id || fmt == nullptr) {
+			return 0;
+		}
+		auto* s  = fmt->streams[video_id.value()];
+		auto  fr = s->avg_frame_rate.num != 0 ? s->avg_frame_rate : s->r_frame_rate;
+		if (fr.num <= 0 || fr.den <= 0) {
+			return 0;
+		}
+		return VideoToleranceMs(static_cast<uint64_t>(fr.num), static_cast<uint64_t>(fr.den));
+	}
+	void AnchorClockNoLock(uint64_t now_us) {
+		if (media_clock.Anchored() || !media_clock.Running()) {
+			return;
+		}
+		uint64_t first = 0;
+		bool     found = false;
+		video_frames.Peek([&](const ReadyFrame& f) { first = f.info.time_stamp; found = true; });
+		if (!found) {
+			audio_frames.Peek([&](const ReadyFrame& f) {
+				first = f.info.time_stamp;
+				found = true;
+			});
+		}
+		if (found) {
+			media_clock.Anchor(first, now_us);
+		}
+	}
 	bool Video(AvPlayerFrameInfoEx* out) {
 		if (out == nullptr) {
 			return false;
@@ -911,16 +988,37 @@ public:
 		if (paused && !deliver_seek_frame) {
 			return false;
 		}
-		auto frame = video_frames.TryPopIf([&](const ReadyFrame& candidate) {
-			if (deliver_seek_frame || sync_mode != 0) {
-				return true;
+		// AV_SYNC_MODE_NONE means the title has taken over presentation timing,
+		// so every call yields whatever has been decoded. The default mode is
+		// paced by the media clock instead: the title's poll rate decides how
+		// often it may observe the timeline, never how fast the timeline runs.
+		const bool untimed  = deliver_seek_frame || sync_mode != 0;
+		const auto now_us   = NowUs();
+		AnchorClockNoLock(now_us);
+		const auto media_ms = media_clock.PositionMs(now_us);
+
+		std::optional<ReadyFrame> frame;
+		for (;;) {
+			auto candidate = video_frames.TryPopIf([&](const ReadyFrame& c) {
+				return untimed || VideoFrameDue(c.info.time_stamp, media_ms, video_tolerance_ms);
+			});
+			if (!candidate) {
+				break;
 			}
-			if (audio_id) {
-				return candidate.info.time_stamp <= last_audio_ts;
+			if (frame) {
+				// A newer frame is due as well, so the one held back is late
+				// and superseded. Dropping it is what keeps the timeline real
+				// time when the title polls slower than the stream's frame
+				// rate; the guest never saw this buffer, so it goes straight
+				// back to the decoder rather than through the retired list.
+				video_buffers.Push(std::move(frame->buffer));
+				media_video_dropped++;
 			}
-			auto now = CurrentTimeNoLock();
-			return now == 0 || candidate.info.time_stamp <= now;
-		});
+			frame = std::move(candidate);
+			if (untimed) {
+				break;
+			}
+		}
 		if (!frame) {
 			return false;
 		}
@@ -933,6 +1031,7 @@ public:
 		}
 		current_video = std::move(*frame);
 		*out          = current_video->info;
+		media_video_delivered++;
 		if (deliver_seek_frame) {
 			seek_video_frame_pending = false;
 		}
@@ -946,7 +1045,18 @@ public:
 		if (paused || stopped || !audio_id || trick_speed != AVPLAYER_TRICK_SPEED_NORMAL) {
 			return false;
 		}
-		auto frame = audio_frames.TryPop();
+		// Audio may run ahead of the clock so the title can keep its output
+		// port primed, but only by a bounded lead. Without the bound the title
+		// drains the decoder as fast as it polls, and the source then reaches
+		// end of stream after (duration / poll rate) rather than after
+		// duration -- which is what makes a movie restart at 60 Hz but not at
+		// 30 Hz.
+		const auto now_us = NowUs();
+		AnchorClockNoLock(now_us);
+		const auto media_ms = media_clock.PositionMs(now_us);
+		auto       frame    = audio_frames.TryPopIf([&](const ReadyFrame& candidate) {
+            return AudioFrameDue(candidate.info.time_stamp, media_ms);
+        });
 		if (!frame) {
 			return false;
 		}
@@ -963,6 +1073,7 @@ public:
 		std::memcpy(out->details.audio.language_code,
 		            current_audio->info.details.audio.language_code, 4);
 		last_audio_ts = out->time_stamp;
+		media_audio_delivered++;
 		return true;
 	}
 	std::optional<int32_t> TakeWarning() { return warnings.TryPop(); }
@@ -1014,6 +1125,11 @@ private:
 		audio_done               = true;
 		seek_video_frame_pending = false;
 		last_audio_ts            = 0;
+		media_clock.Stop();
+		media_video_delivered = 0;
+		media_video_dropped   = 0;
+		media_audio_delivered = 0;
+		media_eos_reported    = false;
 		current_video            = std::move(delivered_video);
 		current_audio            = std::move(delivered_audio);
 		retired_video            = std::move(in_flight_video);
@@ -1621,11 +1737,13 @@ private:
 	std::atomic_bool                         loop {false};
 	int32_t                                  trick_speed   = AVPLAYER_TRICK_SPEED_NORMAL;
 	uint32_t                                 sync_mode     = 0;
-	uint64_t                                 start_time_ms = 0;
 	uint64_t                                 last_audio_ts = 0;
-	std::chrono::steady_clock::time_point    clock_start {};
-	std::chrono::steady_clock::time_point    pause_time {};
-	std::chrono::steady_clock::duration      paused_extra {};
+	MediaClock                               media_clock {};
+	uint64_t                                 video_tolerance_ms    = 0;
+	mutable uint64_t                         media_video_delivered = 0;
+	mutable uint64_t                         media_video_dropped   = 0;
+	mutable uint64_t                         media_audio_delivered = 0;
+	mutable bool                             media_eos_reported    = false;
 };
 
 struct AvPlayerInternal {

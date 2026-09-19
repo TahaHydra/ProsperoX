@@ -419,6 +419,11 @@ add_executable(pending_completions_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(pending_completions_tests PRIVATE ${inc_headers})
 
+add_executable(avplayer_clock_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/AvPlayerClockTests.cpp"
+)
+target_include_directories(avplayer_clock_tests PRIVATE ${inc_headers})
+
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
 	"${KYTY_SOURCE_DIR}/libs/imeCommon.cpp"
@@ -597,6 +602,7 @@ if(BUILD_TESTING)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME publication_batch COMMAND $<TARGET_FILE:publication_batch_tests>)
 	add_test(NAME pending_completions COMMAND $<TARGET_FILE:pending_completions_tests>)
+	add_test(NAME avplayer_clock COMMAND $<TARGET_FILE:avplayer_clock_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
@@ -685,6 +691,9 @@ if(BUILD_TESTING)
 		memory_tracker_tests
 		page_manager_tests
 		bit_array_tests
+		publication_batch_tests
+		pending_completions_tests
+		avplayer_clock_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		resource_tracking_tests
