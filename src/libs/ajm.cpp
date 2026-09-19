@@ -880,6 +880,7 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, const AjmBatchInfo* info, int 
 
 int KYTY_SYSV_ABI AjmBatchWait(uint32_t context, uint32_t batch, uint32_t timeout,
                                AjmBatchError* error) {
+	PRINT_NAME();
 	(void)context;
 	std::unique_lock lock(g_ajm_batches_mutex);
 	const auto ready = [&] { return g_ajm_batches.find(batch) != g_ajm_batches.end(); };

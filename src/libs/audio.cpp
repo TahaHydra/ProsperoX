@@ -1034,6 +1034,7 @@ int KYTY_SYSV_ABI AcmBatchStartBuffers(AcmContextId context, uint32_t batch_info
 }
 
 int KYTY_SYSV_ABI AcmBatchWait(AcmContextId context, AcmBatchId batch, uint32_t timeout) {
+	PRINT_NAME();
 	return OK;
 }
 

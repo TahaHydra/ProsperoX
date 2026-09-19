@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,13 @@ public:
 	void RecordVideoPresented(int buffer_index, uint64_t now_us);
 
 	void RecordShaderPhase(const char* stage, uint64_t shader_hash, const char* phase, uint64_t now_us);
+
+	// Guest thread lifecycle. A thread that is silent is only evidence once it
+	// is known to still exist: without this a stalled main thread and an exited
+	// one look identical in the report.
+	void RecordGuestThreadStart(uint32_t thread_id, const char* name, uint64_t entry_address,
+	                            uint64_t now_us);
+	void RecordGuestThreadExit(uint32_t thread_id, uint64_t now_us);
 
 	[[nodiscard]] std::string BuildReport(uint64_t now_us) const;
 	[[nodiscard]] size_t RecentEventCount() const;
@@ -59,6 +67,24 @@ private:
 		bool valid = false;
 	};
 
+	// Per-thread view of the HLE boundary. The active call answers "what is
+	// this thread blocked in"; the last completed one answers "when did this
+	// thread last cross into the emulator at all", which is what distinguishes
+	// a thread waiting inside a traced call from one that has gone quiet
+	// somewhere the trace cannot see.
+	struct ThreadActivity {
+		std::string  guest_name;
+		uint64_t     entry_address = 0;
+		bool         started       = false;
+		bool         exited        = false;
+		uint64_t     started_us    = 0;
+		uint64_t     exited_us     = 0;
+		uint64_t     calls         = 0;
+		std::string  last_call;
+		uint64_t     last_exit_us  = 0;
+		HleCallToken active_token  = 0;
+	};
+
 	struct LastShaderPhase {
 		std::string stage;
 		uint64_t hash = 0;
@@ -74,6 +100,7 @@ private:
 	size_t m_recent_capacity = 0;
 	HleCallToken m_next_hle_token = 1;
 	std::unordered_map<HleCallToken, HleCall> m_active_hle;
+	std::map<uint32_t, ThreadActivity> m_threads;
 	std::deque<std::string> m_recent_events;
 
 	uint64_t m_gpu_dispatches = 0;

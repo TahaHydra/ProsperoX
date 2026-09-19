@@ -39,6 +39,27 @@ int Run() {
                       active.find("54904fb419d79e49") != std::string::npos,
                   "runtime diagnostics reports current shader phase");
 
+    // A thread inside a call is attributable even while it is silent, and one
+    // that has left a call is distinguishable from one that never made any:
+    // that difference is what tells a stalled guest thread from an exited one.
+    Phase1::Check(active.find("state=in_hle") != std::string::npos &&
+                      active.find("call=libkernel::libkernel::KernelEqueueWait") !=
+                          std::string::npos,
+                  "runtime diagnostics attributes the active call to its thread");
+
+    state.RecordGuestThreadStart(17, "MainThread", 0x0000000800100000ull, 900'000);
+    state.RecordGuestThreadStart(18, "Worker", 0x0000000800200000ull, 950'000);
+    const auto named = state.BuildReport(3'500'000);
+    Phase1::Check(named.find("name=MainThread") != std::string::npos &&
+                      named.find("entry=0x800200000") != std::string::npos &&
+                      named.find("state=running") != std::string::npos,
+                  "runtime diagnostics reports guest thread identity");
+
+    state.RecordGuestThreadExit(18, 3'000'000);
+    const auto exited = state.BuildReport(3'500'000);
+    Phase1::Check(exited.find("state=exited") != std::string::npos,
+                  "runtime diagnostics distinguishes an exited guest thread");
+
     state.ExitHle(call, 3'600'000);
     const auto completed = state.BuildReport(3'700'000);
     Phase1::Check(completed.find("active_hle=0") != std::string::npos,
@@ -46,6 +67,11 @@ int Run() {
     Phase1::Check(completed.find("EXIT libkernel::libkernel::KernelEqueueWait") !=
                       std::string::npos,
                   "runtime diagnostics retains recent HLE exit event");
+    // A thread outside any HLE call is executing guest code the trace cannot
+    // follow, so how long it has been there is the evidence that matters.
+    Phase1::Check(completed.find("state=guest") != std::string::npos &&
+                      completed.find("silent_ms=100") != std::string::npos,
+                  "runtime diagnostics reports how long a thread has been in guest code");
 
     State bounded(3);
     for (uint64_t i = 0; i < 4; ++i) {

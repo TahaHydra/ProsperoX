@@ -265,6 +265,7 @@ int KYTY_SYSV_ABI KernelDeleteSema(KernelSema sem) {
 }
 
 int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
+	PRINT_NAME();
 	auto object = g_kernel_semas.Acquire(sem);
 	if (object == nullptr) {
 		return KERNEL_ERROR_ESRCH;
@@ -309,6 +310,7 @@ int KYTY_SYSV_ABI KernelPollSema(KernelSema sem, int need) {
 }
 
 int KYTY_SYSV_ABI KernelSignalSema(KernelSema sem, int count) {
+	PRINT_NAME();
 	auto object = g_kernel_semas.Acquire(sem);
 	if (object == nullptr) {
 		return KERNEL_ERROR_ESRCH;
@@ -606,11 +608,13 @@ int KYTY_SYSV_ABI sem_destroy(void* sem) {
 }
 
 int KYTY_SYSV_ABI sem_wait(void* sem) {
+	PRINT_NAME();
 	const int result = SemTimedwaitImpl(sem, nullptr);
 	return (result == OK ? 0 : SetErrnoReturn(result));
 }
 
 int KYTY_SYSV_ABI sem_trywait(void* sem) {
+	PRINT_NAME();
 	auto* obj = GetSem(sem);
 	if (obj == nullptr) {
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -621,11 +625,13 @@ int KYTY_SYSV_ABI sem_trywait(void* sem) {
 }
 
 int KYTY_SYSV_ABI sem_reltimedwait_np(void* sem, uint32_t usec) {
+	PRINT_NAME();
 	const int result = SemTimedwaitImpl(sem, &usec);
 	return (result == OK ? 0 : SetErrnoReturn(result));
 }
 
 int KYTY_SYSV_ABI sem_timedwait(void* sem, const LibKernel::KernelTimespec* abstime) {
+	PRINT_NAME();
 	uint32_t micros = 0;
 	if (!AbsTimespecToMicros(abstime, &micros)) {
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -636,6 +642,7 @@ int KYTY_SYSV_ABI sem_timedwait(void* sem, const LibKernel::KernelTimespec* abst
 }
 
 int KYTY_SYSV_ABI sem_post(void* sem) {
+	PRINT_NAME();
 	auto* obj = GetSem(sem);
 	if (obj == nullptr) {
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -646,6 +653,7 @@ int KYTY_SYSV_ABI sem_post(void* sem) {
 }
 
 int KYTY_SYSV_ABI sem_getvalue(void* sem, int* value) {
+	PRINT_NAME();
 	auto* obj = GetSem(sem);
 	if (obj == nullptr || value == nullptr) {
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -679,11 +687,13 @@ int KYTY_SYSV_ABI PthreadSemDestroy(void* sem) {
 }
 
 int KYTY_SYSV_ABI PthreadSemWait(void* sem) {
+	PRINT_NAME();
 	const int result = Posix::SemTimedwaitImpl(sem, nullptr);
 	return (result == OK ? OK : Posix::PosixToKernel(result));
 }
 
 int KYTY_SYSV_ABI PthreadSemTrywait(void* sem) {
+	PRINT_NAME();
 	auto* obj = Posix::GetSem(sem);
 	if (obj == nullptr) {
 		return KERNEL_ERROR_EINVAL;
@@ -694,12 +704,14 @@ int KYTY_SYSV_ABI PthreadSemTrywait(void* sem) {
 }
 
 int KYTY_SYSV_ABI PthreadSemTimedwait(void* sem, KernelUseconds usec) {
+	PRINT_NAME();
 	uint32_t  micros = usec;
 	const int result = Posix::SemTimedwaitImpl(sem, &micros);
 	return (result == OK ? OK : Posix::PosixToKernel(result));
 }
 
 int KYTY_SYSV_ABI PthreadSemPost(void* sem) {
+	PRINT_NAME();
 	auto* obj = Posix::GetSem(sem);
 	if (obj == nullptr) {
 		return KERNEL_ERROR_EINVAL;
@@ -710,6 +722,7 @@ int KYTY_SYSV_ABI PthreadSemPost(void* sem) {
 }
 
 int KYTY_SYSV_ABI PthreadSemGetvalue(void* sem, int* value) {
+	PRINT_NAME();
 	auto* obj = Posix::GetSem(sem);
 	if (obj == nullptr || value == nullptr) {
 		return KERNEL_ERROR_EINVAL;

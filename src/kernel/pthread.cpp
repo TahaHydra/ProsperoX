@@ -1088,6 +1088,14 @@ void PthreadInitSelfForMainThread() {
 	os_thread_id = GetHostThreadId();
 #endif
 	g_pthread_self->host_thread_id = os_thread_id;
+
+	// The initial guest thread does not go through RunThread, so register it
+	// here: it is the one whose silence matters most in a stall report.
+	if (RuntimeDiagnostics::Enabled()) {
+		RuntimeDiagnostics::GlobalState().RecordGuestThreadStart(
+		    static_cast<uint32_t>(g_pthread_self->unique_id), g_pthread_self->name.c_str(), 0,
+		    RuntimeDiagnostics::NowUs());
+	}
 	g_pthread_main                 = g_pthread_self;
 
 	LOGF("\tPthread main self: id = %d, os_thread_id = %" PRIu64 ", stack_addr = 0x%016" PRIx64
@@ -3381,6 +3389,11 @@ static void CleanupThread(void* arg) {
 	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
 	rt->DeleteTlss(thread->unique_id);
 
+	if (RuntimeDiagnostics::Enabled()) {
+		RuntimeDiagnostics::GlobalState().RecordGuestThreadExit(
+		    static_cast<uint32_t>(thread->unique_id), RuntimeDiagnostics::NowUs());
+	}
+
 	thread->almost_done = true;
 }
 
@@ -3413,6 +3426,12 @@ static void* RunThread(void* arg) {
 	     reinterpret_cast<uint64_t>(thread->entry), reinterpret_cast<uint64_t>(thread->arg),
 	     reinterpret_cast<uint64_t>(thread->attr->stack_addr),
 	     static_cast<uint64_t>(thread->attr->stack_size));
+
+	if (RuntimeDiagnostics::Enabled()) {
+		RuntimeDiagnostics::GlobalState().RecordGuestThreadStart(
+		    static_cast<uint32_t>(thread->unique_id), thread->name.c_str(),
+		    reinterpret_cast<uint64_t>(thread->entry), RuntimeDiagnostics::NowUs());
+	}
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
 	pthread_cleanup_push(CleanupThread, thread);

@@ -80,10 +80,42 @@ HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char
 	const auto name = HleName(call);
 	m_active_hle.emplace(token, std::move(call));
 
+	auto& thread = m_threads[thread_id];
+	thread.calls++;
+	thread.last_call    = name;
+	thread.active_token = token;
+
 	std::ostringstream event;
 	event << "ENTER " << name << " tid=" << thread_id;
 	PushRecentLocked(event.str());
 	return token;
+}
+
+void State::RecordGuestThreadStart(uint32_t thread_id, const char* name, uint64_t entry_address,
+                                   uint64_t now_us) {
+	std::lock_guard lock(m_mutex);
+	auto& thread         = m_threads[thread_id];
+	thread.guest_name    = Safe(name);
+	thread.entry_address = entry_address;
+	thread.started       = true;
+	thread.exited        = false;
+	thread.started_us    = now_us;
+
+	std::ostringstream event;
+	event << "THREAD_START tid=" << thread_id << " name=" << Safe(name) << " entry=0x" << std::hex
+	      << entry_address << std::dec;
+	PushRecentLocked(event.str());
+}
+
+void State::RecordGuestThreadExit(uint32_t thread_id, uint64_t now_us) {
+	std::lock_guard lock(m_mutex);
+	auto& thread     = m_threads[thread_id];
+	thread.exited    = true;
+	thread.exited_us = now_us;
+
+	std::ostringstream event;
+	event << "THREAD_EXIT tid=" << thread_id;
+	PushRecentLocked(event.str());
 }
 
 void State::ExitHle(HleCallToken token, uint64_t now_us) {
@@ -98,6 +130,13 @@ void State::ExitHle(HleCallToken token, uint64_t now_us) {
 	event << "EXIT " << HleName(it->second) << " tid=" << it->second.thread_id
 	      << " duration_ms=" << AgeMs(now_us, it->second.entered_us);
 	PushRecentLocked(event.str());
+
+	auto& thread = m_threads[it->second.thread_id];
+	thread.last_call     = HleName(it->second);
+	thread.last_exit_us  = now_us;
+	if (thread.active_token == token) {
+		thread.active_token = 0;
+	}
 	m_active_hle.erase(it);
 }
 
@@ -164,6 +203,41 @@ std::string State::BuildReport(uint64_t now_us) const {
 	for (const auto& [token, call]: m_active_hle) {
 		out << "  token=" << token << " tid=" << call.thread_id << " " << HleName(call)
 		    << " active_ms=" << AgeMs(now_us, call.entered_us) << '\n';
+	}
+
+	// One line per guest thread the emulator has ever seen crossing the HLE
+	// boundary. A stall shows up here directly: either the thread is inside a
+	// call and `active_ms` keeps growing, or it is outside one and `silent_ms`
+	// does, which says the thread is somewhere the HLE trace cannot follow.
+	out << "threads=" << m_threads.size() << '\n';
+	for (const auto& [tid, thread]: m_threads) {
+		out << "  tid=" << tid;
+		if (!thread.guest_name.empty()) {
+			out << " name=" << thread.guest_name;
+		}
+		if (thread.entry_address != 0) {
+			out << " entry=0x" << std::hex << thread.entry_address << std::dec;
+		}
+		out << " calls=" << thread.calls;
+		if (thread.exited) {
+			out << " state=exited exited_ms_ago=" << AgeMs(now_us, thread.exited_us);
+		} else if (thread.active_token != 0) {
+			const auto active = m_active_hle.find(thread.active_token);
+			if (active != m_active_hle.end()) {
+				out << " state=in_hle call=" << HleName(active->second)
+				    << " active_ms=" << AgeMs(now_us, active->second.entered_us);
+			} else {
+				out << " state=in_hle call=" << thread.last_call;
+			}
+		} else if (thread.last_exit_us != 0) {
+			out << " state=guest last_call=" << thread.last_call
+			    << " silent_ms=" << AgeMs(now_us, thread.last_exit_us);
+		} else if (thread.started) {
+			out << " state=running started_ms_ago=" << AgeMs(now_us, thread.started_us);
+		} else {
+			out << " state=unknown";
+		}
+		out << '\n';
 	}
 
 	out << "recent_hle=" << m_recent_events.size() << '\n';

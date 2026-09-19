@@ -2096,12 +2096,14 @@ static void LogExperimentalSyncOnAddress(std::atomic_bool& logged, const char* f
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait(volatile uint32_t* address, uint32_t expected,
                                           const uint32_t* timeout_micros) {
+	PRINT_NAME();
 	return LibKernel::SyncOnAddress::Wait32(address, expected, timeout_micros,
 	                                        LibKernel::KernelDispatchPendingSignalForCurrentThread);
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait32(volatile uint32_t* address, uint32_t expected,
                                             const uint32_t* timeout_micros) {
+	PRINT_NAME();
 	static std::atomic_bool logged {false};
 	LogExperimentalSyncOnAddress(logged, "sceKernelSyncOnAddressWait32");
 	return LibKernel::SyncOnAddress::Wait32(address, expected, timeout_micros,
@@ -2110,6 +2112,7 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWait32(volatile uint32_t* address, uint32_t
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait64(volatile uint64_t* address, uint64_t expected,
                                             const uint32_t* timeout_micros) {
+	PRINT_NAME();
 	static std::atomic_bool logged {false};
 	LogExperimentalSyncOnAddress(logged, "sceKernelSyncOnAddressWait64");
 	return LibKernel::SyncOnAddress::Wait64(address, expected, timeout_micros,
@@ -2117,6 +2120,7 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWait64(volatile uint64_t* address, uint64_t
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWake(volatile void* address, int32_t count) {
+	PRINT_NAME();
 	return LibKernel::SyncOnAddress::Wake(address, count);
 }
 

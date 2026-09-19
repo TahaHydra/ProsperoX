@@ -2399,6 +2399,7 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 }
 
 int KYTY_SYSV_ABI KernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags) {
+	PRINT_NAME();
 	return KernelMapNamedFlexibleMemory(addr_in_out, len, prot, flags, "");
 }
 
@@ -3937,6 +3938,7 @@ int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
 
 int KYTY_SYSV_ABI KernelBatchMap(KernelBatchMapEntry* entries, int num_entries,
                                  int* num_entries_out) {
+	PRINT_NAME();
 	constexpr int GUEST_MAP_FIXED = 0x10;
 	return KernelBatchMap2(entries, num_entries, num_entries_out, GUEST_MAP_FIXED);
 }
