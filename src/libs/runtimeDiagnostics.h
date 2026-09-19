@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 #include <unordered_map>
 
 namespace Libs::RuntimeDiagnostics {
@@ -40,6 +41,14 @@ public:
 
 	[[nodiscard]] std::string BuildReport(uint64_t now_us) const;
 	[[nodiscard]] size_t RecentEventCount() const;
+
+	// Full, bounded capture of the HLE boundary. The recent-event ring is a
+	// window, and a poll loop rolls it over in under a second -- the events
+	// that explain how a title reached its loop are gone before anyone looks.
+	// Opt in with PROSPEROX_RUNTIME_DIAG_TRACE=<count>; capture stops at the
+	// cap rather than growing without bound.
+	void SetTraceLimit(size_t limit);
+	[[nodiscard]] std::vector<std::string> TakeTracedEvents();
 
 private:
 	struct HleCall {
@@ -96,7 +105,11 @@ private:
 		bool valid = false;
 	};
 
-	void PushRecentLocked(std::string event);
+	// `key` identifies a run of equivalent events. Consecutive events sharing a
+	// key are counted rather than stored, so one loop cannot evict the history
+	// that led to it. An empty key never collapses.
+	void PushRecentLocked(std::string key, std::string event);
+	void PushLineLocked(std::string event);
 	static std::string HleName(const HleCall& call);
 
 	mutable std::mutex m_mutex;
@@ -105,6 +118,10 @@ private:
 	std::unordered_map<HleCallToken, HleCall> m_active_hle;
 	std::map<uint32_t, ThreadActivity> m_threads;
 	std::deque<std::string> m_recent_events;
+	std::string             m_recent_repeat_key;
+	uint64_t                m_recent_repeat_count = 0;
+	std::vector<std::string> m_trace;
+	size_t                   m_trace_limit = 0;
 
 	uint64_t m_gpu_dispatches = 0;
 	uint64_t m_gpu_draws = 0;

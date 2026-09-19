@@ -79,6 +79,33 @@ int Run() {
                       completed.find("caller=0x800123456") != std::string::npos,
                   "runtime diagnostics reports how long a thread has been in guest code");
 
+    // A repeating call must not evict the history that led to it.
+    State looping(8);
+    const auto anchor = looping.EnterHle(9, "libkernel", "libkernel", "KernelBatchMap2", 0, 10);
+    looping.ExitHle(anchor, 20);
+    for (uint64_t i = 0; i < 500; ++i) {
+        const auto spin = looping.EnterHle(9, "libkernel", "libkernel", "KernelUsleep", 0, 30 + i);
+        looping.ExitHle(spin, 31 + i);
+    }
+    const auto looped = looping.BuildReport(1'000);
+    Phase1::Check(looped.find("KernelBatchMap2") != std::string::npos,
+                  "a poll loop does not evict the events that preceded it");
+    Phase1::Check(looped.find("more of the same") != std::string::npos,
+                  "a poll loop is collapsed into a count");
+    Phase1::Check(looping.RecentEventCount() <= 8, "collapsing respects the ring bound");
+
+    // Tracing is off unless asked for, is capped when it is, and records the
+    // same collapsed stream the ring shows rather than every loop iteration.
+    Phase1::Check(looping.TakeTracedEvents().empty(), "tracing is off by default");
+    State traced(4);
+    traced.SetTraceLimit(3);
+    for (uint64_t i = 0; i < 20; ++i) {
+        const auto name = "F" + std::to_string(i);
+        traced.ExitHle(traced.EnterHle(1, "L", "M", name.c_str(), 0, i), i + 1);
+    }
+    Phase1::Check(traced.TakeTracedEvents().size() == 3, "tracing stops at its cap");
+    Phase1::Check(traced.TakeTracedEvents().empty(), "taking the trace drains it");
+
     State bounded(3);
     for (uint64_t i = 0; i < 4; ++i) {
         const auto token = bounded.EnterHle(static_cast<uint32_t>(i + 1), "L", "M", "F", 0,

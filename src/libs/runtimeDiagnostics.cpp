@@ -10,6 +10,7 @@
 #include <sstream>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace Libs::RuntimeDiagnostics {
 
@@ -50,6 +51,22 @@ bool EnvEnabled(const char* name) {
 	return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
 }
 
+// Appends whatever the trace buffer has accumulated since the last snapshot,
+// so a capture that ends in a crash or a kill still has everything up to it.
+void AppendTrace() {
+	auto events = GlobalState().TakeTracedEvents();
+	if (events.empty()) {
+		return;
+	}
+	std::ofstream output("_RuntimeTrace.txt", std::ios::out | std::ios::app);
+	if (!output.is_open()) {
+		return;
+	}
+	for (const auto& event: events) {
+		output << event << '\n';
+	}
+}
+
 void AppendSnapshot(uint64_t sequence) {
 	std::ofstream output("_RuntimeDiag.txt", std::ios::out | std::ios::app);
 	if (!output.is_open()) {
@@ -66,6 +83,7 @@ void AppendSnapshot(uint64_t sequence) {
 		output << "GPU_STATS_LAST none\n";
 	}
 	output << "============================================================\n";
+	AppendTrace();
 }
 
 } // namespace
@@ -76,7 +94,10 @@ std::string State::HleName(const HleCall& call) {
 	return call.library + "::" + call.module + "::" + call.function;
 }
 
-void State::PushRecentLocked(std::string event) {
+void State::PushLineLocked(std::string event) {
+	if (m_trace.size() < m_trace_limit) {
+		m_trace.push_back(event);
+	}
 	if (m_recent_capacity == 0) {
 		return;
 	}
@@ -84,6 +105,34 @@ void State::PushRecentLocked(std::string event) {
 		m_recent_events.pop_front();
 	}
 	m_recent_events.push_back(std::move(event));
+}
+
+void State::PushRecentLocked(std::string key, std::string event) {
+	// A title that polls -- Ghost of Yotei sits in sceKernelUsleep about 640
+	// times a second -- fills a 128-entry ring in a fifth of a second, so
+	// without this the ring answers "what is it doing now", which the thread
+	// list already says, and destroys the only record of how it got there.
+	if (!key.empty() && key == m_recent_repeat_key) {
+		++m_recent_repeat_count;
+		return;
+	}
+	if (m_recent_repeat_count > 1) {
+		PushLineLocked("... and " + std::to_string(m_recent_repeat_count - 1) +
+		               " more of the same");
+	}
+	m_recent_repeat_key   = std::move(key);
+	m_recent_repeat_count = 1;
+	PushLineLocked(std::move(event));
+}
+
+void State::SetTraceLimit(size_t limit) {
+	std::lock_guard lock(m_mutex);
+	m_trace_limit = limit;
+}
+
+std::vector<std::string> State::TakeTracedEvents() {
+	std::lock_guard lock(m_mutex);
+	return std::exchange(m_trace, {});
 }
 
 HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char* module, const char* function,
@@ -108,7 +157,7 @@ HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char
 
 	std::ostringstream event;
 	event << "ENTER " << name << " tid=" << thread_id;
-	PushRecentLocked(event.str());
+	PushRecentLocked(std::to_string(thread_id) + "|" + name, event.str());
 	return token;
 }
 
@@ -126,7 +175,7 @@ void State::RecordGuestThreadStart(uint32_t thread_id, const char* name, uint64_
 	std::ostringstream event;
 	event << "THREAD_START tid=" << thread_id << " name=" << Safe(name) << " entry=0x" << std::hex
 	      << entry_address << std::dec << " host_tid=" << host_thread_id;
-	PushRecentLocked(event.str());
+	PushRecentLocked({}, event.str());
 }
 
 void State::RecordGuestThreadExit(uint32_t thread_id, uint64_t now_us) {
@@ -137,7 +186,7 @@ void State::RecordGuestThreadExit(uint32_t thread_id, uint64_t now_us) {
 
 	std::ostringstream event;
 	event << "THREAD_EXIT tid=" << thread_id;
-	PushRecentLocked(event.str());
+	PushRecentLocked({}, event.str());
 }
 
 void State::ExitHle(HleCallToken token, uint64_t now_us) {
@@ -151,7 +200,8 @@ void State::ExitHle(HleCallToken token, uint64_t now_us) {
 	std::ostringstream event;
 	event << "EXIT " << HleName(it->second) << " tid=" << it->second.thread_id
 	      << " duration_ms=" << AgeMs(now_us, it->second.entered_us);
-	PushRecentLocked(event.str());
+	PushRecentLocked(std::to_string(it->second.thread_id) + "|" + HleName(it->second),
+	                 event.str());
 
 	auto& thread = m_threads[it->second.thread_id];
 	thread.last_call     = HleName(it->second);
@@ -276,6 +326,9 @@ std::string State::BuildReport(uint64_t now_us) const {
 	for (const auto& event: m_recent_events) {
 		out << "  " << event << '\n';
 	}
+	if (m_recent_repeat_count > 1) {
+		out << "  ... and " << (m_recent_repeat_count - 1) << " more of the same\n";
+	}
 
 	out << "GPU dispatches=" << m_gpu_dispatches << " draws=" << m_gpu_draws << '\n';
 	if (m_last_dispatch.valid) {
@@ -336,6 +389,14 @@ void Initialize() {
 		}
 
 		(void)GlobalState();
+		// A full trace is opt-in and capped: PROSPEROX_RUNTIME_DIAG_TRACE=1
+		// takes the default budget, or give it a count.
+		if (const auto* trace = std::getenv("PROSPEROX_RUNTIME_DIAG_TRACE");
+		    trace != nullptr && trace[0] != '\0' && !(trace[0] == '0' && trace[1] == '\0')) {
+			const auto requested = std::strtoull(trace, nullptr, 10);
+			GlobalState().SetTraceLimit(requested > 1 ? static_cast<size_t>(requested) : 200000);
+			std::ofstream reset("_RuntimeTrace.txt", std::ios::out | std::ios::trunc);
+		}
 		{
 			std::ofstream output("_RuntimeDiag.txt", std::ios::out | std::ios::trunc);
 			if (output.is_open()) {
