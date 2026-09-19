@@ -95,12 +95,15 @@ const SymbolRecord* SymbolDatabase::FindExactOrCompatible(const std::string& qua
 		return FindExact(candidate);
 	};
 
-	// PS5 AGC exports are seen under both Agc and Graphics5 identities.
-	if (const auto* rec = try_alias("[Agc_v1][Agc_v1.1]",
-	                                "[Graphics5_v1][Graphics5_v1.1]", nullptr);
-	    rec != nullptr) {
-		return rec;
-	}
+	// There is deliberately no blanket Agc -> Graphics5 library alias here.
+	// The AGC entries that are reachable under the Agc identity are the
+	// reviewed ones registered by the AgcQualified block in libAgcDriver.cpp,
+	// which resolve exactly and need no alias. A blanket alias would instead
+	// expose all 140 Graphics5 exports under Agc, including shader-fusion
+	// entries whose behaviour under that identity has never been reviewed --
+	// exactly what tests/Phase6AgcTests.inc forbids. Widening AGC coverage
+	// means adding a reviewed entry to AgcQualified, or an exact NID alias
+	// below; it does not mean re-adding this.
 
 	// Json2 constructor observed with the Json module identity.
 	if (const auto* rec = try_alias("[Json2_v1][Json_v1.1]",

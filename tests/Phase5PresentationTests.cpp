@@ -22,6 +22,22 @@ static void Check(bool ok, const char* what) {
   if (!ok) { std::fprintf(stderr, "PHASE5_PRESENT_FAIL %s\n", what); std::abort(); }
 }
 
+// Environment preconditions, as opposed to assertions about behaviour. Aborting
+// on these reports STATUS_STACK_BUFFER_OVERRUN (0xc0000409), which reads like
+// memory corruption and sends whoever sees it looking for a defect that is not
+// there. Report them the way the rest of the suite reports a capability the
+// machine does not have, so scripts/phase0/run.py classifies them as
+// unavailable rather than failed. This is not a pass: the check did not run.
+[[noreturn]] static void Unavailable(const char* what) {
+  std::printf("PHASE0_UNAVAILABLE %s\n", what);
+  std::fflush(stdout);
+  std::exit(77);
+}
+
+static void Require(bool ok, const char* what) {
+  if (!ok) { Unavailable(what); }
+}
+
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   const unsigned seconds = argc == 2 ? static_cast<unsigned>(std::strtoul(argv[1], nullptr, 10)) : 10;
@@ -46,8 +62,11 @@ int main(int argc, char** argv) {
     window.CreateVulkan();
     auto& graphics = window.graphic_ctx;
     const auto properties = graphics.GetPhysicalDeviceProperties();
-    Check(properties.vendorID == 0x1002 && properties.deviceID == 0x747e, "requires real RX 7800 XT");
-    Check(graphics.debug_messenger != nullptr, "validation layer must be enabled");
+    Require(properties.vendorID == 0x1002 && properties.deviceID == 0x747e,
+            "this check requires a real RX 7800 XT");
+    Require(graphics.debug_messenger != nullptr,
+            "the Vulkan validation layer VK_LAYER_KHRONOS_validation is not installed; "
+            "install the Vulkan SDK or runtime so this check can run");
     std::printf("PHASE5_PRESENT_DEVICE name=%s vendor=%04x device=%04x driver=%u\n",
         properties.deviceName.data(), properties.vendorID, properties.deviceID, properties.driverVersion);
     auto& context = *window.render_context;

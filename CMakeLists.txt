@@ -473,6 +473,8 @@ target_include_directories(resource_tracking_tests PRIVATE ${inc_headers})
 add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AudioOut2PortTests.cpp"
 	"${KYTY_SOURCE_DIR}/libs/libAudio2.cpp"
+	"${KYTY_SOURCE_DIR}/libs/runtimeDiagnostics.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/gpuStats.cpp"
 	"${KYTY_SOURCE_DIR}/loader/timer.cpp"
 )
 target_link_libraries(audio_out2_port_tests common fmt::fmt)
@@ -481,6 +483,8 @@ target_include_directories(audio_out2_port_tests PRIVATE ${inc_headers})
 add_executable(event_queue_lifetime_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/EventQueueLifetimeTests.cpp"
 	"${KYTY_SOURCE_DIR}/kernel/eventQueue.cpp"
+	"${KYTY_SOURCE_DIR}/libs/runtimeDiagnostics.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/gpuStats.cpp"
 	"${KYTY_SOURCE_DIR}/loader/timer.cpp"
 )
 target_link_libraries(event_queue_lifetime_tests common fmt::fmt)

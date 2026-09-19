@@ -6,11 +6,18 @@ set(phase0_gpu_tests
     shader_recompiler_compute shader_recompiler_alignbyte command_scheduler_timeline
     stream_buffer_ring gpu_command_lane gpu_tiler texture_cache_layered_image
     texture_cache_image_views texture_cache_storage_sampled texture_cache_depth_readback
-    buffer_cache_dirty_gc pm4_context_state compute_meta_clear_classification phase0_wave_mask phase0_eop_visibility)
+    buffer_cache_dirty_gc pm4_context_state compute_meta_clear_classification phase0_wave_mask phase0_eop_visibility
+    phase5_presentation phase5_image_cpu_readback phase5_private_buffer_upload phase5_dcc_slice_range)
 if(WIN32)
     list(APPEND phase0_gpu_tests texture_cache_image_overlap texture_cache_htile_clear buffer_cache_ranges)
 endif()
 set_tests_properties(${phase0_gpu_tests} PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
+# A device that lacks a capability is not a correctness failure and must not be
+# reported as one. Exit code 77 with a PHASE0_UNAVAILABLE line is how a check
+# says it could not run; scripts/phase0/run.py already classifies that as
+# "unavailable", and this makes a bare ctest run agree with it instead of
+# burying a real regression among capability gaps.
+set_tests_properties(${phase0_gpu_tests} PROPERTIES SKIP_RETURN_CODE 77)
 set_tests_properties(shader_recompiler_compute shader_recompiler_alignbyte phase0_wave_mask
     PROPERTIES LABELS "gpu;spirv")
 set_tests_properties(phase0_spirv_validation PROPERTIES LABELS "host;spirv")
