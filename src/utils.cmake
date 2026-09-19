@@ -87,6 +87,8 @@ else()
 endif()
 
 if(KYTY_CLANG_CL)
+	add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/EHsc>")
+
 	if(CMAKE_CXX_FLAGS MATCHES "/W[0-4]")
 		string(REGEX REPLACE "/W[0-4]" "/W3" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 	else()

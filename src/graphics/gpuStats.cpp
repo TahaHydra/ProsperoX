@@ -142,11 +142,9 @@ void Report() noexcept {
 	    millis(time(Timer::FlipWait)), per_second(count(Counter::GpuThreadWakeups)),
 	    per_second(count(Counter::GpuThreadTimeouts)));
 
-	try {
+	{
 		std::lock_guard lock(g_report_mutex);
 		g_latest_report = line;
-	} catch (...) {
-		// Diagnostics must never turn telemetry allocation failure into an emulator failure.
 	}
 
 	LOGF("%s", line);
