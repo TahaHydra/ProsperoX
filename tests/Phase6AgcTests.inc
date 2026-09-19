@@ -57,6 +57,31 @@ int Run(const char* mode) {
     key.module_version_minor=1; key.module="Unrelated"; Check(!symbols.Find(key),"AGC NID never resolves through unrelated modules");
     key.module="Agc"; key.name="dolOmWH+huQ";
     Check(!symbols.Find(key),"unreviewed Graphics5 shader-fusion exports are not blanket-aliased");
+    // A reviewed Agc-qualified entry resolves, and resolves to the very same
+    // implementation the Graphics5 identity exposes: the entry is one
+    // registration of one function, never a second implementation that could
+    // drift. Bendy (PPSA27624) imports the interpolant mapping this way.
+    key.name="dbOlWdppb4o";
+    const auto* interpolant_as_agc=symbols.Find(key);
+    Check(interpolant_as_agc!=nullptr,"reviewed Agc-qualified interpolant mapping resolves");
+    Loader::SymbolResolve interpolantGfx5{"dbOlWdppb4o","Graphics5",1,"Graphics5",1,1,
+                                          Loader::SymbolType::Func};
+    const auto* interpolant_as_gfx5=symbols.Find(interpolantGfx5);
+    Check(interpolant_as_gfx5!=nullptr &&
+              interpolant_as_gfx5->vaddr==interpolant_as_agc->vaddr,
+          "the Agc and Graphics5 identities name one implementation");
+    // Reviewing one entry must not widen the identity. Graphics5 exports that
+    // were never reviewed under Agc still have to fail, or the review gate is
+    // a blanket alias wearing a list.
+    for (const char* unreviewed: {"dolOmWH+huQ","fd5Bp5tGTgo","nApJjpKNBl4","NKIzURsgV7I",
+                                  "HV4j+E0MBHE","2BS4EtAaF28","s+VGAMDQ0AQ"}) {
+        key.name=unreviewed;
+        Check(!symbols.Find(key),"unreviewed Graphics5 exports stay unreachable as Agc");
+        Loader::SymbolResolve gfx5{unreviewed,"Graphics5",1,"Graphics5",1,1,
+                                   Loader::SymbolType::Func};
+        Check(symbols.Find(gfx5)!=nullptr,
+              "the unreviewed export exists under Graphics5, so the check is meaningful");
+    }
     key.name="23LRUSvYu1M"; key.module=key.library="Graphics5";
     Check(symbols.Find(key)!=nullptr,"existing Graphics5 identity is retained");
     key.name="BfBDZGbti7A"; key.module=key.library="Agc";

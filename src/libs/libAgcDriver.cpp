@@ -201,6 +201,13 @@ LIB_DEFINE(Init) {
 	LIB_FUNC("57labkp+rSQ", Graphics::Gen5::AgcDcbAcquireMem);
 	LIB_FUNC("f3dg2CSgRKY", Graphics::Gen5::AgcCreateShader);
 	LIB_FUNC("D9sr1xGUriE", Graphics::Gen5::AgcCreatePrimState);
+	// Reviewed: AgcCreateInterpolantMapping2 computes the SPI interpolant
+	// registers for a GS/PS pair from the two shaders' own semantic tables and
+	// writes nothing but regs[0..31]. It reads no global state, touches no
+	// command buffer and has no hardware side effect, so it behaves identically
+	// however it is qualified. Bendy (PPSA27624) imports it as
+	// dbOlWdppb4o[Agc_v1][Agc_v1.1].
+	LIB_FUNC("dbOlWdppb4o", Graphics::Gen5::AgcCreateInterpolantMapping2);
 	LIB_FUNC("ZvwO9euwYzc", Graphics::Gen5::AgcDcbSetCxRegistersIndirect);
 	LIB_FUNC("-HOOCn0JY48", Graphics::Gen5::AgcDcbSetShRegistersIndirect);
 	LIB_FUNC("hvUfkUIQcOE", Graphics::Gen5::AgcDcbSetUcRegistersIndirect);

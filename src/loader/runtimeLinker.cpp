@@ -270,6 +270,46 @@ static uint64_t AllocateUnresolvedImportThunk(uint64_t record_id) {
 	return reinterpret_cast<uint64_t>(code);
 }
 
+// Say, at link time, that an import will terminate the title, and say what the
+// emulator does know about the NID. An unresolved strong import only announces
+// itself when the guest first calls it, which can be minutes into a session and
+// gives nothing to act on beyond a NID; and when the NID is exported under a
+// different library/module identity, that is precisely the fact needed to
+// decide whether a reviewed qualified entry should exist. Printing it once per
+// distinct symbol as the program is linked turns a mid-session termination into
+// something visible before the title starts.
+static void ReportStubbedImport(const StubbedImportRecord& record, const SymbolDatabase* symbols) {
+	if (record.bind == BindType::Weak) {
+		return;
+	}
+	// record.name is the fully qualified name; FindAllByNid wants the bare NID.
+	const auto  bracket = record.name.find('[');
+	const auto  nid     = bracket == std::string::npos ? record.name : record.name.substr(0, bracket);
+	std::string candidates;
+	if (symbols != nullptr) {
+		for (const auto& candidate: symbols->FindAllByNid(nid, record.type)) {
+			if (candidate.name == record.name) {
+				continue;
+			}
+			candidates += candidates.empty() ? "" : ", ";
+			candidates += candidate.name;
+		}
+	}
+
+	if (candidates.empty()) {
+		LOGF_COLOR(Log::Color::Red,
+		           "BLOCKING_IMPORT symbol=%s program=%s relocation=%u: not implemented under any "
+		           "identity; the first call will terminate the title\n",
+		           record.name.c_str(), record.program.c_str(), record.index);
+		return;
+	}
+	LOGF_COLOR(Log::Color::Red,
+	           "BLOCKING_IMPORT symbol=%s program=%s relocation=%u: this NID is implemented under a "
+	           "different identity (%s). Resolving it means adding a reviewed qualified entry for "
+	           "the identity the title asked for, never a blanket library alias\n",
+	           record.name.c_str(), record.program.c_str(), record.index, candidates.c_str());
+}
+
 static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
                                       const RelocationInfo& ri) {
 	const auto program_name = program != nullptr ? Common::PathToString(program->file_name) : "";
@@ -296,6 +336,9 @@ static uint64_t RegisterStubbedImport(uint32_t index, const Program* program,
 	const auto record_id                     = g_stubbed_imports.size() - 1;
 	const auto thunk                         = AllocateUnresolvedImportThunk(record_id);
 	g_stubbed_imports[record_id].thunk_vaddr = thunk;
+	ReportStubbedImport(g_stubbed_imports[record_id],
+	                    program != nullptr && program->rt != nullptr ? program->rt->Symbols()
+	                                                                : nullptr);
 	return thunk;
 }
 

@@ -111,6 +111,8 @@ std::string SafeSymbolName(const DynamicInfo& info, const Elf64_Sym& symbol, boo
 	return std::string(begin, end);
 }
 
+bool IsBlocking(const ImportRecord& import);
+
 nlohmann::ordered_json ImportToJson(const ImportRecord& input) {
 	auto candidates = input.candidates;
 	std::sort(candidates.begin(), candidates.end());
@@ -122,6 +124,7 @@ nlohmann::ordered_json ImportToJson(const ImportRecord& input) {
 	value["symbol_type"]    = Common::EnumName(input.symbol_type);
 	value["weak"]           = input.weak;
 	value["status"]         = StatusName(input.status);
+	value["blocking"]       = IsBlocking(input);
 	value["resolved_name"]  = input.resolved_name;
 	value["candidates"]     = candidates;
 	value["references"]     = input.references;
@@ -135,6 +138,14 @@ nlohmann::ordered_json GameToJsonObject(const GameResult& input) {
 	value["title_id"]   = input.title_id;
 	value["title_name"] = input.title_name;
 	value["partial"]    = input.partial;
+
+	uint64_t blocking = 0;
+	for (const auto& import: input.imports) {
+		if (IsBlocking(import)) {
+			blocking++;
+		}
+	}
+	value["blocking_imports"] = blocking;
 
 	auto binaries = input.binaries;
 	std::sort(binaries.begin(), binaries.end(),
@@ -161,8 +172,25 @@ nlohmann::ordered_json GameToJsonObject(const GameResult& input) {
 	return value;
 }
 
+// An import the loader will not resolve and that the program cannot continue
+// without. AliasCandidate matters as much as MissingHle here: the name only
+// says the NID exists under some other qualification, which does nothing for a
+// program that asked for this one. If it is not weak, the loader stubs it and
+// the first call terminates with UNRESOLVED_STRONG_IMPORT.
+bool IsBlocking(const ImportRecord& import) {
+	if (import.weak) {
+		return false;
+	}
+	return import.status == Status::AliasCandidate || import.status == Status::MissingHle ||
+	       import.status == Status::Malformed;
+}
+
 void PrintImport(const ImportRecord& import, FILE* out) {
 	std::fprintf(out, "%s\n", import.qualified_name.c_str());
+	std::fprintf(out, "  binding: %s%s\n", import.weak ? "weak" : "strong",
+	             IsBlocking(import) ? " (BLOCKING: the loader will stub this and the first call "
+	                                  "terminates the title)"
+	                                : "");
 	if (!import.resolved_name.empty()) {
 		std::fprintf(out, "  resolved: %s\n", import.resolved_name.c_str());
 	}
@@ -601,6 +629,12 @@ void Print(const GameResult& result, FILE* out) {
 	for (const auto& import: result.imports) {
 		counts[static_cast<size_t>(import.status)]++;
 	}
+	uint64_t blocking = 0;
+	for (const auto& import: result.imports) {
+		if (IsBlocking(import)) {
+			blocking++;
+		}
+	}
 	std::fprintf(out,
 	             "GAME %s %s\n  binaries=%zu imports=%zu exact=%" PRIu64
 	             " compatible=%" PRIu64 " guest=%" PRIu64 " aliases=%" PRIu64
@@ -613,8 +647,21 @@ void Print(const GameResult& result, FILE* out) {
 	             counts[static_cast<size_t>(Status::MissingHle)],
 	             counts[static_cast<size_t>(Status::WeakUnresolved)],
 	             counts[static_cast<size_t>(Status::Malformed)]);
+	// The counts above answer "what did the auditor find"; this line answers
+	// "will the title run". They differ: a strong AliasCandidate is counted
+	// under aliases, reads like an advisory, and is a guaranteed runtime
+	// termination. Anyone reading one number should read this one.
+	std::fprintf(out, "  blocking=%" PRIu64 " (strong imports that will terminate the title)\n",
+	             blocking);
 
+	// Blocking imports first and unmistakably labelled, then the advisory rest.
 	for (const auto& import: result.imports) {
+		if (!IsBlocking(import)) continue;
+		std::fprintf(out, "\n[BLOCKING %s]\n", StatusName(import.status));
+		PrintImport(import, out);
+	}
+	for (const auto& import: result.imports) {
+		if (IsBlocking(import)) continue;
 		if (import.status != Status::AliasCandidate && import.status != Status::MissingHle) continue;
 		std::fprintf(out, "\n[%s]\n", StatusName(import.status));
 		PrintImport(import, out);
