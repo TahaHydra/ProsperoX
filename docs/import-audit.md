@@ -55,11 +55,16 @@ implementation and establishing that it behaves identically however it is
 qualified.
 
 Do not add a blanket library alias. One existed for `Agc -> Graphics5` and it
-exposed all 156 Graphics5 exports under the `Agc` identity, including entries
+exposed all 140 Graphics5 exports under the `Agc` identity, including entries
 whose behaviour there had never been looked at; `tests/Phase6AgcTests.inc`
-fails if it comes back. The reviewed list currently holds 80 of those 156, and
-76 remain unreachable under `Agc` — a new Graphics5 export is not exposed by
+fails if it comes back. The reviewed list currently holds 73 of those 140, and
+67 remain unreachable under `Agc` — a new Graphics5 export is not exposed by
 default, which is the whole difference between a list and an alias.
+
+Note that `libAgcDriver.cpp` registers four separate identities: `Graphics5`,
+`Graphics5Driver`, `Agc` and `AgcDriver`. A NID's presence in the file says
+nothing about which of them exposes it, so check the enclosing `LIB_VERSION`
+block before concluding anything about reachability.
 
 ## One game
 

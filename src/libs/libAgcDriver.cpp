@@ -217,8 +217,9 @@ LIB_DEFINE(Init) {
 	// the title used to reach it, so each behaves identically under Agc and
 	// under Graphics5 -- they are one function with two registrations.
 	//
-	// This is a list, not an alias. 76 Graphics5 exports remain unreachable
-	// under Agc, and a new Graphics5 export is not exposed here by default.
+	// This is a list, not an alias. Of the 140 Graphics5 exports, 73 are
+	// reachable under Agc and 67 are not, and a new Graphics5 export is not
+	// exposed here by default.
 	LIB_FUNC("KT-hTp-Ch14", Graphics::Gen5::AgcAcbAcquireMem);
 	LIB_FUNC("qzMN2XKGA4k", Graphics::Gen5::AgcAcbCopyData);
 	LIB_FUNC("j3EtxFkSIhQ", Graphics::Gen5::AgcAcbDispatchIndirect);

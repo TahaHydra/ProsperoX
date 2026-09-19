@@ -79,7 +79,7 @@ int Run(const char* mode) {
     // reachability under Agc requires an explicit registration, not that any
     // particular export stays out.
     for (const char* unreviewed: {"nApJjpKNBl4","NKIzURsgV7I","HV4j+E0MBHE","2BS4EtAaF28",
-                                  "s+VGAMDQ0AQ","+T8Xo6LtFJI","1DeUNpRIDDA"}) {
+                                  "s+VGAMDQ0AQ","3AyTaWcF-H8","1DeUNpRIDDA"}) {
         key.name=unreviewed;
         Check(!symbols.Find(key),"unreviewed Graphics5 exports stay unreachable as Agc");
         Loader::SymbolResolve gfx5{unreviewed,"Graphics5",1,"Graphics5",1,1,
