@@ -51,12 +51,13 @@ int Run() {
     Phase1::Check(active.find("caller=0x800123456") != std::string::npos,
                   "runtime diagnostics records the guest call site");
 
-    state.RecordGuestThreadStart(17, "MainThread", 0x0000000800100000ull, 900'000);
-    state.RecordGuestThreadStart(18, "Worker", 0x0000000800200000ull, 950'000);
+    state.RecordGuestThreadStart(17, "MainThread", 0x0000000800100000ull, 4242, 900'000);
+    state.RecordGuestThreadStart(18, "Worker", 0x0000000800200000ull, 4243, 950'000);
     const auto named = state.BuildReport(3'500'000);
     Phase1::Check(named.find("name=MainThread") != std::string::npos &&
                       named.find("entry=0x800200000") != std::string::npos &&
-                      named.find("state=running") != std::string::npos,
+                      named.find("state=running") != std::string::npos &&
+                      named.find("host_tid=4242") != std::string::npos,
                   "runtime diagnostics reports guest thread identity");
 
     state.RecordGuestThreadExit(18, 3'000'000);

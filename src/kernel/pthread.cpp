@@ -1094,7 +1094,7 @@ void PthreadInitSelfForMainThread() {
 	if (RuntimeDiagnostics::Enabled()) {
 		RuntimeDiagnostics::GlobalState().RecordGuestThreadStart(
 		    static_cast<uint32_t>(g_pthread_self->unique_id), g_pthread_self->name.c_str(), 0,
-		    RuntimeDiagnostics::NowUs());
+		    os_thread_id, RuntimeDiagnostics::NowUs());
 	}
 	g_pthread_main                 = g_pthread_self;
 
@@ -2457,6 +2457,7 @@ static int PthreadRwlockInitNamed(PthreadRwlock* rwlock, const PthreadRwlockattr
 
 int KYTY_SYSV_ABI PthreadRwlockInit(PthreadRwlock* rwlock, const PthreadRwlockattr* attr,
                                     const char* name) {
+	PRINT_NAME();
 	return PthreadRwlockInitNamed(rwlock, attr, name);
 }
 
@@ -2569,6 +2570,7 @@ static int RwlockLockCooperative(PthreadRwlock rwlock, bool write, KernelUsecond
 }
 
 int KYTY_SYSV_ABI PthreadRwlockRdlock(PthreadRwlock* rwlock) {
+	PRINT_NAME();
 	// Hot path for some PS5 titles; per-call name logging can dominate runtime.
 
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
@@ -3430,7 +3432,8 @@ static void* RunThread(void* arg) {
 	if (RuntimeDiagnostics::Enabled()) {
 		RuntimeDiagnostics::GlobalState().RecordGuestThreadStart(
 		    static_cast<uint32_t>(thread->unique_id), thread->name.c_str(),
-		    reinterpret_cast<uint64_t>(thread->entry), RuntimeDiagnostics::NowUs());
+		    reinterpret_cast<uint64_t>(thread->entry), os_thread_id,
+		    RuntimeDiagnostics::NowUs());
 	}
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
@@ -3825,6 +3828,7 @@ int KYTY_SYSV_ABI PthreadRename(Pthread thread, const char* name) {
 }
 
 void KYTY_SYSV_ABI PthreadYield() {
+	PRINT_NAME();
 	SchedulerBackoffOnce();
 }
 
@@ -4056,6 +4060,7 @@ void KYTY_SYSV_ABI KernelSetThreadDtors(thread_dtors_func_t dtors) {
 }
 
 int KYTY_SYSV_ABI KernelUsleep(KernelUseconds microseconds) {
+	PRINT_NAME();
 	Common::Timer t;
 	t.Start();
 	SleepMicroWithSignalPoll(microseconds);
@@ -4468,6 +4473,7 @@ int KYTY_SYSV_ABI pthread_cond_init(LibKernel::PthreadCond*           cond,
 }
 
 int KYTY_SYSV_ABI pthread_cond_destroy(LibKernel::PthreadCond* cond) {
+	PRINT_NAME();
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadCondDestroy(cond));
 }
 
@@ -4568,6 +4574,7 @@ int KYTY_SYSV_ABI pthread_rwlock_unlock(LibKernel::PthreadRwlock* rwlock) {
 }
 
 int KYTY_SYSV_ABI pthread_rwlock_wrlock(LibKernel::PthreadRwlock* rwlock) {
+	PRINT_NAME();
 	// Hot path for some PS5 titles; per-call name logging can dominate runtime.
 
 	return POSIX_PTHREAD_CALL(LibKernel::PthreadRwlockWrlock(rwlock));

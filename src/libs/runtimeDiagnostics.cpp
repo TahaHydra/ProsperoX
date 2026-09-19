@@ -113,18 +113,19 @@ HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char
 }
 
 void State::RecordGuestThreadStart(uint32_t thread_id, const char* name, uint64_t entry_address,
-                                   uint64_t now_us) {
+                                   uint64_t host_thread_id, uint64_t now_us) {
 	std::lock_guard lock(m_mutex);
-	auto& thread         = m_threads[thread_id];
-	thread.guest_name    = Safe(name);
-	thread.entry_address = entry_address;
+	auto& thread          = m_threads[thread_id];
+	thread.guest_name     = Safe(name);
+	thread.entry_address  = entry_address;
+	thread.host_thread_id = host_thread_id;
 	thread.started       = true;
 	thread.exited        = false;
 	thread.started_us    = now_us;
 
 	std::ostringstream event;
 	event << "THREAD_START tid=" << thread_id << " name=" << Safe(name) << " entry=0x" << std::hex
-	      << entry_address << std::dec;
+	      << entry_address << std::dec << " host_tid=" << host_thread_id;
 	PushRecentLocked(event.str());
 }
 
@@ -240,6 +241,12 @@ std::string State::BuildReport(uint64_t now_us) const {
 		}
 		if (thread.entry_address != 0) {
 			out << " entry=0x" << std::hex << thread.entry_address << std::dec;
+		}
+		// The host thread this guest thread runs on, so a thread that is silent
+		// because it is executing guest code -- which no HLE trace can follow --
+		// can still be found in an external profiler or debugger.
+		if (thread.host_thread_id != 0) {
+			out << " host_tid=" << thread.host_thread_id;
 		}
 		out << " calls=" << thread.calls;
 		if (thread.exited) {

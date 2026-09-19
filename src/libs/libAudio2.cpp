@@ -506,6 +506,7 @@ int KYTY_SYSV_ABI AudioOut2ContextAdvance(AudioOut2ContextHandle ctx) {
 }
 
 int KYTY_SYSV_ABI AudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t blocking) {
+	PRINT_NAME();
 	uint32_t sleep_micros = audioout2_grain_micros(512);
 
 	for (;;) {

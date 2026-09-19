@@ -35,7 +35,7 @@ public:
 	// is known to still exist: without this a stalled main thread and an exited
 	// one look identical in the report.
 	void RecordGuestThreadStart(uint32_t thread_id, const char* name, uint64_t entry_address,
-	                            uint64_t now_us);
+	                            uint64_t host_thread_id, uint64_t now_us);
 	void RecordGuestThreadExit(uint32_t thread_id, uint64_t now_us);
 
 	[[nodiscard]] std::string BuildReport(uint64_t now_us) const;
@@ -76,6 +76,7 @@ private:
 	struct ThreadActivity {
 		std::string  guest_name;
 		uint64_t     entry_address = 0;
+		uint64_t     host_thread_id = 0;
 		bool         started       = false;
 		bool         exited        = false;
 		uint64_t     started_us    = 0;

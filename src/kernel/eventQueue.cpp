@@ -510,6 +510,7 @@ int KYTY_SYSV_ABI KernelDeleteUserEvent(KernelEqueue eq, int id) {
 
 int KYTY_SYSV_ABI KernelAddHRTimerEvent(KernelEqueue eq, int id, const KernelTimespec* ts,
                                         void* udata) {
+	PRINT_NAME();
 	if (ts == nullptr) {
 		return KERNEL_ERROR_EFAULT;
 	}
@@ -535,6 +536,7 @@ int KYTY_SYSV_ABI KernelAddHRTimerEvent(KernelEqueue eq, int id, const KernelTim
 }
 
 int KYTY_SYSV_ABI KernelDeleteHRTimerEvent(KernelEqueue eq, int id) {
+	PRINT_NAME();
 	return KernelDeleteEvent(eq, static_cast<uintptr_t>(id), KERNEL_EVFILT_HRTIMER);
 }
 

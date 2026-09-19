@@ -147,18 +147,22 @@ int KYTY_SYSV_ABI NetGetSockInfo(int s, void* info, int n, int flags) {
 }
 
 int KYTY_SYSV_ABI NetEpollCreate(const char* name, int flags) {
+	PRINT_NAME();
 	return FinishSocketCall(Net::EpollCreate(name, flags));
 }
 
 int KYTY_SYSV_ABI NetEpollControl(int eid, int op, int id, const Net::NetEpollEvent* event) {
+	PRINT_NAME();
 	return FinishSocketCall(Net::EpollControl(eid, op, id, event));
 }
 
 int KYTY_SYSV_ABI NetEpollWait(int eid, Net::NetEpollEvent* events, int maxevents, int timeout) {
+	PRINT_NAME();
 	return FinishSocketCall(Net::EpollWait(eid, events, maxevents, timeout));
 }
 
 int KYTY_SYSV_ABI NetEpollDestroy(int eid) {
+	PRINT_NAME();
 	return FinishSocketCall(Net::EpollDestroy(eid));
 }
 
