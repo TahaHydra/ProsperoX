@@ -681,6 +681,34 @@ bool Elf64::ValidateDynamic() {
 	return true;
 }
 
+// Reads `size` bytes at `offset` and reports whether every one of them is zero.
+// Used only for container alignment padding, which is bounded to 15 bytes, so
+// the read is a fixed small buffer and a short read is a failure rather than a
+// pass.
+bool Elf64::IsZeroFill(uint64_t offset, uint64_t size) {
+	if (size == 0) {
+		return true;
+	}
+	if (size > 15) {
+		return false;
+	}
+	uint8_t  bytes[15]  = {};
+	uint32_t bytes_read = 0;
+	if (!m_f->Seek(offset)) {
+		return false;
+	}
+	m_f->Read(bytes, uint32_t(size), &bytes_read);
+	if (m_f->IsInvalid() || bytes_read != size) {
+		return false;
+	}
+	for (uint64_t i = 0; i < size; ++i) {
+		if (bytes[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool Elf64::TryRepackedSelf() {
 	const auto repack_mismatch = [](int line) { LOGF("SELF repack: contract mismatch at elf.cpp:%d\n", line); return false; };
 	// Original bounded implementation of docs/self-repack-contract.md. This
@@ -780,12 +808,33 @@ bool Elf64::TryRepackedSelf() {
 		}
 	}
 	const uint64_t physical_size = m_f->Size();
-	// Recognize the published writer's unpadded placement only. Do not try a
-	// second location based on trailer contents: that could reinterpret appended
-	// or truncated bytes as a different layout.
-	if (!InRange(last_end, v.p_filesz, physical_size) || physical_size - last_end != v.p_filesz) return repack_mismatch(__LINE__);
+	// Two published placements for the VERSION trailer, both anchored on
+	// container structure rather than on what the trailing bytes look like:
+	//
+	//   unpadded  the writer appends VERSION directly after the last payload,
+	//             so it begins at last_end;
+	//   padded    the writer first pads that payload to the container's 16-byte
+	//             alignment and appends at m_self->file_size -- which is where
+	//             `cursor` was already required to land above, so the gap is the
+	//             container's own alignment and is at most 15 bytes.
+	//
+	// Both must end exactly at end of file, and the padded form must have
+	// nothing but zero bytes in the gap. Neither reads the trailer to decide
+	// where the trailer is, so appended or truncated bytes cannot be
+	// reinterpreted as the other layout: a file with extra bytes fails the
+	// end-of-file equality, and one with a non-zero gap fails the padding check.
+	uint64_t version_offset = 0;
+	if (InRange(last_end, v.p_filesz, physical_size) && physical_size - last_end == v.p_filesz) {
+		version_offset = last_end;
+	} else if (const uint64_t padded = m_self->file_size, gap = padded - last_end;
+	           padded >= last_end && gap < 16 && InRange(padded, v.p_filesz, physical_size) &&
+	           physical_size - padded == v.p_filesz && IsZeroFill(last_end, gap)) {
+		version_offset = padded;
+	} else {
+		return repack_mismatch(__LINE__);
+	}
 	m_repack_version = version;
-	m_repack_version_offset = last_end;
+	m_repack_version_offset = version_offset;
 	m_repack_omitted = std::move(omitted);
 	LOGF("SELF repack: validated plain FSELF, VERSION phdr=%d physical_offset=%" PRIu64 " size=%" PRIu64 "\n",
 	     version, last_end, v.p_filesz);

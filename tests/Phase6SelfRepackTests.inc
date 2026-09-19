@@ -75,7 +75,11 @@ int Run() {
         const uint8_t magic[] = {0x54,0x14,0xf5,0xee};
         std::memcpy(ps5_magic.self.ident, magic, sizeof(magic));
         parse(ps5_magic, true, "PS5 SELF magic uses the same bounded entry contract");
-        parse(Fixture(gap, true), gap == 0, "a competing padded trailer is not inferred");
+        // The writer may pad the last payload to the container's own 16-byte
+        // alignment before appending VERSION. The gap is that alignment, so it
+        // is at most 15 bytes and all zero, and the trailer still ends exactly
+        // at end of file.
+        parse(Fixture(gap, true), true, "padded writer alignment accepted");
     }
     for (unsigned variant = 0; variant < 24; ++variant) {
         Fixture f(8);
@@ -131,6 +135,46 @@ int Run() {
     Fixture padding(8, true);
     padding.bytes[padding.entries[3].offset+padding.entries[3].compressed_size] = 1;
     parse(padding, false, "nonzero physical VERSION padding rejected");
+
+    // Ghost of Yotei (PPSA26344) ships the padded shape. The trailer is exactly
+    // the bytes after the declared SELF size and ends at end of file:
+    //   eboot.bin           self_size=39322336 file_size=39327606 trailing=5270
+    //   sce_module/libc.prx self_size=1882544  file_size=1882570  trailing=26
+    // Reproduce both trailer sizes rather than only the container shape, since
+    // the 26-byte one is smaller than the pattern the other cases write.
+    auto trailer_shape = [](uint64_t trailer, unsigned gap) {
+        Fixture f(gap, true);
+        f.ph[3].p_offset = 0x8000; // Keep the NOTE clear of a long trailer.
+        f.ph[2].p_filesz = trailer;
+        f.ph[2].p_memsz  = trailer;
+        const auto version = f.self.file_size;
+        f.bytes.resize(version + trailer, 0);
+        for (unsigned i = 0; i < 32 && i < trailer; ++i) f.bytes[version+i] = uint8_t(0xa0+i);
+        return f;
+    };
+    parse(trailer_shape(5270, 8), true, "Ghost eboot 5270-byte padded VERSION trailer");
+    parse(trailer_shape(26, 8), true, "Ghost libc.prx 26-byte padded VERSION trailer");
+
+    // The same shapes one byte away from the contract in each direction. These
+    // are what stop the padded placement from becoming a licence to read
+    // whatever trails the container.
+    for (const uint64_t trailer : {uint64_t(5270), uint64_t(26)}) {
+        auto appended = trailer_shape(trailer, 8);
+        appended.bytes.push_back(0);
+        parse(appended, false, "padded trailer must end exactly at end of file");
+
+        auto truncated = trailer_shape(trailer, 8);
+        truncated.bytes.pop_back();
+        parse(truncated, false, "a short padded trailer is rejected");
+
+        auto dirty_gap = trailer_shape(trailer, 8);
+        dirty_gap.bytes[dirty_gap.self.file_size - 1] = 1;
+        parse(dirty_gap, false, "padded trailer alignment must be zero filled");
+
+        auto shifted = trailer_shape(trailer, 8);
+        shifted.ph[2].p_filesz = trailer - 1;
+        parse(shifted, false, "padded trailer size must match the trailing bytes exactly");
+    }
     Fixture export_case(8);
     parse(export_case, true, "recognized reader can be reused after rejection");
     const auto export_path = std::filesystem::path(path.string() + ".elf");

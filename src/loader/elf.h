@@ -295,6 +295,8 @@ private:
 	bool ValidateDynamic();
 	bool TryRepackedSelf();
 	bool Reject(const char* reason);
+	bool IsZeroFill(uint64_t offset, uint64_t size);
+
 	int m_repack_version = -1;
 	uint64_t m_repack_version_offset = 0;
 	std::vector<bool> m_repack_omitted;
