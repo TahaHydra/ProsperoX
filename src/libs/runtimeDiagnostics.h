@@ -17,7 +17,7 @@ public:
 	explicit State(size_t recent_capacity = 128);
 
 	HleCallToken EnterHle(uint32_t thread_id, const char* library, const char* module, const char* function,
-	                      uint64_t now_us);
+	                      uint64_t caller_address, uint64_t now_us);
 	void ExitHle(HleCallToken token, uint64_t now_us);
 
 	void RecordGpuDispatch(uint64_t submission_id, uint64_t shader_address, uint32_t groups_x, uint32_t groups_y,
@@ -47,6 +47,7 @@ private:
 		std::string library;
 		std::string module;
 		std::string function;
+		uint64_t caller_address = 0;
 		uint64_t entered_us = 0;
 	};
 
@@ -81,6 +82,7 @@ private:
 		uint64_t     exited_us     = 0;
 		uint64_t     calls         = 0;
 		std::string  last_call;
+		uint64_t     last_caller   = 0;
 		uint64_t     last_exit_us  = 0;
 		HleCallToken active_token  = 0;
 	};
@@ -120,13 +122,20 @@ private:
 };
 
 [[nodiscard]] bool Enabled() noexcept;
+
+// Renders a guest address as "<module>+0x<offset>". The diagnostics layer has
+// no business knowing about the loader, so the loader installs this instead;
+// with no resolver the report still carries the raw address.
+using ModuleResolver = std::string (*)(uint64_t address);
+void SetModuleResolver(ModuleResolver resolver) noexcept;
 [[nodiscard]] uint64_t NowUs() noexcept;
 State& GlobalState();
 void Initialize();
 
 class HleScope final {
 public:
-	HleScope(uint32_t thread_id, const char* library, const char* module, const char* function);
+	HleScope(uint32_t thread_id, const char* library, const char* module, const char* function,
+	         uint64_t caller_address);
 	~HleScope();
 	HleScope(const HleScope&) = delete;
 	HleScope& operator=(const HleScope&) = delete;

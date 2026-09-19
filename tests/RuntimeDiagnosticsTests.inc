@@ -9,7 +9,7 @@ int Run() {
 
     State state(8);
     const auto call = state.EnterHle(
-        17, "libkernel", "libkernel", "KernelEqueueWait", 1'000'000);
+        17, "libkernel", "libkernel", "KernelEqueueWait", 0x0000000800123456ull, 1'000'000);
 
     state.RecordGpuDispatch(37, 0x0000000901234000ull, 256, 1, 1, 1'100'000);
     state.RecordGpuDraw(38, "indexed", 1'150'000);
@@ -46,6 +46,10 @@ int Run() {
                       active.find("call=libkernel::libkernel::KernelEqueueWait") !=
                           std::string::npos,
                   "runtime diagnostics attributes the active call to its thread");
+    // The guest call site is what turns "a thread is stuck" into an address a
+    // disassembler can be pointed at.
+    Phase1::Check(active.find("caller=0x800123456") != std::string::npos,
+                  "runtime diagnostics records the guest call site");
 
     state.RecordGuestThreadStart(17, "MainThread", 0x0000000800100000ull, 900'000);
     state.RecordGuestThreadStart(18, "Worker", 0x0000000800200000ull, 950'000);
@@ -70,12 +74,13 @@ int Run() {
     // A thread outside any HLE call is executing guest code the trace cannot
     // follow, so how long it has been there is the evidence that matters.
     Phase1::Check(completed.find("state=guest") != std::string::npos &&
-                      completed.find("silent_ms=100") != std::string::npos,
+                      completed.find("silent_ms=100") != std::string::npos &&
+                      completed.find("caller=0x800123456") != std::string::npos,
                   "runtime diagnostics reports how long a thread has been in guest code");
 
     State bounded(3);
     for (uint64_t i = 0; i < 4; ++i) {
-        const auto token = bounded.EnterHle(static_cast<uint32_t>(i + 1), "L", "M", "F",
+        const auto token = bounded.EnterHle(static_cast<uint32_t>(i + 1), "L", "M", "F", 0,
                                             10 + i * 2);
         bounded.ExitHle(token, 11 + i * 2);
     }

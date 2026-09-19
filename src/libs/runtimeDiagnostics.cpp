@@ -15,8 +15,27 @@ namespace Libs::RuntimeDiagnostics {
 
 namespace {
 
-std::atomic_bool g_enabled {false};
-std::once_flag   g_initialize_once;
+std::atomic_bool                g_enabled {false};
+std::once_flag                  g_initialize_once;
+std::atomic<ModuleResolver>     g_module_resolver {nullptr};
+
+// Formats a guest return address. The resolver runs only while a report is
+// being built, never on the call path.
+std::string DescribeAddress(uint64_t address) {
+	if (address == 0) {
+		return {};
+	}
+	std::ostringstream out;
+	out << " caller=0x" << std::hex << address << std::dec;
+	if (const auto resolver = g_module_resolver.load(std::memory_order_acquire);
+	    resolver != nullptr) {
+		auto described = resolver(address);
+		if (!described.empty()) {
+			out << " (" << described << ')';
+		}
+	}
+	return out.str();
+}
 
 uint64_t AgeMs(uint64_t now_us, uint64_t then_us) {
 	return now_us >= then_us ? (now_us - then_us) / 1000 : 0;
@@ -68,7 +87,7 @@ void State::PushRecentLocked(std::string event) {
 }
 
 HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char* module, const char* function,
-                             uint64_t now_us) {
+                             uint64_t caller_address, uint64_t now_us) {
 	std::lock_guard lock(m_mutex);
 
 	const auto token = m_next_hle_token++;
@@ -76,6 +95,7 @@ HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char
 	              .library = Safe(library),
 	              .module = Safe(module),
 	              .function = Safe(function),
+	              .caller_address = caller_address,
 	              .entered_us = now_us};
 	const auto name = HleName(call);
 	m_active_hle.emplace(token, std::move(call));
@@ -83,6 +103,7 @@ HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char
 	auto& thread = m_threads[thread_id];
 	thread.calls++;
 	thread.last_call    = name;
+	thread.last_caller  = caller_address;
 	thread.active_token = token;
 
 	std::ostringstream event;
@@ -133,6 +154,7 @@ void State::ExitHle(HleCallToken token, uint64_t now_us) {
 
 	auto& thread = m_threads[it->second.thread_id];
 	thread.last_call     = HleName(it->second);
+	thread.last_caller   = it->second.caller_address;
 	thread.last_exit_us  = now_us;
 	if (thread.active_token == token) {
 		thread.active_token = 0;
@@ -202,7 +224,8 @@ std::string State::BuildReport(uint64_t now_us) const {
 	out << "active_hle=" << m_active_hle.size() << '\n';
 	for (const auto& [token, call]: m_active_hle) {
 		out << "  token=" << token << " tid=" << call.thread_id << " " << HleName(call)
-		    << " active_ms=" << AgeMs(now_us, call.entered_us) << '\n';
+		    << " active_ms=" << AgeMs(now_us, call.entered_us)
+		    << DescribeAddress(call.caller_address) << '\n';
 	}
 
 	// One line per guest thread the emulator has ever seen crossing the HLE
@@ -225,13 +248,15 @@ std::string State::BuildReport(uint64_t now_us) const {
 			const auto active = m_active_hle.find(thread.active_token);
 			if (active != m_active_hle.end()) {
 				out << " state=in_hle call=" << HleName(active->second)
-				    << " active_ms=" << AgeMs(now_us, active->second.entered_us);
+				    << " active_ms=" << AgeMs(now_us, active->second.entered_us)
+				    << DescribeAddress(active->second.caller_address);
 			} else {
 				out << " state=in_hle call=" << thread.last_call;
 			}
 		} else if (thread.last_exit_us != 0) {
 			out << " state=guest last_call=" << thread.last_call
-			    << " silent_ms=" << AgeMs(now_us, thread.last_exit_us);
+			    << " silent_ms=" << AgeMs(now_us, thread.last_exit_us)
+			    << DescribeAddress(thread.last_caller);
 		} else if (thread.started) {
 			out << " state=running started_ms_ago=" << AgeMs(now_us, thread.started_us);
 		} else {
@@ -282,6 +307,10 @@ bool Enabled() noexcept {
 	return g_enabled.load(std::memory_order_acquire);
 }
 
+void SetModuleResolver(ModuleResolver resolver) noexcept {
+	g_module_resolver.store(resolver, std::memory_order_release);
+}
+
 uint64_t NowUs() noexcept {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
 	                                 std::chrono::steady_clock::now().time_since_epoch())
@@ -320,9 +349,10 @@ void Initialize() {
 	});
 }
 
-HleScope::HleScope(uint32_t thread_id, const char* library, const char* module, const char* function) {
+HleScope::HleScope(uint32_t thread_id, const char* library, const char* module, const char* function,
+                   uint64_t caller_address) {
 	if (Enabled()) {
-		m_token = GlobalState().EnterHle(thread_id, library, module, function, NowUs());
+		m_token = GlobalState().EnterHle(thread_id, library, module, function, caller_address, NowUs());
 	}
 }
 

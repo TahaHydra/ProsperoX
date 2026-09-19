@@ -26,8 +26,11 @@
 #include "loader/systemContent.h"
 #include "loader/timer.h"
 
+#include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <thread>
 
 namespace Emulator {
@@ -215,6 +218,20 @@ void Run(const RunOptions& options) {
 	Libs::InitAll(rt->Symbols());
 
 	LoadElf(options.elf);
+	Libs::RuntimeDiagnostics::SetModuleResolver([](uint64_t address) -> std::string {
+		auto* linker  = Common::Singleton<Loader::RuntimeLinker>::Instance();
+		auto* program = linker == nullptr ? nullptr : linker->FindProgramByAddr(address);
+		if (program == nullptr) {
+			return {};
+		}
+		char text[512];
+		std::snprintf(text, sizeof(text), "%s+0x%" PRIx64,
+		              Common::FilenameWithoutDirectory(
+		                  Common::PathToGenericString(program->file_name))
+		                  .c_str(),
+		              address - program->base_vaddr);
+		return text;
+	});
 	Libs::RuntimeDiagnostics::Initialize();
 
 	Execute(options.game_patch);

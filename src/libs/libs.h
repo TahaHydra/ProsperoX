@@ -53,11 +53,25 @@
 #define KYTY_RUNTIME_DIAG_CONCAT_INNER(a, b) a##b
 #define KYTY_RUNTIME_DIAG_CONCAT(a, b) KYTY_RUNTIME_DIAG_CONCAT_INNER(a, b)
 
+// The address PRINT_NAME() expands at belongs to an exported HLE entry point,
+// so its return address is the guest call site. Recording it is what lets a
+// stall report say where in the title's own code a thread stopped, rather than
+// only which emulator function it stopped in.
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_return_address)
+#define KYTY_GUEST_CALLER() reinterpret_cast<uint64_t>(__builtin_return_address(0))
+#endif
+#endif
+#ifndef KYTY_GUEST_CALLER
+#define KYTY_GUEST_CALLER() uint64_t {0}
+#endif
+
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                                   \
 	[[maybe_unused]] ::Libs::RuntimeDiagnostics::HleScope                                             \
 	    KYTY_RUNTIME_DIAG_CONCAT(runtime_diag_scope_, __COUNTER__)(                                   \
-	        static_cast<uint32_t>(Common::Thread::GetThreadIdUnique()), g_library, g_module, __func__); \
+	        static_cast<uint32_t>(Common::Thread::GetThreadIdUnique()), g_library, g_module, __func__, \
+	        KYTY_GUEST_CALLER());                                                                      \
 	if (PRINT_NAME_ENABLED) {                                                                          \
 		if (Log::GetDirection() != Log::Direction::Silent) {                                           \
 			const auto print_name_time = Loader::Timer::GetTime().ToString("HH24:MI:SS.FFF");          \
