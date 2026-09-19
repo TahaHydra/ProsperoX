@@ -1,31 +1,182 @@
 # Phase 6 — Interactive integration checkpoint
 
-Status: **in progress, not complete**, 2026-09-14. Target: Windows 11,
-Ryzen 7 7800X3D, RX 7800 XT, 32 GB DDR5. Baseline is `b00d5a8` plus the
-retained Phase 5 validation changes. No Phase 7 work has started.
+Status: **open**, updated 2026-09-19. Target: Windows 11, Ryzen 7 7800X3D,
+RX 7800 XT, 32 GB DDR5. No Phase 7 work has started.
 
-Latest AGC checkpoint: validated per-renderer ring/offchip configuration and
-explicit rejection at unsupported native tessellation draw consumers. Bendy
-passes these calls and the newly qualified POSIX condition destructor, then
-stops at `VAzswvTOCzI[Posix_v1][libkernel_v1.1]` (`unlink`) in IL2CPP.
-See [configuration checkpoint](phase6-tessellation-configuration.md).
+Development line: `integration/prosperox-consolidated`. It contains the
+Bendy performance work, the Ghost of Yotei loader and import work, the
+passive runtime diagnostics, and the documentation recovered from the
+`rescue/` and `investigate/` side branches. See
+[branch consolidation](#branch-consolidation) below.
 
-The primary real-title target is now **Bendy and the Dark Revival, PPSA27624**
-(`01.000.003` in local metadata). Its unknown transformation history remains
-recorded, but the independently specified strict FSELF profile now accepts its
-containers. Guest execution reaches worker-thread, scripting-metadata and
-initial graphics-state construction and level asset reads. No menu
-or gameplay is claimed. See [container investigation](phase6-bendy-container.md)
-for the loader/TLS/export changes, exact runtime boundary, and regression logs.
+## Current state of the primary title
 
-Latest full regression: **80/81 passed in 51.95 seconds**,
-including all **13 Phase 6 tests**. No memory-allocation failures remain. The one
-failure is the known unsupported feedback-loop capability in the monolithic
-shader test. Real RX 7800 XT Vulkan/synchronization validation reports no errors.
-Phase 3 completes 10,000 release lifecycles; the standard Phase 5 presentation
-check passes 323 frames with warm/peak 1,317,171,216 bytes and 13 allocations.
-Evidence: `phase6-ring-regression-20260914`.
-Earlier counts below remain historical evidence. Phase 6 is not closed.
+The primary real-title target is **Bendy and the Dark Revival, PPSA27624**.
+
+It boots, plays its intro video, reaches its menus, and reaches **real
+controllable Chapter 1 gameplay**, with working rendering, audio, controller
+input and save handling. Sustained 60 FPS is reached in warmed areas; the
+first exposure to new content still costs frames.
+
+This supersedes the 2026-09-14 statement below that "no menu or gameplay is
+claimed" and the note that Bendy stopped at `VAzswvTOCzI` (`unlink`). Both
+were accurate when written. The sections after this one are kept as the
+historical record of how each area was brought up and what was tested; read
+them as history, not as current status.
+
+### Performance
+
+Gameplay was 12–15 FPS when Phase 6 was paused, against ~60 FPS menus, with
+the emulator rather than the GPU as the bottleneck. Four pieces of work
+addressed that, in order:
+
+1. **Event-driven PM4 waits.** `WAIT_REG_MEM` recorded its predicate and the
+   GPU thread parked until something could change it, instead of waking on a
+   1 ms condvar floor, re-polling the label and draining the device each
+   time. Empty command buffers stopped being submitted.
+2. **Completion-label ownership and batching.** A 4-byte `RELEASE_MEM` label
+   no longer makes its whole 4 KiB page GPU-owned, so a guest CPU polling
+   that label no longer faults into a readback. Plain labels are batched;
+   interrupt and flip completions stay prompt.
+3. **Same-queue in-stream waits.** When the queue that will write a
+   completion value has already recorded it, a following `WAIT_REG_MEM` is
+   answered from submission order rather than a CPU/GPU round trip. This is
+   the default; `KYTY_GPU_INSTREAM_WAITS=0` opts out.
+4. **Scalable pending-completion lookup**, once the pending set reached frame
+   scale, with retired completions unable to satisfy a newer wait.
+
+Measured with `KYTY_GPU_STATS=1`, a warmed 60 Hz session shows `submit=60`,
+`process=60`, `blocked=0`, `parked_ms=0`, `flipwait_ms=0`, `readfault≈0` and
+no shader or pipeline creation in steady state. Preserve these contracts;
+they have regression tests.
+
+Two measurement traps, both real and both previously mistaken for emulator
+behaviour:
+
+* A Remote Desktop session paces presentation. A ~30 Hz RDP session caps the
+  emulator at ~30 FPS regardless of what it can do. `DWMFRAMEINTERVAL=15`
+  plus hardware H.264 lifts it to 60.
+* A dirty working tree stamps the build dirty, and
+  `PipelineCache::InitializeDriverCache` refuses to persist the Vulkan driver
+  pipeline cache for a dirty build — it logs `Vulkan pipeline cache: disabled
+  (dirty build)`. Every such run starts from a cold pipeline cache, which is
+  exactly the cost the first-use hitch is made of. Commit or stash before
+  measuring warm-up.
+
+### Media
+
+`sceAvPlayer` had no clock of its own. With audio present, video delivery was
+gated on the timestamp of the last audio frame handed over, and audio was
+handed over on every guest call, so the media timeline advanced at the rate
+the title polled rather than in real time. A title that pulls once per
+rendered frame therefore ran the stream slow at 30 Hz and fast at 60 Hz, and
+because end of stream is reached when the queues drain, the intro video ran
+out early at 60 Hz and the title started it again.
+
+Delivery is now derived from a real clock (`src/libs/avPlayerClock.h`):
+
+* the media position comes from elapsed real time, with pause folded in, and
+  is anchored once per playback to the first decoded timestamp;
+* video selection takes the newest frame the clock has reached, dropping any
+  it supersedes, with a half-frame-interval tolerance derived from the
+  stream's own frame rate so clock drift does not discard frames;
+* audio may run ahead by a bounded lead so a title can prime its output port,
+  but no further;
+* `AV_SYNC_MODE_NONE` still returns whatever is decoded on every call.
+
+`AvPlayerClockTests` drives one synthetic stream at 30, 60, 120 and 15 Hz and
+requires the same media duration, per-frame accounting and end of stream from
+all of them. `KYTY_AVPLAYER_STATS` adds lifecycle tracing; it is off by
+default.
+
+## Ghost of Yotei — PPSA26344
+
+Not running. Loading and import qualification are solved; the title
+initializes its subsystems, opens a window, and then stops progressing with
+a black screen.
+
+Resolved so far: the FSELF container layout (a `VERSION` trailer after up to
+15 bytes of zero alignment, still requiring exact EOF), the import audit
+tooling (`--audit-game`, `--audit-library`, `--audit-json`) and the
+qualification aliases it surfaced, and the `sceVideoOutVrrPegToFixedRate` /
+`sceVideoOutVrrUnpegFromFixedRate` exports.
+
+**The earlier diagnosis is not supported by the evidence it was drawn from.**
+It read "the main guest thread makes no further HLE calls after PthreadCreate
+returns" as "execution stalls before reaching the renderer". The trace could
+not support that: 639 of the 1533 entry points registered with `LIB_FUNC`
+never expanded `PRINT_NAME()`, and the untraced set included every primitive
+a guest thread can block in — `sceKernelWaitEventFlag`, `sceKernelWaitSema`
+and the `sem_*` family, `sceKernelSyncOnAddressWait{,32,64}`,
+`sceKernelBatchMap`, `sceKernelMapFlexibleMemory`, `sceAjmBatchWait`,
+`sceAcmBatchWait`. A thread parked in any of those was indistinguishable from
+a thread that had vanished.
+
+Those are traced now, and the report separates the two states. Each guest
+thread is listed with the call it is inside and how long it has been there,
+or the last call it made and how long it has been silent since, together with
+the guest call site resolved to module and offset. Thread start and exit are
+recorded, so a stalled thread is distinguishable from an exited one.
+
+The next Ghost capture therefore answers directly which of these it is:
+
+* the main thread is parked in a blocking primitive — the report names it,
+  with the guest address that called it;
+* the main thread is executing guest code — the report shows `state=guest`
+  with a growing `silent_ms` and the address of its last crossing;
+* the main thread has exited — the report shows `state=exited`.
+
+No upstream KytyPS5 commit in `6a2987a..f100f78` addresses a pre-render
+startup stall; see [the upstream review](upstream-kyty-review-2026-09-19.md).
+Two upstream fibre-context fixes there match the failure shape of a guest
+thread that goes quiet, and are the first thing to try if the capture shows
+`sceFiber` in use.
+
+To capture:
+
+```powershell
+$env:PROSPEROX_RUNTIME_DIAG = '1'
+./_Build/phase0-windows/kyty_emulator.exe --game "E:\GOY\PPSA26344"
+# _RuntimeDiag.txt gains a snapshot every two seconds; the `threads=` block
+# is the one that matters.
+```
+
+## Branch consolidation
+
+`integration/prosperox-consolidated` descends from
+`diag/runtime-observability-tdd`, which already contained every commit from
+`main`, `debug/bendy-performance`, `test/claude-perf-phase6`,
+`claude/prospero-submit-readback-sync`, `claude/prospero-instream-waits` and
+`fix/fself-aligned-version`.
+
+Three branches held commits that were not in that line:
+
+| Branch | Unique commits | Disposition |
+| --- | --- | --- |
+| `claude/prospero-perf-bottleneck-w0s3sr` | `9075a1a` | Superseded. Same wait-polling work, built on the wrong base; the tested form of it is in `f8e5183` and below. Branch left in place. |
+| `rescue/astra-phase6-20260916` | `428698d`, `97f76a4` | `docs/phase6-pause-checkpoint.md` recovered. `src/common/perfTrace.h` and `tests/Phase6CheckpointTests.inc` were never wired into CMake even there, and `KYTY_GPU_STATS` supersedes them. |
+| `investigate/pm4-sync-20260916` | 5 commits | The PM4 event-driven sync design note recovered. `scripts/phase6/pm4-exact-readback.patch` was an A/B for behaviour that has since shipped. |
+
+No branch has been deleted.
+
+## Remaining Phase 6 work
+
+* Ghost of Yotei reaching visible rendering.
+* The commercial-title acceptance route for Bendy — ten successful launches
+  and three 30-minute sessions — remains a manual gate. It has not been run.
+* First-use hitching on new content. Measure it against a clean (non-dirty)
+  build so the Vulkan driver pipeline cache is actually in play before
+  treating it as an emulator cost.
+* The gates listed under "Remaining Phase 6 gates, in order" below, which are
+  unchanged apart from the Bendy runtime boundary being past.
+
+---
+
+*Everything below this line is the record as written on 2026-09-14, when
+Phase 6 was paused. It is kept because it documents how each area was brought
+up and what was tested. Where it conflicts with the status above — in
+particular the claim that no menu or gameplay is reached, and the Bendy
+runtime boundary at `unlink` — the status above is current.*
 
 ## Implemented and tested
 
