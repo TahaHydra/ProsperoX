@@ -55,8 +55,7 @@ int Run(const char* mode) {
     key.library_version=2; Check(!symbols.Find(key),"AGC library version is not wildcarded");
     key.library_version=1; key.module_version_minor=2; Check(!symbols.Find(key),"AGC module version is not wildcarded");
     key.module_version_minor=1; key.module="Unrelated"; Check(!symbols.Find(key),"AGC NID never resolves through unrelated modules");
-    key.module="Agc"; key.name="dolOmWH+huQ";
-    Check(!symbols.Find(key),"unreviewed Graphics5 shader-fusion exports are not blanket-aliased");
+    key.module="Agc";
     // A reviewed Agc-qualified entry resolves, and resolves to the very same
     // implementation the Graphics5 identity exposes: the entry is one
     // registration of one function, never a second implementation that could
@@ -70,11 +69,17 @@ int Run(const char* mode) {
     Check(interpolant_as_gfx5!=nullptr &&
               interpolant_as_gfx5->vaddr==interpolant_as_agc->vaddr,
           "the Agc and Graphics5 identities name one implementation");
-    // Reviewing one entry must not widen the identity. Graphics5 exports that
-    // were never reviewed under Agc still have to fail, or the review gate is
-    // a blanket alias wearing a list.
-    for (const char* unreviewed: {"dolOmWH+huQ","fd5Bp5tGTgo","nApJjpKNBl4","NKIzURsgV7I",
-                                  "HV4j+E0MBHE","2BS4EtAaF28","s+VGAMDQ0AQ"}) {
+    // Reviewing entries must not widen the identity. Graphics5 exports that
+    // were never reviewed under Agc still have to fail, or the review gate is a
+    // blanket alias wearing a list.
+    //
+    // These probes are Graphics5 exports with no AgcQualified registration. If
+    // one of them is ever reviewed and added, replace it here with another
+    // unregistered NID rather than deleting the check -- the contract is that
+    // reachability under Agc requires an explicit registration, not that any
+    // particular export stays out.
+    for (const char* unreviewed: {"nApJjpKNBl4","NKIzURsgV7I","HV4j+E0MBHE","2BS4EtAaF28",
+                                  "s+VGAMDQ0AQ","+T8Xo6LtFJI","1DeUNpRIDDA"}) {
         key.name=unreviewed;
         Check(!symbols.Find(key),"unreviewed Graphics5 exports stay unreachable as Agc");
         Loader::SymbolResolve gfx5{unreviewed,"Graphics5",1,"Graphics5",1,1,

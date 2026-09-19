@@ -208,6 +208,55 @@ LIB_DEFINE(Init) {
 	// however it is qualified. Bendy (PPSA27624) imports it as
 	// dbOlWdppb4o[Agc_v1][Agc_v1.1].
 	LIB_FUNC("dbOlWdppb4o", Graphics::Gen5::AgcCreateInterpolantMapping2);
+
+	// Reviewed as a set, from the imports Bendy (PPSA27624) actually makes
+	// under the Agc identity. Every entry here is a command-buffer or register
+	// builder: it writes PM4 into a buffer the guest owns, or computes register
+	// values from guest-supplied shader metadata. None reads emulator global
+	// state, and none has a side effect that could depend on which library name
+	// the title used to reach it, so each behaves identically under Agc and
+	// under Graphics5 -- they are one function with two registrations.
+	//
+	// This is a list, not an alias. 76 Graphics5 exports remain unreachable
+	// under Agc, and a new Graphics5 export is not exposed here by default.
+	LIB_FUNC("KT-hTp-Ch14", Graphics::Gen5::AgcAcbAcquireMem);
+	LIB_FUNC("qzMN2XKGA4k", Graphics::Gen5::AgcAcbCopyData);
+	LIB_FUNC("j3EtxFkSIhQ", Graphics::Gen5::AgcAcbDispatchIndirect);
+	LIB_FUNC("-RnpfpxIhec", Graphics::Gen5::AgcAcbDmaData);
+	LIB_FUNC("cFazmnXpJOE", Graphics::Gen5::AgcAcbEventWrite);
+	LIB_FUNC("e1DFTg+Sd8U", Graphics::Gen5::AgcAcbJump);
+	LIB_FUNC("6mFxkVqdmbQ", Graphics::Gen5::AgcAcbPopMarker);
+	LIB_FUNC("cpCILPya5Zk", Graphics::Gen5::AgcAcbPushMarker);
+	LIB_FUNC("JrtiDtKeS38", Graphics::Gen5::AgcAcbResetQueue);
+	LIB_FUNC("htn36gPnBk4", Graphics::Gen5::AgcAcbWaitRegMem);
+	LIB_FUNC("eZ4+17OQz4Q", Graphics::Gen5::AgcAcbWriteData);
+	LIB_FUNC("UZbQjYAwwXM", Graphics::Gen5::AgcCbSetShRegistersDirect);
+	LIB_FUNC("03RZmELWWzw", Graphics::Gen5::AgcCbSetUcRegistersDirect);
+	LIB_FUNC("1rZSWUv1IRc", Graphics::Gen5::AgcDcbCopyData);
+	LIB_FUNC("CtB+A9-VxO0", Graphics::Gen5::AgcDcbDispatchIndirect);
+	LIB_FUNC("WmAc2MEj6Io", Graphics::Gen5::AgcDcbDmaData);
+	LIB_FUNC("q88lQ+GP5Yk", Graphics::Gen5::AgcDcbDrawIndex);
+	LIB_FUNC("Yw0jKSqop+E", Graphics::Gen5::AgcDcbDrawIndexAuto);
+	LIB_FUNC("t1vNu082-jM", Graphics::Gen5::AgcDcbDrawIndexIndirect);
+	LIB_FUNC("1q1titRBL6o", Graphics::Gen5::AgcDcbDrawIndirect);
+	LIB_FUNC("xSAR0LTcRKM", Graphics::Gen5::AgcDcbJump);
+	LIB_FUNC("RmaJwLtc8rY", Graphics::Gen5::AgcDcbSetBaseIndirectArgs);
+	LIB_FUNC("l4fM9K-Lyks", Graphics::Gen5::AgcDcbSetIndexBuffer);
+	LIB_FUNC("8N2tmT3jmC8", Graphics::Gen5::AgcDcbSetIndexCount);
+	LIB_FUNC("tSBxhAPyytQ", Graphics::Gen5::AgcDcbSetNumInstances);
+	LIB_FUNC("u2T2DiA5hRI", Graphics::Gen5::AgcDcbStallCommandBufferParser);
+	LIB_FUNC("MWiElSNE8j8", Graphics::Gen5::AgcDcbWaitUntilSafeForRendering);
+	LIB_FUNC("T6xuVw0KUJo", Graphics::Gen5::AgcDebugRaiseException);
+	LIB_FUNC("d-6uF9sZDIU", Graphics::Gen5::AgcSetCxRegIndirectPatchAddRegisters);
+	LIB_FUNC("vcmNN+AAXnY", Graphics::Gen5::AgcSetCxRegIndirectPatchSetAddress);
+	LIB_FUNC("z2duB-hHQSM", Graphics::Gen5::AgcSetShRegIndirectPatchAddRegisters);
+	LIB_FUNC("Qrj4c+61z4A", Graphics::Gen5::AgcSetShRegIndirectPatchSetAddress);
+	LIB_FUNC("vRoArM9zaIk", Graphics::Gen5::AgcSetUcRegIndirectPatchAddRegisters);
+	LIB_FUNC("6lNcCp+fxi4", Graphics::Gen5::AgcSetUcRegIndirectPatchSetAddress);
+	LIB_FUNC("fd5Bp5tGTgo", Graphics::Gen5::AgcUnknownFuseShaderHalves);
+	LIB_FUNC("dolOmWH+huQ", Graphics::Gen5::AgcUnknownGetFusedShaderSize);
+	LIB_FUNC("Ikfdt-rIqCE", Graphics::Gen5::AgcUnknownIkfdtRIqCE);
+	LIB_FUNC("-KRzWekV120", Graphics::Gen5::AgcUnknownKRzWekV120);
 	LIB_FUNC("ZvwO9euwYzc", Graphics::Gen5::AgcDcbSetCxRegistersIndirect);
 	LIB_FUNC("-HOOCn0JY48", Graphics::Gen5::AgcDcbSetShRegistersIndirect);
 	LIB_FUNC("hvUfkUIQcOE", Graphics::Gen5::AgcDcbSetUcRegistersIndirect);

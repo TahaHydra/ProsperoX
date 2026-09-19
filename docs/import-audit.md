@@ -3,34 +3,37 @@
 ProsperoX can inspect a game's statically referenced PS5 imports without starting guest code.
 The audit path loads SELF/ELF metadata and bundled modules through the normal loader, but it does not relocate imports, start modules, call the guest entry point, initialize Audio/Controller, or initialize Vulkan/Graphics.
 
-## Blocking imports
+## Reading the audit
 
-The status counts answer "what did the auditor find". They do not answer "will
-the title run", and the difference has cost a debugging session:
-
-* `MissingHle` — the NID is not implemented under any identity.
-* `AliasCandidate` — the NID *is* implemented, under a different
-  library/module qualification than the one the title asked for.
-
-`AliasCandidate` reads like an advisory, and for a weak import it is one. For a
-**strong** import it is a guaranteed runtime termination: the loader patches the
-relocation to a stub and the first call exits with `UNRESOLVED_STRONG_IMPORT`.
-Bendy's `dbOlWdppb4o[Agc_v1][Agc_v1.1]` was exactly this — counted under
-`aliases`, not under `missing`, and fatal.
-
-So the report carries a separate count:
+The status counts say what the auditor found. Two derived counts say what to do
+about it, and they are deliberately separate:
 
 ```
-  blocking=N (strong imports that will terminate the title)
+  resolvable=N    (implemented under another identity -- drive to 0)
+  unimplemented=N (no implementation; fatal only if called)
 ```
 
-`blocking` is every non-weak `AliasCandidate`, `MissingHle` or `Malformed`
-import. Those are printed first, under `[BLOCKING <status>]`, and each printed
-import states its binding. In JSON, each import carries `"blocking": true|false`
-and each game carries `"blocking_imports": N`.
+* **`resolvable`** — strong imports the emulator already implements, under a
+  library/module qualification other than the one the title asked for (status
+  `AliasCandidate`). The loader does not resolve these, so each is stubbed and
+  terminates the title on first call, while the code that would have answered it
+  sits in the binary. Every one is a reviewed qualified registration away from
+  working, with no behaviour to decide. **This should be 0.**
 
-**`blocking` must be 0 before a title is expected to run.** Any other count can
-be non-zero without meaning anything is wrong.
+* **`unimplemented`** — strong imports with no implementation anywhere (status
+  `MissingHle`). Also stubbed, but a stub is only fatal when the guest calls it,
+  and titles import far more than they call. Bendy runs with dozens. This is a
+  work list, not a verdict.
+
+Do not read either as "will the title run". A title can have
+`unimplemented=57` and run to gameplay, then terminate on the fifty-eighth.
+What static analysis can say for certain is that `resolvable > 0` is emulator
+work left undone.
+
+Resolvable imports print first under `[RESOLVABLE AliasCandidate]`; each printed
+import states its binding and which bucket it is in. In JSON, each import
+carries `"resolvable"` and `"unimplemented"`, and each game carries
+`"resolvable_imports"` and `"unimplemented_imports"`.
 
 The loader reports the same thing independently, at link time rather than on
 first call, so it is visible before the title starts:
@@ -43,7 +46,7 @@ BLOCKING_IMPORT symbol=dbOlWdppb4o[Agc_v1][Agc_v1.1][Func] program=... relocatio
   library alias
 ```
 
-### Resolving a blocking AliasCandidate
+### Resolving a resolvable import
 
 Add a reviewed entry for the identity the title asked for — for AGC that is the
 `AgcQualified` block in `src/libs/libAgcDriver.cpp`, which registers the same
@@ -54,7 +57,9 @@ qualified.
 Do not add a blanket library alias. One existed for `Agc -> Graphics5` and it
 exposed all 156 Graphics5 exports under the `Agc` identity, including entries
 whose behaviour there had never been looked at; `tests/Phase6AgcTests.inc`
-fails if it comes back.
+fails if it comes back. The reviewed list currently holds 80 of those 156, and
+76 remain unreachable under `Agc` — a new Graphics5 export is not exposed by
+default, which is the whole difference between a list and an alias.
 
 ## One game
 

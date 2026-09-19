@@ -111,7 +111,8 @@ std::string SafeSymbolName(const DynamicInfo& info, const Elf64_Sym& symbol, boo
 	return std::string(begin, end);
 }
 
-bool IsBlocking(const ImportRecord& import);
+bool IsResolvable(const ImportRecord& import);
+bool IsUnimplemented(const ImportRecord& import);
 
 nlohmann::ordered_json ImportToJson(const ImportRecord& input) {
 	auto candidates = input.candidates;
@@ -124,7 +125,8 @@ nlohmann::ordered_json ImportToJson(const ImportRecord& input) {
 	value["symbol_type"]    = Common::EnumName(input.symbol_type);
 	value["weak"]           = input.weak;
 	value["status"]         = StatusName(input.status);
-	value["blocking"]       = IsBlocking(input);
+	value["resolvable"]     = IsResolvable(input);
+	value["unimplemented"]  = IsUnimplemented(input);
 	value["resolved_name"]  = input.resolved_name;
 	value["candidates"]     = candidates;
 	value["references"]     = input.references;
@@ -139,13 +141,14 @@ nlohmann::ordered_json GameToJsonObject(const GameResult& input) {
 	value["title_name"] = input.title_name;
 	value["partial"]    = input.partial;
 
-	uint64_t blocking = 0;
+	uint64_t resolvable = 0;
+	uint64_t unimplemented = 0;
 	for (const auto& import: input.imports) {
-		if (IsBlocking(import)) {
-			blocking++;
-		}
+		resolvable += IsResolvable(import) ? 1 : 0;
+		unimplemented += IsUnimplemented(import) ? 1 : 0;
 	}
-	value["blocking_imports"] = blocking;
+	value["resolvable_imports"]    = resolvable;
+	value["unimplemented_imports"] = unimplemented;
 
 	auto binaries = input.binaries;
 	std::sort(binaries.begin(), binaries.end(),
@@ -172,25 +175,35 @@ nlohmann::ordered_json GameToJsonObject(const GameResult& input) {
 	return value;
 }
 
-// An import the loader will not resolve and that the program cannot continue
-// without. AliasCandidate matters as much as MissingHle here: the name only
-// says the NID exists under some other qualification, which does nothing for a
-// program that asked for this one. If it is not weak, the loader stubs it and
-// the first call terminates with UNRESOLVED_STRONG_IMPORT.
-bool IsBlocking(const ImportRecord& import) {
-	if (import.weak) {
-		return false;
-	}
-	return import.status == Status::AliasCandidate || import.status == Status::MissingHle ||
-	       import.status == Status::Malformed;
+// An import the emulator already implements, under a library/module
+// qualification other than the one the title asked for. The name
+// "AliasCandidate" undersells it: the loader does not resolve it, so a strong
+// one is stubbed and terminates the title on first call -- while the code that
+// would have answered it is sitting in the binary. Every one of these is a
+// reviewed qualified registration away from working, with no behaviour to
+// decide, which is why they are the count worth driving to zero.
+bool IsResolvable(const ImportRecord& import) {
+	return !import.weak && import.status == Status::AliasCandidate;
+}
+
+// An import with no implementation under any identity. Strong, so the loader
+// stubs it -- but a stub is only fatal when the guest calls it, and titles
+// import far more than they call. This count is a work list, not a verdict:
+// a title can run with dozens of these and terminate on one.
+bool IsUnimplemented(const ImportRecord& import) {
+	return !import.weak && (import.status == Status::MissingHle ||
+	                        import.status == Status::Malformed);
 }
 
 void PrintImport(const ImportRecord& import, FILE* out) {
 	std::fprintf(out, "%s\n", import.qualified_name.c_str());
 	std::fprintf(out, "  binding: %s%s\n", import.weak ? "weak" : "strong",
-	             IsBlocking(import) ? " (BLOCKING: the loader will stub this and the first call "
-	                                  "terminates the title)"
-	                                : "");
+	             IsResolvable(import)
+	                 ? " (RESOLVABLE: implemented under another identity; add a reviewed "
+	                   "qualified registration)"
+	                 : IsUnimplemented(import)
+	                       ? " (UNIMPLEMENTED: terminates the title if the guest calls it)"
+	                       : "");
 	if (!import.resolved_name.empty()) {
 		std::fprintf(out, "  resolved: %s\n", import.resolved_name.c_str());
 	}
@@ -629,11 +642,11 @@ void Print(const GameResult& result, FILE* out) {
 	for (const auto& import: result.imports) {
 		counts[static_cast<size_t>(import.status)]++;
 	}
-	uint64_t blocking = 0;
+	uint64_t resolvable = 0;
+	uint64_t unimplemented = 0;
 	for (const auto& import: result.imports) {
-		if (IsBlocking(import)) {
-			blocking++;
-		}
+		resolvable += IsResolvable(import) ? 1 : 0;
+		unimplemented += IsUnimplemented(import) ? 1 : 0;
 	}
 	std::fprintf(out,
 	             "GAME %s %s\n  binaries=%zu imports=%zu exact=%" PRIu64
@@ -647,21 +660,24 @@ void Print(const GameResult& result, FILE* out) {
 	             counts[static_cast<size_t>(Status::MissingHle)],
 	             counts[static_cast<size_t>(Status::WeakUnresolved)],
 	             counts[static_cast<size_t>(Status::Malformed)]);
-	// The counts above answer "what did the auditor find"; this line answers
-	// "will the title run". They differ: a strong AliasCandidate is counted
-	// under aliases, reads like an advisory, and is a guaranteed runtime
-	// termination. Anyone reading one number should read this one.
-	std::fprintf(out, "  blocking=%" PRIu64 " (strong imports that will terminate the title)\n",
-	             blocking);
+	// The counts above say what the auditor found. These two say what to do.
+	// They are deliberately not one number: "resolvable" is work the emulator
+	// can do today with no behaviour to decide and should be zero, while
+	// "unimplemented" only matters for the entries a title actually calls, and
+	// a title routinely imports far more than it calls.
+	std::fprintf(out,
+	             "  resolvable=%" PRIu64 " (implemented under another identity -- drive to 0)\n"
+	             "  unimplemented=%" PRIu64 " (no implementation; fatal only if called)\n",
+	             resolvable, unimplemented);
 
-	// Blocking imports first and unmistakably labelled, then the advisory rest.
+	// Resolvable first: it is the actionable list.
 	for (const auto& import: result.imports) {
-		if (!IsBlocking(import)) continue;
-		std::fprintf(out, "\n[BLOCKING %s]\n", StatusName(import.status));
+		if (!IsResolvable(import)) continue;
+		std::fprintf(out, "\n[RESOLVABLE %s]\n", StatusName(import.status));
 		PrintImport(import, out);
 	}
 	for (const auto& import: result.imports) {
-		if (IsBlocking(import)) continue;
+		if (IsResolvable(import)) continue;
 		if (import.status != Status::AliasCandidate && import.status != Status::MissingHle) continue;
 		std::fprintf(out, "\n[%s]\n", StatusName(import.status));
 		PrintImport(import, out);
