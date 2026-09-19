@@ -1136,6 +1136,15 @@ void* PthreadCreateMainGuestStack() {
 	     static_cast<uint64_t>(g_pthread_self->attr->stack_size),
 	     reinterpret_cast<uint64_t>(stack_top));
 
+	// The main thread registers with the diagnostics layer before it has a
+	// guest stack, so the bounds a frame walk needs only exist from here.
+	if (RuntimeDiagnostics::Enabled()) {
+		RuntimeDiagnostics::GlobalState().RecordGuestThreadStack(
+		    static_cast<uint32_t>(g_pthread_self->unique_id),
+		    reinterpret_cast<uint64_t>(g_pthread_self->attr->stack_addr),
+		    static_cast<uint64_t>(g_pthread_self->attr->stack_size));
+	}
+
 	return stack_top;
 }
 
@@ -3434,6 +3443,10 @@ static void* RunThread(void* arg) {
 		    static_cast<uint32_t>(thread->unique_id), thread->name.c_str(),
 		    reinterpret_cast<uint64_t>(thread->entry), os_thread_id,
 		    RuntimeDiagnostics::NowUs());
+		RuntimeDiagnostics::GlobalState().RecordGuestThreadStack(
+		    static_cast<uint32_t>(thread->unique_id),
+		    reinterpret_cast<uint64_t>(thread->attr->stack_addr),
+		    static_cast<uint64_t>(thread->attr->stack_size));
 	}
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)

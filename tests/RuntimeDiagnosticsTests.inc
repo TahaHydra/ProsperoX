@@ -9,7 +9,7 @@ int Run() {
 
     State state(8);
     const auto call = state.EnterHle(
-        17, "libkernel", "libkernel", "KernelEqueueWait", 0x0000000800123456ull, 1'000'000);
+        17, "libkernel", "libkernel", "KernelEqueueWait", 0x0000000800123456ull, 0, 1'000'000);
 
     state.RecordGpuDispatch(37, 0x0000000901234000ull, 256, 1, 1, 1'100'000);
     state.RecordGpuDraw(38, "indexed", 1'150'000);
@@ -81,10 +81,10 @@ int Run() {
 
     // A repeating call must not evict the history that led to it.
     State looping(8);
-    const auto anchor = looping.EnterHle(9, "libkernel", "libkernel", "KernelBatchMap2", 0, 10);
+    const auto anchor = looping.EnterHle(9, "libkernel", "libkernel", "KernelBatchMap2", 0, 0, 10);
     looping.ExitHle(anchor, 20);
     for (uint64_t i = 0; i < 500; ++i) {
-        const auto spin = looping.EnterHle(9, "libkernel", "libkernel", "KernelUsleep", 0, 30 + i);
+        const auto spin = looping.EnterHle(9, "libkernel", "libkernel", "KernelUsleep", 0, 0, 30 + i);
         looping.ExitHle(spin, 31 + i);
     }
     const auto looped = looping.BuildReport(1'000);
@@ -101,19 +101,77 @@ int Run() {
     traced.SetTraceLimit(3);
     for (uint64_t i = 0; i < 20; ++i) {
         const auto name = "F" + std::to_string(i);
-        traced.ExitHle(traced.EnterHle(1, "L", "M", name.c_str(), 0, i), i + 1);
+        traced.ExitHle(traced.EnterHle(1, "L", "M", name.c_str(), 0, 0, i), i + 1);
     }
     Phase1::Check(traced.TakeTracedEvents().size() == 3, "tracing stops at its cap");
     Phase1::Check(traced.TakeTracedEvents().empty(), "taking the trace drains it");
 
     State bounded(3);
     for (uint64_t i = 0; i < 4; ++i) {
-        const auto token = bounded.EnterHle(static_cast<uint32_t>(i + 1), "L", "M", "F", 0,
+        const auto token = bounded.EnterHle(static_cast<uint32_t>(i + 1), "L", "M", "F", 0, 0,
                                             10 + i * 2);
         bounded.ExitHle(token, 11 + i * 2);
     }
     Phase1::Check(bounded.RecentEventCount() == 3,
                   "runtime diagnostics recent HLE ring is bounded");
+
+    // One return address names the primitive a thread stopped in; the frames
+    // below it name the subsystem that decided to wait, which is the part a
+    // stall report cannot otherwise supply. The walk anchors on the frame
+    // carrying the recorded call site rather than on rbp, because whether an
+    // HLE entry point keeps a frame pointer is the host compiler's choice.
+    Libs::RuntimeDiagnostics::SetModuleResolver([](uint64_t address) -> std::string {
+        return address >= 0x0000000900000000ull && address < 0x0000000902000000ull
+                   ? std::string {"eboot.bin"}
+                   : std::string {};
+    });
+
+    State walked(8);
+    // Two dead slots stand in for the entry point's own frame, so the anchor
+    // has to be searched for rather than assumed to be the first thing above
+    // the scope object.
+    alignas(16) uint64_t frames[10] {};
+    const auto base = reinterpret_cast<uint64_t>(static_cast<void*>(frames));
+    frames[0] = 0x00000000deadbeefull;
+    frames[1] = 0x00000000deadbeefull;
+    frames[2] = base + 32;
+    frames[3] = 0x0000000901000010ull;
+    frames[4] = base + 48;
+    frames[5] = 0x0000000901000020ull;
+    frames[6] = 0;
+    frames[7] = 0x0000000901000030ull;
+    walked.RecordGuestThreadStart(5, "MainThread", 0x0000000900000000ull, 77, 0);
+    walked.RecordGuestThreadStack(5, base, sizeof(frames));
+    const auto walk = walked.EnterHle(5, "libkernel", "libkernel", "KernelUsleep",
+                                      0x0000000901000010ull, base, 10);
+    const auto backtrace = walked.BuildReport(20);
+    Phase1::Check(backtrace.find("#0 0x901000010") != std::string::npos &&
+                      backtrace.find("#1 0x901000020") != std::string::npos &&
+                      backtrace.find("#2 0x901000030") != std::string::npos,
+                  "a stalled call reports the guest frames that led to it");
+    walked.ExitHle(walk, 30);
+
+    // A call site that no frame above the anchor carries cannot be placed in
+    // the chain, and saying so beats publishing one assembled out of whatever
+    // the stack happened to hold.
+    const auto mismatched = walked.EnterHle(5, "libkernel", "libkernel", "KernelUsleep",
+                                            0x0000000901000099ull, base, 40);
+    Phase1::Check(walked.BuildReport(50).find("backtrace=unavailable") != std::string::npos,
+                  "a call site no frame carries is not walked");
+    walked.ExitHle(mismatched, 60);
+
+    // With no stack recorded for the thread there is nothing to bound the
+    // walk, so it does not happen.
+    State unbounded(8);
+    unbounded.RecordGuestThreadStart(6, "Worker", 0, 78, 0);
+    const auto unknown = unbounded.EnterHle(6, "libkernel", "libkernel", "KernelUsleep",
+                                            0x0000000901000010ull, base, 10);
+    const auto unwalked = unbounded.BuildReport(20);
+    Phase1::Check(unwalked.find("    #0 ") == std::string::npos &&
+                      unwalked.find("backtrace=") == std::string::npos,
+                  "a thread with no recorded stack reports no frames");
+    unbounded.ExitHle(unknown, 30);
+    Libs::RuntimeDiagnostics::SetModuleResolver(nullptr);
 
     std::puts("PHASE1_PASS runtime diagnostics expose bounded stall evidence");
     return 0;

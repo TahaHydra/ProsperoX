@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <ostream>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -20,14 +21,11 @@ std::atomic_bool                g_enabled {false};
 std::once_flag                  g_initialize_once;
 std::atomic<ModuleResolver>     g_module_resolver {nullptr};
 
-// Formats a guest return address. The resolver runs only while a report is
+// Formats a guest code address. The resolver runs only while a report is
 // being built, never on the call path.
-std::string DescribeAddress(uint64_t address) {
-	if (address == 0) {
-		return {};
-	}
+std::string FormatAddress(uint64_t address) {
 	std::ostringstream out;
-	out << " caller=0x" << std::hex << address << std::dec;
+	out << "0x" << std::hex << address << std::dec;
 	if (const auto resolver = g_module_resolver.load(std::memory_order_acquire);
 	    resolver != nullptr) {
 		auto described = resolver(address);
@@ -36,6 +34,21 @@ std::string DescribeAddress(uint64_t address) {
 		}
 	}
 	return out.str();
+}
+
+std::string DescribeAddress(uint64_t address) {
+	if (address == 0) {
+		return {};
+	}
+	return " caller=" + FormatAddress(address);
+}
+
+// Whether an address falls inside a module the loader mapped. A frame walk has
+// no other way to tell a return address from a spilled integer that happens to
+// sit where one would be.
+bool IsGuestCode(uint64_t address) {
+	const auto resolver = g_module_resolver.load(std::memory_order_acquire);
+	return resolver != nullptr && !resolver(address).empty();
 }
 
 uint64_t AgeMs(uint64_t now_us, uint64_t then_us) {
@@ -136,7 +149,7 @@ std::vector<std::string> State::TakeTracedEvents() {
 }
 
 HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char* module, const char* function,
-                             uint64_t caller_address, uint64_t now_us) {
+                             uint64_t caller_address, uint64_t stack_anchor, uint64_t now_us) {
 	std::lock_guard lock(m_mutex);
 
 	const auto token = m_next_hle_token++;
@@ -145,6 +158,7 @@ HleCallToken State::EnterHle(uint32_t thread_id, const char* library, const char
 	              .module = Safe(module),
 	              .function = Safe(function),
 	              .caller_address = caller_address,
+	              .stack_anchor = stack_anchor,
 	              .entered_us = now_us};
 	const auto name = HleName(call);
 	m_active_hle.emplace(token, std::move(call));
@@ -176,6 +190,18 @@ void State::RecordGuestThreadStart(uint32_t thread_id, const char* name, uint64_
 	event << "THREAD_START tid=" << thread_id << " name=" << Safe(name) << " entry=0x" << std::hex
 	      << entry_address << std::dec << " host_tid=" << host_thread_id;
 	PushRecentLocked({}, event.str());
+}
+
+void State::RecordGuestThreadStack(uint32_t thread_id, uint64_t stack_address, uint64_t stack_size) {
+	std::lock_guard lock(m_mutex);
+	auto& thread = m_threads[thread_id];
+	if (stack_address == 0 || stack_size == 0 || stack_address > UINT64_MAX - stack_size) {
+		thread.stack_low  = 0;
+		thread.stack_high = 0;
+		return;
+	}
+	thread.stack_low  = stack_address;
+	thread.stack_high = stack_address + stack_size;
 }
 
 void State::RecordGuestThreadExit(uint32_t thread_id, uint64_t now_us) {
@@ -267,6 +293,79 @@ void State::RecordShaderPhase(const char* stage, uint64_t shader_hash, const cha
 	                       .valid = true};
 }
 
+void State::AppendGuestBacktraceLocked(std::ostream& out, const HleCall& call,
+                                       const ThreadActivity& thread) const {
+	// Enough frames to name the subsystem that is waiting without turning one
+	// stalled thread into a page of report.
+	constexpr size_t   MAX_FRAMES = 16;
+	constexpr uint64_t FRAME_SIZE = 2 * sizeof(uint64_t);
+	// An HLE entry point's own frame is small; this is room for the largest of
+	// them and nothing like the distance to a false match further up.
+	constexpr uint64_t MAX_ANCHOR_SCAN = 4096;
+
+	if (call.stack_anchor == 0 || thread.stack_low == 0 ||
+	    thread.stack_high < thread.stack_low + FRAME_SIZE) {
+		return;
+	}
+
+	// A frame has to be aligned and wholly inside the stack this thread was
+	// given. That is what makes the walk a bounded read of memory the guest
+	// owns rather than a chase through whatever the values happen to be.
+	const auto in_stack = [&](uint64_t address) {
+		return (address % alignof(uint64_t)) == 0 && address >= thread.stack_low &&
+		       address <= thread.stack_high - FRAME_SIZE;
+	};
+
+	// Whether an HLE entry point keeps a frame pointer is up to the host
+	// compiler, so rbp at the boundary cannot be trusted to be one. What can
+	// be trusted is the return address the call recorded: the innermost guest
+	// frame is the one that holds it. Search upwards from inside the entry
+	// point's own frame -- everything the guest still has live is above it,
+	// and everything stale from earlier calls is below.
+	const auto anchor_from = (call.stack_anchor + alignof(uint64_t) - 1) &
+	                         ~static_cast<uint64_t>(alignof(uint64_t) - 1);
+	uint64_t   frame       = 0;
+	for (auto candidate = anchor_from; candidate < anchor_from + MAX_ANCHOR_SCAN; candidate += 8) {
+		if (!in_stack(candidate)) {
+			break;
+		}
+		const auto* slots = reinterpret_cast<const uint64_t*>(candidate);
+		if (slots[1] != call.caller_address || slots[0] <= candidate || !in_stack(slots[0])) {
+			continue;
+		}
+		// The frame above has to look like one too. One matching pair can be a
+		// coincidence; two in a row, with a return address the loader can name,
+		// is a call chain.
+		const auto* above = reinterpret_cast<const uint64_t*>(slots[0]);
+		if (above[1] != 0 && !IsGuestCode(above[1])) {
+			continue;
+		}
+		frame = candidate;
+		break;
+	}
+
+	if (frame == 0) {
+		out << "    backtrace=unavailable (no frame carrying the recorded call site)\n";
+		return;
+	}
+
+	for (size_t depth = 0; depth < MAX_FRAMES; ++depth) {
+		const auto* slots          = reinterpret_cast<const uint64_t*>(frame);
+		const auto  next           = slots[0];
+		const auto  return_address = slots[1];
+		if (return_address == 0) {
+			break;
+		}
+		out << "    #" << depth << ' ' << FormatAddress(return_address) << '\n';
+		// The chain runs towards the base of the stack, so a frame that does
+		// not move up is the end of what can be trusted.
+		if (next <= frame || !in_stack(next)) {
+			break;
+		}
+		frame = next;
+	}
+}
+
 std::string State::BuildReport(uint64_t now_us) const {
 	std::lock_guard lock(m_mutex);
 	std::ostringstream out;
@@ -277,6 +376,9 @@ std::string State::BuildReport(uint64_t now_us) const {
 		out << "  token=" << token << " tid=" << call.thread_id << " " << HleName(call)
 		    << " active_ms=" << AgeMs(now_us, call.entered_us)
 		    << DescribeAddress(call.caller_address) << '\n';
+		if (const auto thread = m_threads.find(call.thread_id); thread != m_threads.end()) {
+			AppendGuestBacktraceLocked(out, call, thread->second);
+		}
 	}
 
 	// One line per guest thread the emulator has ever seen crossing the HLE
@@ -420,7 +522,13 @@ void Initialize() {
 HleScope::HleScope(uint32_t thread_id, const char* library, const char* module, const char* function,
                    uint64_t caller_address) {
 	if (Enabled()) {
-		m_token = GlobalState().EnterHle(thread_id, library, module, function, caller_address, NowUs());
+		// This object is a local of the HLE entry point, so its address is
+		// inside that frame: every guest frame still live is above it, and
+		// everything left over from earlier calls is below. That is the fixed
+		// point a frame walk can start from without assuming the host
+		// compiler kept a frame pointer here.
+		m_token = GlobalState().EnterHle(thread_id, library, module, function, caller_address,
+		                                 reinterpret_cast<uint64_t>(this), NowUs());
 	}
 }
 

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <iosfwd>
 #include <map>
 #include <mutex>
 #include <string>
@@ -18,7 +19,7 @@ public:
 	explicit State(size_t recent_capacity = 128);
 
 	HleCallToken EnterHle(uint32_t thread_id, const char* library, const char* module, const char* function,
-	                      uint64_t caller_address, uint64_t now_us);
+	                      uint64_t caller_address, uint64_t stack_anchor, uint64_t now_us);
 	void ExitHle(HleCallToken token, uint64_t now_us);
 
 	void RecordGpuDispatch(uint64_t submission_id, uint64_t shader_address, uint32_t groups_x, uint32_t groups_y,
@@ -39,6 +40,12 @@ public:
 	                            uint64_t host_thread_id, uint64_t now_us);
 	void RecordGuestThreadExit(uint32_t thread_id, uint64_t now_us);
 
+	// The bounds of the stack a guest thread runs on. Without them a frame
+	// walk has no way to tell a frame from a stale value that happens to look
+	// like one, so the report carries no backtrace rather than a fabricated
+	// one.
+	void RecordGuestThreadStack(uint32_t thread_id, uint64_t stack_address, uint64_t stack_size);
+
 	[[nodiscard]] std::string BuildReport(uint64_t now_us) const;
 	[[nodiscard]] size_t RecentEventCount() const;
 
@@ -57,6 +64,7 @@ private:
 		std::string module;
 		std::string function;
 		uint64_t caller_address = 0;
+		uint64_t stack_anchor = 0;
 		uint64_t entered_us = 0;
 	};
 
@@ -95,6 +103,8 @@ private:
 		uint64_t     last_caller   = 0;
 		uint64_t     last_exit_us  = 0;
 		HleCallToken active_token  = 0;
+		uint64_t     stack_low     = 0;
+		uint64_t     stack_high    = 0;
 	};
 
 	struct LastShaderPhase {
@@ -111,6 +121,14 @@ private:
 	void PushRecentLocked(std::string key, std::string event);
 	void PushLineLocked(std::string event);
 	static std::string HleName(const HleCall& call);
+
+	// Walks the guest frames below an HLE call. The walk is anchored on the
+	// one frame it can identify -- the one carrying the return address the
+	// call already recorded -- and every frame after it has to land inside
+	// the thread's own stack, above the one below it. Anything else ends the
+	// walk instead of guessing.
+	void AppendGuestBacktraceLocked(std::ostream& out, const HleCall& call,
+	                                const ThreadActivity& thread) const;
 
 	mutable std::mutex m_mutex;
 	size_t m_recent_capacity = 0;
