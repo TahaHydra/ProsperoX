@@ -16,6 +16,9 @@
 #include <windows.h>
 #undef min
 #undef max
+// windows.h defines MemoryBarrier as a macro, which collides with the Vulkan
+// barrier types this header's users name.
+#undef MemoryBarrier
 #elif defined(__APPLE__)
 #include <pthread.h>
 #elif defined(__linux__)
