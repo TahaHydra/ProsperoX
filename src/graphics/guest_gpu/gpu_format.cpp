@@ -40,7 +40,18 @@ constexpr FormatInfo kFormatInfo[] = {
 	{BufferFormat::k16_16SInt, 4, 0, 4, true, false, true},
 	{BufferFormat::k16_16Float, 4, 0, 4, true, false},
 	{BufferFormat::k11_11_10UInt, 4, 0, 4, true, true},
+	{BufferFormat::k11_11_10UNorm, 4, 0, 4, true, false},
+	{BufferFormat::k11_11_10SNorm, 4, 0, 4, true, false},
+	{BufferFormat::k11_11_10UScaled, 4, 0, 4, true, false},
+	{BufferFormat::k11_11_10SScaled, 4, 0, 4, true, false},
+	{BufferFormat::k11_11_10SInt, 4, 0, 4, true, false, true},
 	{BufferFormat::k11_11_10Float, 4, 0, 4, true, false},
+	{BufferFormat::k10_11_11UNorm, 4, 0, 4, true, false},
+	{BufferFormat::k10_11_11SNorm, 4, 0, 4, true, false},
+	{BufferFormat::k10_11_11UScaled, 4, 0, 4, true, false},
+	{BufferFormat::k10_11_11SScaled, 4, 0, 4, true, false},
+	{BufferFormat::k10_11_11UInt, 4, 0, 4, true, true},
+	{BufferFormat::k10_11_11SInt, 4, 0, 4, true, false, true},
 	{BufferFormat::k10_10_10_2UNorm, 4, 0, 4, true, false},
 	{BufferFormat::k10_10_10_2UInt, 4, 0, 4, true, true},
 	{BufferFormat::k8_8_8_8UNorm, 4, 0, 4, true, false},
@@ -61,8 +72,11 @@ constexpr FormatInfo kFormatInfo[] = {
 	{BufferFormat::k32_32_32_32UInt, 16, 0, 16, true, true},
 	{BufferFormat::k32_32_32_32SInt, 16, 0, 16, true, false, true},
 	{BufferFormat::k32_32_32_32Float, 16, 0, 16, true, false},
-	{BufferFormat::k8Srgb, 1, 0, 0, true, false},
-	{BufferFormat::k8_8Srgb, 2, 0, 0, true, false},
+	// The one- and two-channel sRGB layouts are renderable like their UNorm
+	// counterparts; the tiling math only needs the element size, which is the
+	// same either way. Ghost of Yotei PPSA26344 renders to a 3840x2160 one.
+	{BufferFormat::k8Srgb, 1, 0, 1, true, false},
+	{BufferFormat::k8_8Srgb, 2, 0, 2, true, false},
 	{BufferFormat::k8_8_8_8Srgb, 4, 0, 4, true, false},
 	{BufferFormat::k9_9_9_5Float, 4, 0, 0, true, false},
 	{BufferFormat::k5_6_5UNorm, 2, 0, 2, true, false},
@@ -231,7 +245,24 @@ TextureNumericClass SampledTextureNumericClass(BufferFormat format) {
 }
 
 BufferFormat RemapTextureFormat(BufferFormat format) {
-	return format == BufferFormat::k11_11_10UInt ? BufferFormat::k32UInt : format;
+	// The three-channel packed 32-bit layouts have no sampled Vulkan format
+	// except the floating-point one, so every other numeric type is sampled as
+	// a raw dword and unpacked by the shader.
+	switch (format) {
+		case BufferFormat::k11_11_10UNorm:
+		case BufferFormat::k11_11_10SNorm:
+		case BufferFormat::k11_11_10UScaled:
+		case BufferFormat::k11_11_10SScaled:
+		case BufferFormat::k11_11_10UInt:
+		case BufferFormat::k11_11_10SInt:
+		case BufferFormat::k10_11_11UNorm:
+		case BufferFormat::k10_11_11SNorm:
+		case BufferFormat::k10_11_11UScaled:
+		case BufferFormat::k10_11_11SScaled:
+		case BufferFormat::k10_11_11UInt:
+		case BufferFormat::k10_11_11SInt: return BufferFormat::k32UInt;
+		default: return format;
+	}
 }
 
 } // namespace Libs::Graphics::Prospero

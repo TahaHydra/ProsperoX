@@ -361,9 +361,14 @@ Format::BufferFormatInfo ImageConversionFormat(const EmitterState&   state,
 	const auto format = state.program.info.images[mem.resource].conversion_format;
 	if (format == Prospero::BufferFormat::kInvalid) return {};
 	const auto info = Format::GetFormatInfo(format);
-	EXIT_IF(Prospero::SampledTextureNumericClass(format) != Prospero::TextureNumericClass::Uint ||
-	        Prospero::RemapTextureFormat(format) == format ||
-	        info.type != Format::ComponentType::Uint || !info.packed_bitfield ||
+	const auto numeric_class = Prospero::SampledTextureNumericClass(format);
+	const auto expected_class = info.type == Format::ComponentType::Uint
+	                                ? Prospero::TextureNumericClass::Uint
+	                            : info.type == Format::ComponentType::Sint
+	                                ? Prospero::TextureNumericClass::Sint
+	                                : Prospero::TextureNumericClass::Float;
+	EXIT_IF(numeric_class != expected_class || Prospero::RemapTextureFormat(format) == format ||
+	        info.type == Format::ComponentType::Unknown || !info.packed_bitfield ||
 	        info.byte_size != sizeof(uint32_t) || info.component_count == 0u ||
 	        info.component_count > 4u);
 	return info;
@@ -377,12 +382,24 @@ uint32_t UnpackImageTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint
 	ctx.state.builder.AddFunction({OpCompositeExtract, TypeU32(ctx.state), packed, texel, 0u});
 	uint32_t components[4] = {ConstantU32(ctx.state, 0), ConstantU32(ctx.state, 0),
 	                          ConstantU32(ctx.state, 0), ConstantU32(ctx.state, 0)};
+	const bool component_signed = IsSignedFormatComponent(info.type);
 	for (uint32_t component = 0; component < info.component_count; component++) {
-		components[component] = ctx.state.builder.AllocateId();
-		ctx.state.builder.AddFunction({OpBitFieldUExtract, TypeU32(ctx.state),
-		                               components[component], packed,
+		const auto extracted = ctx.state.builder.AllocateId();
+		const auto type = component_signed ? TypeI32(ctx.state) : TypeU32(ctx.state);
+		const auto source =
+		    component_signed
+		        ? Unary(ctx.state, OpBitcast, TypeI32(ctx.state), packed)
+		        : packed;
+		ctx.state.builder.AddFunction({component_signed ? OpBitFieldSExtract : OpBitFieldUExtract,
+		                               type, extracted, source,
 		                               ConstantU32(ctx.state, info.component_bit_offset[component]),
 		                               ConstantU32(ctx.state, info.component_bits[component])});
+		const auto raw = component_signed
+		                     ? Unary(ctx.state, OpBitcast, TypeU32(ctx.state), extracted)
+		                     : extracted;
+		// A normalized or scaled component is a float, so it leaves here as the
+		// bits of one, which is what the result vector expects for this class.
+		components[component] = NormalizeFormatComponent(ctx.state, info, component, raw);
 	}
 	for (uint32_t component = info.component_count; component < 4u; component++) {
 		components[component] = components[component % info.component_count];
