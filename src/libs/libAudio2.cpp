@@ -621,10 +621,15 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 		return AUDIO_OUT2_ERROR_PORT_FULL;
 	}
 
+	// An object port is a source the 3D mixer renders into a master port; it owns
+	// no output device of its own, so it is created without one rather than
+	// reported as a backend that could not be opened.
+	const bool needs_pcm = audio_format != AudioInternal::Format::Unknown &&
+	                       !audioout2_port_type_is_object(params->port_type);
+
 	int audio_handle = 0;
 
-	if (audio_format != AudioInternal::Format::Unknown &&
-	    !audioout2_port_type_is_object(params->port_type)) {
+	if (needs_pcm) {
 		audio_handle = AudioInternal::AudioOutOpen(audio_type, samples_num, params->sampling_freq,
 		                                           audio_format);
 	}
@@ -633,7 +638,7 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 	const bool reserved = port_state->used && port_state->handle == next_port;
 	if (reserved) {
 		port_state->audio_handle = audio_handle;
-		if (audio_handle == 0) {
+		if (needs_pcm && audio_handle == 0) {
 			*port_state = AudioOut2PortStateEntry {};
 		}
 	}
@@ -642,7 +647,7 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 		audioout2_close_audio_handle(audio_handle);
 		return AUDIO_OUT2_ERROR_INVALID_PARAM;
 	}
-	if (audio_handle == 0) {
+	if (needs_pcm && audio_handle == 0) {
 		LOGF("AudioOut2: PCM backend unavailable or unsupported port/format\n");
 		return AUDIO_OUT2_ERROR_NOT_READY;
 	}
