@@ -11,6 +11,7 @@
 #include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/recompiler/ir/passes/ReadLaneElimination.h"
+#include "graphics/shader/recompiler/ir/passes/DynamicBuffers.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
@@ -662,6 +663,7 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 		IR::EliminateDeadCode(ir.blocks);
 	}
 	IR::BuildSrtPlan(ir);
+	IR::LowerDynamicBuffers(ir);
 	IR::EliminateDeadCode(ir.blocks);
 	IR::TrackResources(ir);
 	IR::EliminateDeadCode(ir.blocks);
