@@ -13,11 +13,11 @@ and renders. It compiles **88 compute, 10 vertex and 21 pixel shaders**, runs
 its full post-processing chain at 3840x2160, and gets **thirteen frames in**
 before the title itself faults on a null pointer.
 
-That fault is now the only thing in the way, and it is on the guest's side of
-the boundary: the title's renderer init returns failure at startup, the caller
-turns that into `-4` and carries on, and thirteen frames later a lookup into
-the table that init never allocated reads a null pointer. Everything the
-emulator is asked to do up to that point it does.
+That fault is now the only thing in the way, and it is the tail of a failure
+that happened at startup: the title's audio engine never finished initialising,
+so the voice table it owns was never allocated, and thirteen frames later a
+voice lookup reads a null pointer. Everything the emulator is asked to do for
+rendering up to that point it does.
 
 For contrast, at the start of the previous session Ghost compiled 6 compute
 shaders, had never compiled a vertex or pixel shader, and had issued **zero**
@@ -52,15 +52,32 @@ draws and dispatches.
 
 ## What is still in the way
 
-1. **The title's renderer init fails at startup.** `eboot.bin+0x2fbf40`
-   returns false to `eboot.bin+0x2505f0`, which returns `-4`. The init runs
-   far enough to store its configuration but never reaches the allocations at
-   its end, so the 39-entry table it owns stays null. Thirteen frames later
-   `eboot.bin+0x2e1c00` indexes entry 28 of that table and reads
-   `[null+0x18]`. The init makes 95 calls and reaches no emulated library
-   directly, so finding the branch that gives up needs guest-side tracing the
-   emulator does not have yet — a conditional guest breakpoint, or a call
-   trace over the title's own code.
+1. **The title's audio engine fails to initialise at startup.** The function
+   is `snd_SynthInit` at `eboot.bin+0x2fbf40` — Sony's SCREAM/NCA audio stack,
+   which the title's own error strings name. It returns false to
+   `eboot.bin+0x2505f0`, which returns `-4` and carries on. The title's log
+   buffer at `eboot.bin+0x442af90` still holds the consequence:
+
+   > `Unable to load bank. Maximum bank limit (0) reached. Increase
+   > ScreamPlatformInit::maxBanks to load more banks.`
+
+   The init passes every parameter check it makes — the three submix partition
+   lengths are 256 and the processing latency is accepted — and gets as far as
+   `eboot.bin+0x2fc2c0` before giving up. Its two remaining failure paths are
+   `NCA::System::CreateInstance()` returning an error and the plugin-heap
+   allocation returning null, and both of those come down to a guest
+   allocation through the title's own libc (`iF1iQHzxBJU`) handing back null
+   for a block of about 68 KB. Raising the flexible-memory size to 1 GiB does
+   not change it, so the shortage is not there.
+
+   Thirteen frames later `eboot.bin+0x2e1c00` indexes entry 28 of the voice
+   table that init never allocated and reads `[null+0x18]`.
+
+   The next step is to find which guest memory call returns the error that
+   makes that allocation fail. The emulator has no guest-side call trace, so
+   this was reconstructed by disassembling the title; a trace over the guest's
+   memory entry points, or surfacing the title's own log sink, would have
+   given the same answer immediately and is worth building.
 2. **Compilation dominates the frame.** The command processor is blocked
    while a pipeline is built, so the draw rate says more about compile cost
    than about rendering.
@@ -69,11 +86,10 @@ draws and dispatches.
 
 ## Distance to a menu
 
-The renderer runs; the title stops itself. Everything between here and a menu
-is behind one guest-side failure whose cause is not yet identified, so any
-percentage is a guess about what that failure turns out to need. If it is one
-more library return value, the menu is close. If the init depends on a
-subsystem that is not implemented at all, it is not.
+The renderer runs; the title stops itself over audio. Everything between here
+and a menu is behind one guest allocation that returns null at startup, so any
+percentage is a guess about what that allocation turns out to need. The
+rendering path is no longer what is holding the title back.
 
 ## Bendy
 
