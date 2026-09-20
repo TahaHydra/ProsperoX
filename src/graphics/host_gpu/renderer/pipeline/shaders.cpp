@@ -826,6 +826,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline_layout == nullptr);
 
 	vk::ComputePipelineCreateInfo info {};
+	// A guest dispatch can ask for more workgroups than Vulkan allows in one
+	// command, and the split that fixes that needs a base workgroup offset.
+	info.flags             = vk::PipelineCreateFlagBits::eDispatchBase;
 	info.stage             = comp_shader_stage_info;
 	info.layout            = pipeline.pipeline_layout;
 	info.basePipelineIndex = -1;

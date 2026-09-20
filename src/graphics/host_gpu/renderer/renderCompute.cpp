@@ -37,6 +37,40 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+namespace {
+
+// The guest sizes a dispatch by the command packet alone, so it can ask for
+// far more workgroups per dimension than Vulkan accepts in one command.
+// Handing the driver an over-long dispatch loses the device, so the work is
+// split into legal chunks; the base offset keeps every workgroup id the same
+// as it would have been in one dispatch, and workgroups are independent, so
+// no ordering is lost by issuing them as several commands.
+void DispatchWithinLimits(const GraphicContext& graphics, vk::CommandBuffer buffer,
+                          uint32_t groups_x, uint32_t groups_y, uint32_t groups_z) {
+	const auto& limit = graphics.physical_device_properties.limits.maxComputeWorkGroupCount;
+	if (groups_x <= limit[0] && groups_y <= limit[1] && groups_z <= limit[2]) {
+		buffer.dispatch(groups_x, groups_y, groups_z);
+		return;
+	}
+
+	LOGF("Splitting dispatch %" PRIu32 ",%" PRIu32 ",%" PRIu32
+	     " to fit the device limit %" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n",
+	     groups_x, groups_y, groups_z, limit[0], limit[1], limit[2]);
+	for (uint32_t z = 0; z < groups_z; z += limit[2]) {
+		const auto count_z = std::min(limit[2], groups_z - z);
+		for (uint32_t y = 0; y < groups_y; y += limit[1]) {
+			const auto count_y = std::min(limit[1], groups_y - y);
+			for (uint32_t x = 0; x < groups_x; x += limit[0]) {
+				const auto count_x = std::min(limit[0], groups_x - x);
+				buffer.dispatchBase(x, y, z, count_x, count_y, count_z);
+			}
+		}
+	}
+}
+
+} // namespace
+
 static uint64_t BufferDescriptorSize(const ShaderBufferResource& descriptor) {
 	const uint64_t records = descriptor.NumRecords();
 	const uint64_t stride  = descriptor.Stride();
@@ -404,7 +438,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	DispatchWithinLimits(m_context.GetGraphics(), vk_buffer, thread_group_x,
+	                     thread_group_y, thread_group_z);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
