@@ -430,6 +430,8 @@ struct ShaderInfo {
 	int32_t                          instance_offset_sgpr = -1;
 	bool                             has_bitwise_xor    = false;
 	bool                             uses_dma           = false;
+	// A flat address the shader writes through: an alias this pass cannot bound.
+	bool                             writes_dma         = false;
 
 	bool operator==(const ShaderInfo& other) const = default;
 };
@@ -462,6 +464,12 @@ struct DescriptorSource {
 	// Storing the heap geometry rather than assuming a packed 32-byte table is
 	// what lets a title keep its descriptors inside a larger per-record struct.
 	struct IndirectImage {
+		// The key is not always read out of a table. When it is a loop counter,
+		// or anything else this pass cannot walk, the domain that matters is
+		// still bounded: only the keys the heap can address produce a
+		// descriptor at all, and the rest read past its end.
+		static constexpr uint32_t NoKeyTable = UINT32_MAX;
+
 		uint32_t material_source = 0;
 		uint32_t heap_source     = 0;
 		uint32_t selector_stride = 0;
@@ -469,8 +477,16 @@ struct DescriptorSource {
 		uint32_t key_arg         = 0;
 		uint32_t heap_stride     = 32;
 		uint32_t heap_offset     = 0;
-		// Four for an r128 descriptor, which the translator zero-pads to eight.
+		// Four for an r128 image descriptor, which the translator zero-pads to
+		// eight, and four for a sampler.
 		uint32_t dword_count     = 8;
+		// The key a record yields is often narrower than the dword it sits in.
+		uint32_t key_mask        = 0xffffffffu;
+		// A descriptor table is reached either through a buffer descriptor or
+		// through a raw 64-bit pointer. Only the keys are enumerated, so the
+		// table holding the descriptors does not have to be bounded; the one
+		// holding the keys does, and is always a buffer.
+		bool     heap_is_address = false;
 
 		bool operator==(const IndirectImage& other) const = default;
 	};

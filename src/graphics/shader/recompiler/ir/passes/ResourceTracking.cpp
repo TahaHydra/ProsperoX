@@ -77,7 +77,8 @@ public:
 		m_info.images.clear();
 		m_info.samplers.clear();
 		m_info.sampled_pairs.clear();
-		m_info.uses_dma = false;
+		m_info.uses_dma   = false;
+		m_info.writes_dma = false;
 	}
 
 	void Run() {
@@ -112,17 +113,20 @@ public:
 			for (uint32_t dword = 5u; dword < plan.roots.size(); dword++) {
 				plan.handle->SetArg(dword, plan.key);
 			}
-			for (uint32_t dword = 0; dword < plan.read_count; dword++) {
-				m_program.memory_info[plan.memory[dword]].planning_only = true;
+			RetireIndirectReads(plan.memory, plan.exclusive, plan.read_count);
+		}
+		for (const auto& plan: m_indirect_samplers) {
+			// A sampler handle's dwords are never read again -- the resource
+			// index in its flags is what the emitter uses -- so point them at
+			// the key and let the descriptor reads die with it.
+			for (uint32_t dword = 0; dword < 4u; dword++) {
+				plan.handle->SetArg(dword, plan.key);
 			}
+			RetireIndirectReads(plan.memory, plan.exclusive, 4u);
 		}
 		std::erase_if(m_program.dynamic_reads, [&](Value value) {
 			const auto* inst = value.Resolve().TryInstruction();
-			return std::any_of(m_indirect_images.begin(), m_indirect_images.end(),
-			                   [&](const IndirectImagePlan& plan) {
-				return std::find(plan.reads.begin(), plan.reads.begin() + plan.read_count, inst) !=
-				       plan.reads.begin() + plan.read_count;
-			});
+			return IsRetiredIndirectRead(inst);
 		});
 		m_program.descriptor_sources         = std::move(m_sources);
 		m_program.info                       = std::move(m_info);
@@ -150,6 +154,19 @@ private:
 		std::array<Value, 8>       roots {};
 		std::array<uint32_t, 8>    memory {};
 		std::array<const Inst*, 8> reads {};
+		std::array<bool, 8>        exclusive {};
+	};
+
+	// A sampler selected by the same kind of runtime key. It is planned on its
+	// own rather than as part of an image's plan, because several sample sites
+	// share one image descriptor while naming different samplers.
+	struct IndirectSamplerPlan {
+		Inst*                      handle = nullptr;
+		uint32_t                   source = 0;
+		Value                      key;
+		std::array<uint32_t, 4>    memory {};
+		std::array<const Inst*, 4> reads {};
+		std::array<bool, 4>        exclusive {};
 	};
 
 	[[noreturn]] void Fail(uint32_t pc, const std::string& reason) const {
@@ -227,8 +244,14 @@ private:
 		});
 	}
 
-	const MemoryInfo* ScalarReadMemory(const Inst& read, uint32_t& index) const {
-		if (read.GetOpcode() != ValueOpcode::ReadConstBuffer || read.NumArgs() != 2u) {
+	// A scalar dword read, through a buffer descriptor or through a raw 64-bit
+	// pointer. Both are a base an offset is added to, and a descriptor table is
+	// reached either way.
+	const MemoryInfo* ScalarReadMemory(const Inst& read, uint32_t& index,
+	                                   bool* is_address = nullptr) const {
+		const auto op = read.GetOpcode();
+		if ((op != ValueOpcode::ReadConstBuffer && op != ValueOpcode::LoadAddressU32) ||
+		    read.NumArgs() < 2u) {
 			return nullptr;
 		}
 		index = read.Flags<MemoryFlags>().index;
@@ -236,10 +259,19 @@ private:
 			return nullptr;
 		}
 		const auto& memory = m_program.memory_info[index];
-		return memory.kind == ResourceKind::ScalarBuffer && memory.data_bits == 32u &&
-		               memory.data_dwords == 1u
-		           ? &memory
-		           : nullptr;
+		if (memory.data_bits != 32u || memory.data_dwords != 1u) {
+			return nullptr;
+		}
+		const bool address = op == ValueOpcode::LoadAddressU32;
+		const auto expected =
+		    address ? ResourceKind::ScalarAddress : ResourceKind::ScalarBuffer;
+		if (memory.kind != expected) {
+			return nullptr;
+		}
+		if (is_address != nullptr) {
+			*is_address = address;
+		}
+		return &memory;
 	}
 
 	bool MemoryIndexBelongsTo(uint32_t index, const Inst& owner) const {
@@ -271,6 +303,32 @@ private:
 			return false;
 		}
 		source = InternSource(descriptor);
+		return true;
+	}
+
+	// The base a descriptor table is read from: a four-dword buffer descriptor
+	// or a two-dword pointer, padded to four so both occupy the same slot in the
+	// lookup's own source.
+	bool MakeRuntimeTableSource(const Inst& handle, uint32_t pc, bool& is_address,
+	                            uint32_t& source, DescriptorSource& descriptor) {
+		uint32_t width = 0;
+		if (handle.GetOpcode() == ValueOpcode::GetBufferResource) {
+			width      = 4u;
+			is_address = false;
+		} else if (handle.GetOpcode() == ValueOpcode::GetAddressResource) {
+			width      = 2u;
+			is_address = true;
+		} else {
+			return false;
+		}
+		MakeSource(handle, width, false, false, descriptor, pc);
+		uint32_t bad_dword = 0;
+		if (!ValidateSource(descriptor, bad_dword)) {
+			return false;
+		}
+		source = InternSource(descriptor);
+		descriptor.dwords[2] = Value(0u);
+		descriptor.dwords[3] = Value(0u);
 		return true;
 	}
 
@@ -319,6 +377,160 @@ private:
 		return stride != 0u && index.TryInstruction() != nullptr;
 	}
 
+	// A descriptor the shader looks up at runtime, in the shape both images and
+	// samplers arrive in:
+	//     key        = material[selector * selector_stride + selector_offset]
+	//     descriptor = heap[key * heap_stride + heap_offset]
+	// Nothing in that shape says what the descriptor turns out to be, so an image
+	// and the sampler beside it are matched by the same code and each ends up
+	// with its own source over its own pair of buffers.
+	struct IndirectDescriptorMatch {
+		DescriptorSource           source;
+		Value                      key;
+		std::array<uint32_t, 8>    memory {};
+		std::array<const Inst*, 8> reads {};
+		std::array<bool, 8>        exclusive {};
+	};
+
+	bool TryMatchIndirectDescriptor(const Inst& handle, uint32_t read_count, uint32_t pc,
+	                                IndirectDescriptorMatch& match) {
+		Inst*    heap_handle = nullptr;
+		Value    heap_offset;
+		uint32_t heap_base = 0;
+
+		const std::array<const Inst*, 1> handle_users {&handle};
+		for (uint32_t dword = 0; dword < read_count; dword++) {
+			auto* read = handle.Arg(dword).Resolve().TryInstruction();
+			if (read == nullptr) {
+				return false;
+			}
+			uint32_t    memory_index = 0;
+			const auto* memory       = ScalarReadMemory(*read, memory_index);
+			if (memory == nullptr || !MemoryIndexBelongsTo(memory_index, *read)) {
+				return false;
+			}
+			if (read->NumArgs() < 2u) {
+				return false;
+			}
+			// The descriptor is read as one consecutive run; where inside the
+			// record that run starts is the guest's business, not ours.
+			if (dword == 0u) {
+				heap_base = memory->offset;
+			} else if (memory->offset != heap_base + dword * sizeof(uint32_t)) {
+				return false;
+			}
+			auto* current_handle = read->Arg(0).Resolve().TryInstruction();
+			if (current_handle == nullptr ||
+			    (heap_handle != nullptr && current_handle != heap_handle)) {
+				return false;
+			}
+			heap_handle = current_handle;
+			if (dword == 0u) {
+				heap_offset = read->Arg(1).Resolve();
+			} else if (!EquivalentValue(m_program, heap_offset, read->Arg(1))) {
+				return false;
+			}
+			match.memory[dword] = memory_index;
+			match.reads[dword]  = read;
+			// A dword something else also consumes stays a real load. Only one this
+			// handle owns outright stops being emitted once the lookup is planned.
+			match.exclusive[dword] = UsesOnly(*read, handle_users);
+		}
+
+		Value    key_value;
+		uint32_t heap_stride = 0;
+		uint32_t heap_extra  = 0;
+		if (!MatchScaledOffset(heap_offset, key_value, heap_stride, heap_extra)) {
+			return false;
+		}
+
+		// The key a record yields is often a byte or a half inside the dword it
+		// was loaded with, so a mask sits between the record and the index.
+		// Enumerating the masked value keeps the key the table was built from
+		// and the key the shader computes the same number.
+		uint32_t key_mask       = 0xffffffffu;
+		Value    material_value = key_value;
+		if (auto* masked = key_value.TryInstruction();
+		    masked != nullptr && masked->GetOpcode() == ValueOpcode::BitwiseAnd32 &&
+		    masked->NumArgs() == 2u) {
+			uint32_t immediate = 0;
+			if (ImmediateU32(masked->Arg(0), immediate)) {
+				material_value = masked->Arg(1).Resolve();
+				key_mask       = immediate;
+			} else if (ImmediateU32(masked->Arg(1), immediate)) {
+				material_value = masked->Arg(0).Resolve();
+				key_mask       = immediate;
+			}
+		}
+
+		DescriptorSource heap_source;
+		uint32_t         heap_source_index = 0;
+		bool             heap_is_address   = false;
+		if (!MakeRuntimeTableSource(*heap_handle, pc, heap_is_address, heap_source_index,
+		                            heap_source)) {
+			return false;
+		}
+
+		// A key read out of a bounded buffer gives the exact set of keys this
+		// dispatch can produce. Anything else -- a loop counter, a thread id --
+		// is still bounded by the heap: past its end there is no descriptor to
+		// read. The second form needs a heap that states its own extent, so a
+		// raw pointer only works with a key table.
+		auto             material_source_index = DescriptorSource::IndirectImage::NoKeyTable;
+		uint32_t         selector_stride       = 0;
+		uint32_t         selector_offset       = 0;
+		DescriptorSource material_source;
+		uint32_t         material_memory_index = 0;
+		bool             material_is_address   = false;
+		auto*            material_read         = material_value.TryInstruction();
+		const auto*      material_memory =
+		    material_read != nullptr
+		                 ? ScalarReadMemory(*material_read, material_memory_index, &material_is_address)
+		                 : nullptr;
+		if (material_memory != nullptr && !material_is_address && material_read->NumArgs() >= 2u &&
+		    MemoryIndexBelongsTo(material_memory_index, *material_read)) {
+			auto* material_handle = material_read->Arg(0).Resolve().TryInstruction();
+			Value selector;
+			if (material_handle != nullptr &&
+			    MatchScaledOffset(material_read->Arg(1), selector, selector_stride,
+			                      selector_offset) &&
+			    MakeRuntimeBufferSource(*material_handle, pc, material_source_index,
+			                            material_source)) {
+				selector_offset += material_memory->offset;
+			} else {
+				material_source_index = DescriptorSource::IndirectImage::NoKeyTable;
+			}
+		}
+		if (material_source_index == DescriptorSource::IndirectImage::NoKeyTable) {
+			if (heap_is_address) {
+				return false;
+			}
+			selector_stride = 0;
+			selector_offset = 0;
+			material_source.dwords.fill(Value(0u));
+		}
+
+		match.source.dword_count = 8u;
+		std::copy(material_source.dwords.begin(), material_source.dwords.begin() + 4u,
+		          match.source.dwords.begin());
+		std::copy(heap_source.dwords.begin(), heap_source.dwords.begin() + 4u,
+		          match.source.dwords.begin() + 4u);
+		match.source.indirect_image = DescriptorSource::IndirectImage {
+		    .material_source = material_source_index,
+		    .heap_source     = heap_source_index,
+		    .selector_stride = selector_stride,
+		    .selector_offset = selector_offset,
+		    .key_arg         = 0u,
+		    .heap_stride     = heap_stride,
+		    .heap_offset     = heap_extra + heap_base,
+		    .dword_count     = read_count,
+		    .key_mask        = key_mask,
+		    .heap_is_address = heap_is_address,
+		};
+		match.key = key_value;
+		return true;
+	}
+
 	bool TryMakeIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
 		if (handle.GetOpcode() != ValueOpcode::GetImageResource || handle.NumArgs() != 8u) {
 			return false;
@@ -335,116 +547,37 @@ private:
 			read_count = 4u;
 		}
 
-		std::array<Inst*, 8> heap_reads {};
-		Inst*                heap_handle = nullptr;
-		Value                heap_offset;
-		uint32_t             heap_base = 0;
-		for (uint32_t dword = 0; dword < read_count; dword++) {
-			heap_reads[dword] = handle.Arg(dword).Resolve().TryInstruction();
-			if (heap_reads[dword] == nullptr) {
-				return false;
-			}
-			uint32_t    memory_index = 0;
-			const auto* memory       = ScalarReadMemory(*heap_reads[dword], memory_index);
-			if (memory == nullptr || !MemoryIndexBelongsTo(memory_index, *heap_reads[dword])) {
-				return false;
-			}
-			// The descriptor is read as one consecutive run; where inside the
-			// record that run starts is the guest's business, not ours.
-			if (dword == 0u) {
-				heap_base = memory->offset;
-			} else if (memory->offset != heap_base + dword * sizeof(uint32_t)) {
-				return false;
-			}
-			auto* current_handle = heap_reads[dword]->Arg(0).Resolve().TryInstruction();
-			if (current_handle == nullptr ||
-			    (heap_handle != nullptr && current_handle != heap_handle)) {
-				return false;
-			}
-			heap_handle = current_handle;
-			if (dword == 0u) {
-				heap_offset = heap_reads[dword]->Arg(1).Resolve();
-			} else if (!EquivalentValue(m_program, heap_offset, heap_reads[dword]->Arg(1))) {
-				return false;
-			}
-			plan.memory[dword] = memory_index;
-			plan.reads[dword]  = heap_reads[dword];
-		}
-
-		Value    key_value;
-		uint32_t heap_stride = 0;
-		uint32_t heap_extra  = 0;
-		if (!MatchScaledOffset(heap_offset, key_value, heap_stride, heap_extra)) {
+		IndirectDescriptorMatch match;
+		if (!TryMatchIndirectDescriptor(handle, read_count, pc, match)) {
 			return false;
 		}
-		auto* material_read = key_value.TryInstruction();
-		if (material_read == nullptr) {
-			return false;
-		}
-		uint32_t    material_memory_index = 0;
-		const auto* material_memory       = ScalarReadMemory(*material_read, material_memory_index);
-		if (material_memory == nullptr || !MemoryIndexBelongsTo(material_memory_index,
-		                                                        *material_read)) {
-			return false;
-		}
-		auto* material_handle = material_read->Arg(0).Resolve().TryInstruction();
-		if (material_handle == nullptr) {
-			return false;
-		}
-
-		Value    selector;
-		uint32_t selector_stride = 0;
-		uint32_t selector_offset = 0;
-		if (!MatchScaledOffset(material_read->Arg(1), selector, selector_stride,
-		                       selector_offset)) {
-			return false;
-		}
-		selector_offset += material_memory->offset;
-
-		// The descriptor dwords themselves must feed nothing but this handle:
-		// they stop being real loads once the lookup is planned. The key and the
-		// scaled offset may well have other readers -- a record that holds a
-		// descriptor usually holds ordinary data beside it -- and those readers
-		// keep working, so they are not a reason to refuse the lookup.
-		const std::array<const Inst*, 1> image_users {&handle};
-		for (uint32_t dword = 0; dword < read_count; dword++) {
-			if (!UsesOnly(*heap_reads[dword], image_users)) {
-				return false;
-			}
-		}
-
-		DescriptorSource material_source;
-		DescriptorSource heap_source;
-		uint32_t         material_source_index = 0;
-		uint32_t         heap_source_index     = 0;
-		if (!MakeRuntimeBufferSource(*material_handle, pc, material_source_index,
-		                             material_source) ||
-		    !MakeRuntimeBufferSource(*heap_handle, pc, heap_source_index, heap_source)) {
-			return false;
-		}
-
-		DescriptorSource image_source;
-		image_source.dword_count = 8u;
-		std::copy(material_source.dwords.begin(), material_source.dwords.begin() + 4u,
-		          image_source.dwords.begin());
-		std::copy(heap_source.dwords.begin(), heap_source.dwords.begin() + 4u,
-		          image_source.dwords.begin() + 4u);
-		image_source.indirect_image = DescriptorSource::IndirectImage {
-		    .material_source = material_source_index,
-		    .heap_source     = heap_source_index,
-		    .selector_stride = selector_stride,
-		    .selector_offset = selector_offset,
-		    .key_arg         = 0u,
-		    .heap_stride     = heap_stride,
-		    .heap_offset     = heap_extra + heap_base,
-		    .dword_count     = read_count,
-		};
-
 		plan.handle     = &handle;
 		plan.read_count = read_count;
-		plan.source     = InternSource(image_source);
-		plan.key        = Value(material_read);
-		plan.roots      = image_source.dwords;
+		plan.source     = InternSource(match.source);
+		plan.key        = match.key;
+		plan.roots      = match.source.dwords;
+		plan.memory     = match.memory;
+		plan.reads      = match.reads;
+		plan.exclusive  = match.exclusive;
+		return true;
+	}
+
+	bool TryMakeIndirectSampler(Inst& handle, uint32_t pc, IndirectSamplerPlan& plan) {
+		if (handle.GetOpcode() != ValueOpcode::GetSamplerResource || handle.NumArgs() != 4u) {
+			return false;
+		}
+		IndirectDescriptorMatch match;
+		if (!TryMatchIndirectDescriptor(handle, 4u, pc, match)) {
+			return false;
+		}
+		plan.handle = &handle;
+		plan.source = InternSource(match.source);
+		plan.key    = match.key;
+		for (uint32_t dword = 0; dword < 4u; dword++) {
+			plan.memory[dword]    = match.memory[dword];
+			plan.reads[dword]     = match.reads[dword];
+			plan.exclusive[dword] = match.exclusive[dword];
+		}
 		return true;
 	}
 
@@ -457,28 +590,92 @@ private:
 		return found == m_indirect_images.end() ? nullptr : &*found;
 	}
 
-	bool IsIndirectPlanningMemory(uint32_t index) const {
+	const IndirectSamplerPlan* FindIndirectSampler(const Inst& handle) const {
+		const auto found = std::find_if(m_indirect_samplers.begin(), m_indirect_samplers.end(),
+		                                [&](const IndirectSamplerPlan& plan) {
+			return plan.handle == &handle;
+		});
+		return found == m_indirect_samplers.end() ? nullptr : &*found;
+	}
+
+	template <size_t N, size_t M>
+	void RetireIndirectReads(const std::array<uint32_t, N>& memory,
+	                         const std::array<bool, M>& exclusive, uint32_t count) {
+		for (uint32_t dword = 0; dword < count; dword++) {
+			if (exclusive[dword]) {
+				m_program.memory_info[memory[dword]].planning_only = true;
+			}
+		}
+	}
+
+	template <size_t N, size_t M>
+	static bool Retired(const std::array<const Inst*, N>& reads,
+	                    const std::array<bool, M>& exclusive, uint32_t count, const Inst* inst) {
+		for (uint32_t dword = 0; dword < count; dword++) {
+			if (exclusive[dword] && reads[dword] == inst) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool IsRetiredIndirectRead(const Inst* inst) const {
 		return std::any_of(m_indirect_images.begin(), m_indirect_images.end(),
 		                   [&](const IndirectImagePlan& plan) {
-			return std::find(plan.memory.begin(), plan.memory.begin() + plan.read_count, index) !=
-			       plan.memory.begin() + plan.read_count;
-		});
+			       return Retired(plan.reads, plan.exclusive, plan.read_count, inst);
+		       }) ||
+		       std::any_of(m_indirect_samplers.begin(), m_indirect_samplers.end(),
+		                   [&](const IndirectSamplerPlan& plan) {
+			       return Retired(plan.reads, plan.exclusive, 4u, inst);
+		       });
+	}
+
+	bool IsIndirectPlanningMemory(uint32_t index) const {
+		const auto retired = [&]<size_t N, size_t M>(const std::array<uint32_t, N>& memory,
+		                                             const std::array<bool, M>& exclusive,
+		                                             uint32_t                   count) {
+			for (uint32_t dword = 0; dword < count; dword++) {
+				if (exclusive[dword] && memory[dword] == index) {
+					return true;
+				}
+			}
+			return false;
+		};
+		return std::any_of(m_indirect_images.begin(), m_indirect_images.end(),
+		                   [&](const IndirectImagePlan& plan) {
+			       return retired(plan.memory, plan.exclusive, plan.read_count);
+		       }) ||
+		       std::any_of(m_indirect_samplers.begin(), m_indirect_samplers.end(),
+		                   [&](const IndirectSamplerPlan& plan) {
+			       return retired(plan.memory, plan.exclusive, 4u);
+		       });
 	}
 
 	void PlanIndirectImages() {
 		for (auto* block: m_program.blocks) {
 			for (auto& inst: *block) {
-				if (ImageOpcodeInfoOf(inst.GetOpcode()).access == ImageAccess::None ||
-				    inst.NumArgs() == 0u) {
+				const auto image_info = ImageOpcodeInfoOf(inst.GetOpcode());
+				if (image_info.access == ImageAccess::None || inst.NumArgs() == 0u) {
 					continue;
 				}
-				auto* handle = inst.Arg(0).Resolve().TryInstruction();
-				if (handle == nullptr || FindIndirectImage(*handle) != nullptr) {
+				const auto pc     = inst.Flags<MemoryFlags>().pc;
+				auto*      handle = inst.Arg(0).Resolve().TryInstruction();
+				if (handle != nullptr && FindIndirectImage(*handle) == nullptr) {
+					IndirectImagePlan plan;
+					if (TryMakeIndirectImage(*handle, pc, plan)) {
+						m_indirect_images.push_back(std::move(plan));
+					}
+				}
+				if (!image_info.needs_sampler || inst.NumArgs() < 2u) {
 					continue;
 				}
-				IndirectImagePlan plan;
-				if (TryMakeIndirectImage(*handle, inst.Flags<MemoryFlags>().pc, plan)) {
-					m_indirect_images.push_back(std::move(plan));
+				auto* sampler_handle = inst.Arg(1).Resolve().TryInstruction();
+				if (sampler_handle == nullptr || FindIndirectSampler(*sampler_handle) != nullptr) {
+					continue;
+				}
+				IndirectSamplerPlan sampler_plan;
+				if (TryMakeIndirectSampler(*sampler_handle, pc, sampler_plan)) {
+					m_indirect_samplers.push_back(std::move(sampler_plan));
 				}
 			}
 		}
@@ -706,6 +903,9 @@ private:
 			}
 			ValidateAddressHandle(inst.Arg(0), flags.pc);
 			m_info.uses_dma = true;
+			if (address_info.access == AddressAccess::Write) {
+				m_info.writes_dma = true;
+			}
 			return;
 		}
 
@@ -734,8 +934,16 @@ private:
 			uint32_t   sampler_source = 0;
 			const bool sample_adjust =
 			    (memory.image_sample_flags & Decoder::ImageSampleFlagAdjust) != 0;
-			GetHandle(inst.Arg(1), ValueOpcode::GetSamplerResource, 4, flags.pc, sampler_handle,
-			          sampler_source, true, sample_adjust);
+			auto*       candidate         = inst.Arg(1).Resolve().TryInstruction();
+			const auto* indirect_sampler = candidate != nullptr ? FindIndirectSampler(*candidate)
+			                                                    : nullptr;
+			if (indirect_sampler != nullptr) {
+				sampler_handle = candidate;
+				sampler_source = indirect_sampler->source;
+			} else {
+				GetHandle(inst.Arg(1), ValueOpcode::GetSamplerResource, 4, flags.pc, sampler_handle,
+				          sampler_source, true, sample_adjust);
+			}
 			sampler = AddSampler(sampler_source, flags.pc);
 			if (sampler == UINT32_MAX) {
 				Fail(flags.pc, "sampler resource limit exceeded");
@@ -780,7 +988,8 @@ private:
 	std::vector<DescriptorSource>  m_sources;
 	std::vector<HandlePatch>       m_handle_patches;
 	std::vector<MemoryPatch>       m_memory_patches;
-	std::vector<IndirectImagePlan> m_indirect_images;
+	std::vector<IndirectImagePlan>   m_indirect_images;
+	std::vector<IndirectSamplerPlan> m_indirect_samplers;
 };
 
 } // namespace

@@ -36,6 +36,7 @@ struct MaterializedSnapshot {
 bool SpecializationFail(std::string_view message) {
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());
+	std::fflush(stderr);
 	return false;
 }
 
@@ -180,18 +181,35 @@ uint64_t ScalarBufferSize(const ShaderBufferResource& descriptor) {
 }
 
 // A CPU-enumerated key domain must remain read-only during this dispatch.
-// Unknown address/image aliases need a runtime descriptor implementation.
+//
+// Writes this dispatch has not made yet are not a hazard: the tables are read
+// through the scalar path, which is not coherent with vector writes inside a
+// dispatch unless the shader invalidates the scalar cache, and a shader that
+// does that names an opcode this decoder refuses. Writes an *earlier* dispatch
+// made are caught without any static analysis, because the enumeration reads
+// guest memory through the clean backing, which declines any range the GPU has
+// dirtied.
+//
+// What is left is aliasing this pass can reason about directly: a flat/global
+// address the shader computes itself is unbounded and stays unsupported, and a
+// writable buffer is bounded and is checked against the tables below.
 bool IndirectTablesAreReadOnly(const ResourcePlan& program, const ResourceSnapshot& snapshot,
                                const std::vector<DescriptorValue>& tables) {
-	if (program.info.uses_dma || std::ranges::any_of(program.info.images, [](const auto& image) {
-		    return image.written || image.atomic;
-	    })) {
+	if (program.info.writes_dma) {
 		return SpecializationFail(
-		    "indirect image tables with unbounded address/image aliases are unsupported");
+		    "indirect image tables with unbounded address aliases are unsupported");
 	}
 	for (const auto& value: tables) {
 		ShaderBufferResource table;
-		if (!DecodeBufferDescriptor(value, table)) return false;
+		// A table reached through a raw pointer declares no extent, so there is
+		// no range to compare against a writable buffer. Its reads still go
+		// through the clean backing, which declines anything the GPU dirtied.
+		if (value.dword_count != std::size(table.fields)) {
+			continue;
+		}
+		if (!DecodeBufferDescriptor(value, table)) {
+			return SpecializationFail("indirect lookup table descriptor is malformed");
+		}
 		const auto begin = table.Base48() & ~uint64_t {3};
 		const auto size  = ScalarBufferSize(table);
 		for (size_t i = 0; i < program.info.buffers.size(); ++i) {
@@ -237,48 +255,105 @@ bool ReadScalarBufferWord(const ShaderBufferResource& descriptor, uint32_t dynam
 	return true;
 }
 
-bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
-                              const DescriptorValue&                 material_value,
-                              const DescriptorValue& heap_value, bool r128,
-                              const SrtRuntime& runtime, IndirectImage& result) {
-	ShaderBufferResource material;
-	ShaderBufferResource heap;
-	if (!DecodeBufferDescriptor(material_value, material) ||
-	    !DecodeBufferDescriptor(heap_value, heap)) {
-		return false;
-	}
-	// A scalar buffer may declare no stride at all; when it declares one it has
-	// to agree with the record size the shader indexes by.
-	if (material.Stride() != 0u && material.Stride() != indirect.selector_stride) {
-		return false;
-	}
-
-	// S_BUFFER_LOAD ignores vector-buffer swizzle/add-thread fields. The shader computes the
-	// record stride explicitly; enumerate every wrapped 32-bit offset that can pass bounds.
-	const auto period      = uint64_t {1} << 32u;
-	const auto step        = std::gcd<uint64_t>(indirect.selector_stride, period);
-	const auto residue     = static_cast<uint64_t>(indirect.selector_offset) % step;
-	const auto size        = ScalarBufferSize(material);
-	const auto limit       = std::min<uint64_t>(UINT32_MAX, size + 3u);
-	const auto probe_count = residue <= limit ? (limit - residue) / step + 1u : 0u;
-	if (probe_count > MaxIndirectImageProbes) {
-		return false;
-	}
-
-	std::vector<uint32_t>        keys {0u};
-	std::unordered_set<uint32_t> seen {0u};
-	keys.reserve(static_cast<size_t>(probe_count) + 1u);
-	seen.reserve(static_cast<size_t>(probe_count) + 1u);
-	for (uint64_t offset = residue; offset <= limit && probe_count != 0u; offset += step) {
-		uint32_t key = 0;
-		if (!ReadScalarBufferWord(material, static_cast<uint32_t>(offset), 0u, runtime, key)) {
+// Reads one dword out of a descriptor table. A table reached through a buffer
+// descriptor states its own extent and an out-of-range read returns zero, the
+// way the hardware's bounds checking does. A table reached through a raw
+// pointer states nothing, so the read is bounded only by what the guest has
+// actually mapped and fails outside it.
+bool ReadIndirectTableWord(const DescriptorValue& table, bool is_address, uint32_t dynamic_offset,
+                           uint32_t immediate_offset, const SrtRuntime& runtime, uint32_t& word) {
+	if (!is_address) {
+		ShaderBufferResource buffer;
+		if (!DecodeBufferDescriptor(table, buffer)) {
 			return false;
 		}
-		if (seen.insert(key).second) {
-			keys.push_back(key);
+		return ReadScalarBufferWord(buffer, dynamic_offset, immediate_offset, runtime, word);
+	}
+	const auto base = (static_cast<uint64_t>(table.dwords[0]) |
+	                   (static_cast<uint64_t>(table.dwords[1]) << 32u)) &
+	                  AddressMask;
+	const auto offset  = static_cast<uint64_t>(dynamic_offset) + immediate_offset;
+	if (offset > AddressMask - base) {
+		return false;
+	}
+	return ReadSpecializationWord(runtime, (base + offset) & ~uint64_t {3}, word);
+}
+
+// `sampler` selects what the enumerated records are: an image descriptor, which
+// has to look like one, or a sampler, which carries no field this pass can check.
+bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
+                              const DescriptorValue&                 material_value,
+                              const DescriptorValue& heap_value, bool r128, bool sampler,
+                              const SrtRuntime& runtime, IndirectImage& result) {
+	const bool            has_key_table = indirect.material_source !=
+	                                      DescriptorSource::IndirectImage::NoKeyTable;
+	std::vector<uint32_t>        keys {0u};
+	std::unordered_set<uint32_t> seen {0u};
+
+	if (has_key_table) {
+		ShaderBufferResource material;
+		if (!DecodeBufferDescriptor(material_value, material)) {
+			return SpecializationFail("indirect key table has an invalid buffer descriptor");
 		}
-		if (limit - offset < step) {
-			break;
+
+		// S_BUFFER_LOAD addresses the buffer by a plain byte offset and ignores
+		// the descriptor's stride and swizzle entirely, so the record size the
+		// shader indexes by is the one its own arithmetic states and need not
+		// agree with anything the descriptor declares. The descriptor still
+		// gives the extent, which is what bounds the enumeration. Enumerate
+		// every wrapped 32-bit offset that can pass bounds.
+		const auto period      = uint64_t {1} << 32u;
+		const auto step        = std::gcd<uint64_t>(indirect.selector_stride, period);
+		const auto residue     = static_cast<uint64_t>(indirect.selector_offset) % step;
+		const auto size        = ScalarBufferSize(material);
+		const auto limit       = std::min<uint64_t>(UINT32_MAX, size + 3u);
+		const auto probe_count = residue <= limit ? (limit - residue) / step + 1u : 0u;
+		if (probe_count > MaxIndirectImageProbes) {
+			return SpecializationFail(fmt::format(
+			    "indirect key buffer needs {} probes, over the {} this pass will run", probe_count,
+			    MaxIndirectImageProbes));
+		}
+		keys.reserve(static_cast<size_t>(probe_count) + 1u);
+		seen.reserve(static_cast<size_t>(probe_count) + 1u);
+		for (uint64_t offset = residue; offset <= limit && probe_count != 0u; offset += step) {
+			uint32_t key = 0;
+			if (!ReadScalarBufferWord(material, static_cast<uint32_t>(offset), 0u, runtime, key)) {
+				return SpecializationFail("indirect key buffer is not readable from clean backing");
+			}
+			key &= indirect.key_mask;
+			if (seen.insert(key).second) {
+				keys.push_back(key);
+			}
+			if (limit - offset < step) {
+				break;
+			}
+		}
+	} else {
+		// No table to walk: the keys that matter are the ones the heap can
+		// address. A larger key reads past the end of the buffer, which the
+		// hardware answers with zero, and a null descriptor is already the
+		// candidate at index zero.
+		ShaderBufferResource heap_bounds;
+		if (!DecodeBufferDescriptor(heap_value, heap_bounds)) {
+			return SpecializationFail("indirect descriptor table has an invalid buffer descriptor");
+		}
+		const auto size  = ScalarBufferSize(heap_bounds);
+		const auto first = static_cast<uint64_t>(indirect.heap_offset);
+		const auto span  = std::max<uint64_t>(indirect.heap_stride, 1u);
+		const auto count = size > first ? (size - first) / span + 1u : 0u;
+		if (count > MaxIndirectImageProbes) {
+			return SpecializationFail(
+			    fmt::format("indirect descriptor table holds {} records, over the {} this pass "
+			                "will enumerate",
+			                count, MaxIndirectImageProbes));
+		}
+		keys.reserve(static_cast<size_t>(count) + 1u);
+		seen.reserve(static_cast<size_t>(count) + 1u);
+		for (uint64_t key = 0; key < count; key++) {
+			const auto masked = static_cast<uint32_t>(key) & indirect.key_mask;
+			if (seen.insert(masked).second) {
+				keys.push_back(masked);
+			}
 		}
 	}
 
@@ -295,21 +370,27 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 		// same way the shader's own multiply does.
 		const auto heap_offset = key * indirect.heap_stride + indirect.heap_offset;
 		for (uint32_t dword = 0; dword < descriptor_dwords; dword++) {
-			if (!ReadScalarBufferWord(heap, heap_offset, dword * sizeof(uint32_t), runtime,
-			                          candidate.dwords[dword])) {
-				return false;
+			if (!ReadIndirectTableWord(heap_value, indirect.heap_is_address, heap_offset,
+			                           dword * sizeof(uint32_t), runtime,
+			                           candidate.dwords[dword])) {
+				return SpecializationFail(
+				    "indirect descriptor table is not readable from clean backing");
 			}
 		}
-		if (NullImageDescriptor(candidate)) {
-			candidate.dwords.fill(0);
-		} else if (!ValidImageDescriptor(candidate, r128)) {
-			return SpecializationFail(
-			    "non-null indirect image descriptor is invalid; refusing null substitution");
+		if (!sampler) {
+			if (NullImageDescriptor(candidate)) {
+				candidate.dwords.fill(0);
+			} else if (!ValidImageDescriptor(candidate, r128)) {
+				return SpecializationFail(
+				    "non-null indirect image descriptor is invalid; refusing null substitution");
+			}
 		}
 		const auto found = std::ranges::find(next.descriptors, candidate);
 		if (found == next.descriptors.end()) {
 			if (next.descriptors.size() >= std::min(runtime.max_images, ShaderInfo::MaxImages)) {
-				return false;
+				return SpecializationFail(fmt::format(
+				    "indirect lookup resolves to more than {} distinct descriptors",
+				    std::min(runtime.max_images, ShaderInfo::MaxImages)));
 			}
 			next.descriptors.push_back(candidate);
 			next.candidates.push_back(static_cast<uint32_t>(next.descriptors.size() - 1u));
@@ -326,18 +407,18 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& runtime,
                                 MaterializedSnapshot& snapshot) {
 	if (!program.resource_tracking_complete) {
-		return false;
+		return SpecializationFail("resource tracking did not complete for this shader");
 	}
 
 	if (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr) {
-		return false;
+		return SpecializationFail("an indirect lookup needs a clean-backing reader");
 	}
 	std::vector<DescriptorValue> values;
 	std::vector<uint32_t>        flattened_srt;
 	std::vector<uint8_t>         active_sources;
 	if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
 	                            flattened_srt, program.clean_flat_slots, active_sources)) {
-		return false;
+		return SpecializationFail("descriptor sources are not evaluable from this dispatch");
 	}
 
 	auto&                   next  = snapshot.resources;
@@ -352,7 +433,18 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 		next.uniform_fill       = fill.fill;
 		next.uniform_fill.value = stored[0];
 	}
-	auto cursor = values.begin();
+	auto       cursor    = values.begin();
+	const auto take_next = [&]() -> const DescriptorValue& {
+		if (cursor == values.end()) {
+			EXIT("shader resource materialization: evaluated %u sources but the plan asked for "
+			     "more; the indirect classification disagrees with the plan\n",
+			     static_cast<uint32_t>(values.size()));
+		}
+		return *cursor++;
+	};
+	if (values.size() < program.info.buffers.size()) {
+		return SpecializationFail("evaluated fewer sources than the shader has buffers");
+	}
 	next.buffers.assign(cursor, cursor + program.info.buffers.size());
 	cursor += program.info.buffers.size();
 	next.flattened_srt = std::move(flattened_srt);
@@ -361,24 +453,31 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 		const auto& image  = program.info.images[image_index];
 		const auto* source = Source(program, image.source);
 		if (source != nullptr && source->indirect_image.has_value()) {
+			if (image.source >= active_sources.size()) {
+				return SpecializationFail("image source index is outside the evaluated set");
+			}
 			if (!active_sources[image.source]) {
 				next.images[image_index].dword_count = 8u;
 				continue;
 			}
-			const std::array requests {source->indirect_image->material_source,
-			                           source->indirect_image->heap_source};
+			const std::array requests {
+			    source->indirect_image->material_source ==
+			            DescriptorSource::IndirectImage::NoKeyTable
+			        ? source->indirect_image->heap_source
+			        : source->indirect_image->material_source,
+			    source->indirect_image->heap_source};
 			SrtRuntime       clean_runtime = runtime;
 			clean_runtime.read_memory      = runtime.read_specialization_memory;
 			std::vector<DescriptorValue> tables;
 			if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables)) {
-				return false;
+				return SpecializationFail("indirect image lookup tables are not evaluable");
 			}
 			const auto&   material = tables[0];
 			if (!IndirectTablesAreReadOnly(program, next, tables)) return false;
 			const auto&   heap     = tables[1];
 			IndirectImage table;
 			if (!MaterializeIndirectImage(*source->indirect_image, material, heap, image.r128,
-			                              runtime, table)) {
+			                              false, runtime, table)) {
 				return false;
 			}
 			next.images[image_index] = table.descriptors[table.candidates[0]];
@@ -387,14 +486,57 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 				snapshot.indirect_images.push_back(std::move(table));
 			}
 		} else {
-			auto descriptor = *cursor++;
+			auto descriptor = take_next();
 			if (!ValidImageDescriptor(descriptor, image.r128)) {
 				descriptor.dwords.fill(0);
 			}
 			next.images[image_index] = descriptor;
 		}
 	}
-	next.samplers.assign(cursor, cursor + program.info.samplers.size());
+	next.samplers.resize(program.info.samplers.size());
+	for (uint32_t sampler_index = 0; sampler_index < program.info.samplers.size();
+	     sampler_index++) {
+		const auto  source_index = program.info.samplers[sampler_index].source;
+		const auto* source       = Source(program, source_index);
+		if (source == nullptr || !source->indirect_image.has_value()) {
+			next.samplers[sampler_index] = take_next();
+			continue;
+		}
+		if (source_index >= active_sources.size()) {
+			return SpecializationFail("sampler source index is outside the evaluated set");
+		}
+		if (!active_sources[source_index]) {
+			continue;
+		}
+		const std::array requests {
+		    source->indirect_image->material_source == DescriptorSource::IndirectImage::NoKeyTable
+		        ? source->indirect_image->heap_source
+		        : source->indirect_image->material_source,
+		    source->indirect_image->heap_source};
+		SrtRuntime       clean_runtime = runtime;
+		clean_runtime.read_memory      = runtime.read_specialization_memory;
+		std::vector<DescriptorValue> tables;
+		if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables)) {
+			return SpecializationFail("indirect sampler lookup tables are not evaluable");
+		}
+		if (!IndirectTablesAreReadOnly(program, next, tables)) {
+			return false;
+		}
+		IndirectImage table;
+		if (!MaterializeIndirectImage(*source->indirect_image, tables[0], tables[1], false, true,
+		                              runtime, table)) {
+			return false;
+		}
+		// Every material that reaches this sample site has to name the same
+		// sampler for the one binding to be right. Guessing which of several
+		// the draw meant would be a rendering bug that never reports itself.
+		if (table.descriptors.size() != 1u) {
+			return SpecializationFail(fmt::format(
+			    "indirect sampler at pc 0x{:08x} resolves to {} distinct descriptors",
+			    program.info.samplers[sampler_index].first_use_pc, table.descriptors.size()));
+		}
+		next.samplers[sampler_index] = table.descriptors[0];
+	}
 	next.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
 	return true;
 }
@@ -954,6 +1096,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	plan.user_data_base             = program.user_data_base;
 	plan.user_data_count            = program.user_data_count;
 	plan.info                       = program.info;
+	plan.origin                     = program.origin;
 	plan.memory_info                = program.memory_info;
 	plan.srt_plan_complete          = program.srt_plan_complete;
 	plan.resource_tracking_complete = program.resource_tracking_complete;
@@ -1024,18 +1167,32 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		}
 	}
 	for (const auto& sampler: plan.info.samplers) {
-		plan.materialization_sources.push_back(sampler.source);
+		const auto* source = Source(plan, sampler.source);
+		if (source != nullptr && source->indirect_image.has_value()) {
+			plan.requires_specialization_memory = true;
+		} else {
+			plan.materialization_sources.push_back(sampler.source);
+		}
 	}
 	plan.clean_flat_slots.resize(plan.srt_reads.size());
-	for (const auto& image: plan.info.images) {
-		const auto* source = Source(plan, image.source);
+	const auto mark_indirect_tables = [&](uint32_t source_index) {
+		const auto* source = Source(plan, source_index);
 		if (source == nullptr || !source->indirect_image.has_value()) {
-			continue;
+			return;
 		}
-		MarkCleanFlatSlots(plan, Source(plan, source->indirect_image->material_source),
-		                   plan.clean_flat_slots);
+		if (source->indirect_image->material_source !=
+		    DescriptorSource::IndirectImage::NoKeyTable) {
+			MarkCleanFlatSlots(plan, Source(plan, source->indirect_image->material_source),
+			                   plan.clean_flat_slots);
+		}
 		MarkCleanFlatSlots(plan, Source(plan, source->indirect_image->heap_source),
 		                   plan.clean_flat_slots);
+	};
+	for (const auto& image: plan.info.images) {
+		mark_indirect_tables(image.source);
+	}
+	for (const auto& sampler: plan.info.samplers) {
+		mark_indirect_tables(sampler.source);
 	}
 	return plan;
 }
@@ -1044,7 +1201,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	MaterializedSnapshot materialized;
 	if (!MaterializeSnapshot(program, runtime, materialized)) {
-		return false;
+		// Whatever refused above said what it refused; this says whose.
+		return SpecializationFail(DescribeProvenance(program.origin));
 	}
 	return BuildResourceSpecialization(program, std::move(materialized),
 	                                   std::min(runtime.max_images, ShaderInfo::MaxImages),
