@@ -816,8 +816,12 @@ void BufferCache::RunGarbageCollector() {
 	}
 }
 
-void BufferCache::ProcessFaultBuffer() {
-	m_fault_manager.ProcessFaultBuffer();
+void BufferCache::ProcessFaultBuffer(bool process_writes) {
+	m_fault_manager.ProcessFaultBuffer(process_writes);
+}
+
+void BufferCache::MarkGpuModified(uint64_t vaddr, uint64_t size) {
+	m_gpu_modified_ranges.Add(vaddr, size);
 }
 
 void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {

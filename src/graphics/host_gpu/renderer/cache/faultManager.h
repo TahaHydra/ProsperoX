@@ -20,7 +20,9 @@ public:
 	KYTY_CLASS_NO_COPY(FaultManager);
 
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return &m_fault_buffer; }
-	void                  ProcessFaultBuffer();
+	// `process_writes` also scans the write bitmap, which only a shader that
+	// stores through a flat address ever sets.
+	void                  ProcessFaultBuffer(bool process_writes);
 
 private:
 	GraphicContext&                            m_graphics;

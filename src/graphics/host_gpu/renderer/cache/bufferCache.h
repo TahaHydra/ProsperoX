@@ -82,7 +82,10 @@ public:
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
-	void               ProcessFaultBuffer();
+	void               ProcessFaultBuffer(bool process_writes);
+	// A range the GPU wrote outside a bound buffer -- through a flat address --
+	// which the copy kept for the CPU therefore no longer matches.
+	void               MarkGpuModified(uint64_t vaddr, uint64_t size);
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	// GPU thread: snapshot exact dirty bytes at a release boundary. Publication
 	// is queued ahead of its label/event and never enters fault handling.

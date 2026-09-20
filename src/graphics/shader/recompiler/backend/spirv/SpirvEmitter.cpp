@@ -208,7 +208,9 @@ void AnalyzeProgramRequirements(IR::Program& program) {
 					}
 					requirements.function_scratch = true;
 				} else if (address_access == IR::AddressAccess::Write) {
-					Fail(program, "writable FLAT/GLOBAL addresses require GPU ownership tracking");
+					// Nothing to require here: the store records its page in
+					// the fault buffer's second bitmap, and that is what tells
+					// the host the range is now GPU-owned.
 				}
 			}
 			if (IR::BufferAccessOf(inst.GetOpcode()) != IR::BufferAccess::None) {

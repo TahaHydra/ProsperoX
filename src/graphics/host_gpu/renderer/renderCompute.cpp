@@ -380,7 +380,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	auto bindings = PrepareBindings(input_info.stage);
 	FindBuffers(bindings);
 	if (program.info.uses_dma) {
-		m_context.GetGpuResources().PrepareBda();
+		m_context.GetGpuResources().PrepareBda(program.info.writes_dma);
 	}
 	PreparedBindings* stages[1] = {&bindings};
 	FinalizeBindings(std::span<PreparedBindings* const> {stages, 1u});

@@ -183,17 +183,32 @@ uint32_t FaultElementPointer(EmitterState& state, uint32_t index) {
 	return pointer;
 }
 
-void RecordBdaFault(EmitterState& state, uint32_t page) {
+void RecordBdaPage(EmitterState& state, uint32_t page, uint32_t word_base) {
 	const auto word =
 	    Binary(state, OpShiftRightLogical, TypeU32(state), page, ConstantU32(state, 5));
 	const auto bit =
 	    Binary(state, OpShiftLeftLogical, TypeU32(state), ConstantU32(state, 1),
 	    Binary(state, OpBitwiseAnd, TypeU32(state), page, ConstantU32(state, 31)));
-	const auto pointer = FaultElementPointer(state, word);
+	const auto index = word_base == 0u
+	                       ? word
+	                       : Binary(state, OpIAdd, TypeU32(state), word,
+	                                ConstantU32(state, word_base));
+	const auto pointer = FaultElementPointer(state, index);
 	const auto value   = state.builder.AllocateId();
 	state.builder.AddFunction({OpLoad, TypeU32(state), value, pointer});
 	state.builder.AddFunction(
 	    {OpStore, pointer, Binary(state, OpBitwiseOr, TypeU32(state), value, bit)});
+}
+
+void RecordBdaFault(EmitterState& state, uint32_t page) {
+	RecordBdaPage(state, page, 0u);
+}
+
+// The second bitmap records pages the shader wrote rather than pages it could
+// not reach. Without it the host has no way to know a flat store happened, and
+// the copy it keeps for the CPU would stay stale.
+void RecordBdaWrite(EmitterState& state, uint32_t page) {
+	RecordBdaPage(state, page, BufferCache::CACHING_NUMPAGES / 32u);
 }
 
 uint32_t GetBdaPointer(ValueEmitContext& ctx, uint32_t address) {
@@ -216,6 +231,89 @@ uint32_t LoadBdaDword(ValueEmitContext& ctx, uint32_t address) {
 		state.builder.AddFunction(
 		    {OpLoad, TypeU32(state), value, pointer, MemoryAccessAlignedMask, sizeof(uint32_t)});
 		return value;
+	});
+}
+
+void StoreBdaDword(ValueEmitContext& ctx, uint32_t address, uint32_t value) {
+	auto&      state = ctx.state;
+	const auto bda   = GetBdaPointer(ctx, address);
+	const auto present =
+	    Binary(state, OpINotEqual, TypeBool(state), bda, ConstantDeviceAddress(state, 0));
+	EmitIfCondition(state, present, [&]() {
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction({OpConvertUToPtr, TypePhysicalU32Pointer(state), pointer, bda});
+		state.builder.AddFunction(
+		    {OpStore, pointer, value, MemoryAccessAlignedMask, sizeof(uint32_t)});
+		const auto page = Unary(state, OpUConvert, TypeU32(state),
+		                        Binary(state, OpShiftRightLogical, TypeDeviceAddress(state),
+		                               address,
+		                               ConstantDeviceAddress(state, BufferCache::CACHING_PAGEBITS)));
+		RecordBdaWrite(state, page);
+	});
+}
+
+// A byte lands in the dword that holds it, so the surrounding bytes have to
+// survive the write: read, merge, write back, atomically, because a neighbour
+// byte may belong to another lane.
+void StoreBdaByte(ValueEmitContext& ctx, uint32_t address, uint32_t value) {
+	auto&      state   = ctx.state;
+	const auto aligned = Binary(state, OpBitwiseAnd, TypeDeviceAddress(state), address,
+	                            ConstantDeviceAddress(state, ~uint64_t {3}));
+	const auto bda     = GetBdaPointer(ctx, aligned);
+	const auto present =
+	    Binary(state, OpINotEqual, TypeBool(state), bda, ConstantDeviceAddress(state, 0));
+	EmitIfCondition(state, present, [&]() {
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction({OpConvertUToPtr, TypePhysicalU32Pointer(state), pointer, bda});
+		const auto byte  = Binary(state, OpBitwiseAnd, TypeU32(state),
+		                          Unary(state, OpUConvert, TypeU32(state), address),
+		                          ConstantU32(state, 3));
+		const auto shift = Binary(state, OpShiftLeftLogical, TypeU32(state), byte,
+		                          ConstantU32(state, 3));
+		const auto mask  = Binary(state, OpShiftLeftLogical, TypeU32(state),
+		                          ConstantU32(state, 0xffu), shift);
+		const auto bits  = Binary(state, OpShiftLeftLogical, TypeU32(state),
+		                          Binary(state, OpBitwiseAnd, TypeU32(state), value,
+		                                 ConstantU32(state, 0xffu)),
+		                          shift);
+		AtomicUpdate(state, pointer, IR::ResourceKind::Global, [&](uint32_t old) {
+			return Binary(state, OpBitwiseOr, TypeU32(state),
+			              Binary(state, OpBitwiseAnd, TypeU32(state), old,
+			                     Unary(state, OpNot, TypeU32(state), mask)),
+			              bits);
+		});
+		const auto page = Unary(state, OpUConvert, TypeU32(state),
+		                        Binary(state, OpShiftRightLogical, TypeDeviceAddress(state),
+		                               aligned,
+		                               ConstantDeviceAddress(state, BufferCache::CACHING_PAGEBITS)));
+		RecordBdaWrite(state, page);
+	});
+}
+
+void StoreBda(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
+              uint32_t bits) {
+	auto&      state   = ctx.state;
+	const auto address = GuestAddress(ctx, inst, mem);
+	const auto active  = ctx.Arg(inst, inst.NumArgs() - 1);
+	const auto data    = ctx.Arg(inst, inst.NumArgs() - 2);
+	EmitIfCondition(state, active, [&]() {
+		if (bits == 32u) {
+			StoreBdaDword(ctx, address, data);
+			return;
+		}
+		// One byte at a time keeps a 16-bit store that straddles a dword, or a
+		// page, from needing a case of its own.
+		for (uint32_t byte = 0; byte < bits / 8u; byte++) {
+			const auto at = byte == 0u
+			                    ? address
+			                    : Binary(state, OpIAdd, TypeDeviceAddress(state), address,
+			                             ConstantDeviceAddress(state, byte));
+			const auto shifted =
+			    byte == 0u ? data
+			               : Binary(state, OpShiftRightLogical, TypeU32(state), data,
+			                        ConstantU32(state, byte * 8u));
+			StoreBdaByte(ctx, at, shifted);
+		}
 	});
 }
 
@@ -1141,6 +1239,11 @@ bool EmitValueMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 		else
 			value = LoadWord(ctx, inst, mem);
 		ctx.Define(inst, value);
+		return true;
+	}
+	if (address_info.access == IR::AddressAccess::Write &&
+	    ctx.Memory(inst).kind != IR::ResourceKind::Scratch) {
+		StoreBda(ctx, inst, ctx.Memory(inst), address_info.data_bits);
 		return true;
 	}
 	const bool store_address = address_info.access == IR::AddressAccess::Write;

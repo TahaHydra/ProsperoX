@@ -1049,7 +1049,9 @@ RenderExecutor::PrepareGraphicsBindings(const ShaderStageRuntime& vertex,
 	}
 	if (bindings.vertex.program->info.uses_dma ||
 	    (bindings.pixel && bindings.pixel->program->info.uses_dma)) {
-		m_context.GetGpuResources().PrepareBda();
+		m_context.GetGpuResources().PrepareBda(
+		    bindings.vertex.program->info.writes_dma ||
+		    (bindings.pixel && bindings.pixel->program->info.writes_dma));
 	}
 	PreparedBindings* stages[2] = {&bindings.vertex, bindings.pixel ? &*bindings.pixel : nullptr};
 	FinalizeBindings(std::span<PreparedBindings* const> {stages, bindings.pixel ? 2u : 1u});
