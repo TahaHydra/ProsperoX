@@ -123,6 +123,7 @@ public:
 	bool HttpsSetSslCallback(Id id, HttpsCallback cbfunc, void* user_arg);
 	bool HttpsSetMinSslVersion(Id id, uint32_t ssl_version);
 	bool HttpsDisableOption(Id id, uint32_t ssl_flags);
+	bool HttpsLoadCert(Id http_ctx_id, int ca_cert_num, bool have_ca_list, bool have_client_cert);
 	bool HttpAddRequestHeader(Id id, const char* name, const char* value, bool add);
 	bool HttpValid(Id http_ctx_id);
 	bool HttpValidTemplate(Id tmpl_id);
@@ -170,6 +171,11 @@ private:
 		uint64_t size       = 0;
 		int      memid      = 0;
 		int      ssl_ctx_id = 0;
+		// How many CA certificates the title supplied, and whether it also
+		// supplied a client certificate. Nothing here terminates TLS, but a
+		// title asks the context back for what it loaded.
+		int  ca_cert_num = 0;
+		bool client_cert = false;
 	};
 
 	struct HttpHeader {
@@ -710,6 +716,28 @@ bool Network::HttpsDisableOption(Id id, uint32_t ssl_flags) {
 	}
 
 	return false;
+}
+
+bool Network::HttpsLoadCert(Id http_ctx_id, int ca_cert_num, bool have_ca_list,
+                            bool have_client_cert) {
+	Common::LockGuard lock(m_mutex);
+
+	if (http_ctx_id.GetType() != Id::Type::Http || http_ctx_id.GetId() < 0 ||
+	    http_ctx_id.GetId() >= HTTP_MAX || !m_http[http_ctx_id.GetId()].used) {
+		return false;
+	}
+
+	// A count without a list, or a list without a count, is the caller getting
+	// the call wrong rather than asking for no CA certificates.
+	if ((ca_cert_num > 0) != have_ca_list || ca_cert_num < 0) {
+		return false;
+	}
+
+	auto& http       = m_http[http_ctx_id.GetId()];
+	http.ca_cert_num = ca_cert_num;
+	http.client_cert = have_client_cert;
+
+	return true;
 }
 
 bool Network::HttpAddRequestHeader(Id id, const char* name, const char* value, bool add) {
@@ -2495,6 +2523,40 @@ int KYTY_SYSV_ABI HttpsDisableOption(int id, uint32_t ssl_flags) {
 	     id, ssl_flags);
 
 	if (!g_net->HttpsDisableOption(Network::Id(id), ssl_flags)) {
+		return HTTP_ERROR_INVALID_ID;
+	}
+
+	return OK;
+}
+
+// sceHttpsLoadCert(http_ctx_id, ca_cert_num, ca_list, cert, priv_key). Each
+// entry is a {pointer, size} pair; Ghost of Yotei passes one PEM CA and no
+// client certificate. ProsperoX terminates no TLS of its own, so the context
+// records what it was given and validates the shape of the call.
+int KYTY_SYSV_ABI HttpsLoadCert(int http_ctx_id, int ca_cert_num, const HttpsData* const* ca_list,
+                                const HttpsData* cert, const HttpsData* priv_key) {
+	PRINT_NAME();
+
+	LOGF("\t http_ctx_id = %d\n"
+	     "\t ca_cert_num = %d\n"
+	     "\t ca_list     = 0x%016" PRIx64 "\n"
+	     "\t cert        = 0x%016" PRIx64 "\n"
+	     "\t priv_key    = 0x%016" PRIx64 "\n",
+	     http_ctx_id, ca_cert_num, reinterpret_cast<uint64_t>(ca_list),
+	     reinterpret_cast<uint64_t>(cert), reinterpret_cast<uint64_t>(priv_key));
+
+	for (int i = 0; ca_list != nullptr && i < ca_cert_num; i++) {
+		if (ca_list[i] == nullptr || ca_list[i]->ptr == nullptr || ca_list[i]->size == 0) {
+			return HTTP_ERROR_INVALID_VALUE;
+		}
+	}
+	if ((cert != nullptr && (cert->ptr == nullptr || cert->size == 0)) ||
+	    (priv_key != nullptr && (priv_key->ptr == nullptr || priv_key->size == 0))) {
+		return HTTP_ERROR_INVALID_VALUE;
+	}
+
+	if (!g_net->HttpsLoadCert(Network::Id(http_ctx_id), ca_cert_num, ca_list != nullptr,
+	                          cert != nullptr)) {
 		return HTTP_ERROR_INVALID_ID;
 	}
 

@@ -126,6 +126,15 @@ int KYTY_SYSV_ABI HttpGetResponseContentLength(int request_id, int* result,
 int KYTY_SYSV_ABI HttpsSetSslCallback(int id, HttpsCallback cbfunc, void* user_arg);
 int KYTY_SYSV_ABI HttpsSetMinSslVersion(int id, uint32_t ssl_version);
 int KYTY_SYSV_ABI HttpsDisableOption(int id, uint32_t ssl_flags);
+
+// One certificate or key a title hands to sceHttpsLoadCert.
+struct HttpsData {
+	char*  ptr  = nullptr;
+	size_t size = 0;
+};
+
+int KYTY_SYSV_ABI HttpsLoadCert(int http_ctx_id, int ca_cert_num, const HttpsData* const* ca_list,
+                                const HttpsData* cert, const HttpsData* priv_key);
 int KYTY_SYSV_ABI HttpSetResolveTimeOut(int id, uint32_t usec);
 int KYTY_SYSV_ABI HttpSetResolveRetry(int id, int32_t retry);
 int KYTY_SYSV_ABI HttpSetConnectTimeOut(int id, uint32_t usec);
