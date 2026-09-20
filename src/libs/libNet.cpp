@@ -1500,6 +1500,40 @@ namespace LibNpSessionSignaling {
 
 LIB_VERSION("NpSessionSignaling", 1, "NpSessionSignaling", 1, 1);
 
+// Generic NP status codes, from the same block as NP_ERROR_SIGNED_OUT.
+constexpr int NP_SIGNALING_ERROR_INVALID_ARGUMENT = -2141913085; /* 0x80550003 */
+constexpr int NP_SIGNALING_ERROR_OUT_OF_MEMORY    = -2141913083; /* 0x80550005 */
+
+// One handler a title registers with a signaling context, and the argument it
+// wants handed back to it.
+struct NpSessionSignalingHandler {
+	void* func = nullptr;
+	void* arg  = nullptr;
+};
+
+// The parameters of sceNpSessionSignalingCreateContext2: the local user the
+// context signals for, and three handlers. Ghost of Yotei (PPSA26344) fills
+// exactly this shape at eboot.bin+0x103dec8 before calling it.
+struct NpSessionSignalingContextParam2 {
+	int32_t                   user_id  = 0;
+	int32_t                   reserved = 0;
+	NpSessionSignalingHandler handler[3];
+};
+
+static_assert(sizeof(NpSessionSignalingContextParam2) == 0x38);
+
+constexpr int NP_SIGNALING_CONTEXT_MAX = 8;
+
+struct NpSessionSignalingContext {
+	bool                      used    = false;
+	int32_t                   user_id = 0;
+	NpSessionSignalingHandler handler[3];
+};
+
+static std::mutex                g_np_signaling_mutex;
+static NpSessionSignalingContext g_np_signaling_contexts[NP_SIGNALING_CONTEXT_MAX];
+static uint32_t                  g_np_signaling_next_request = 1;
+
 static int KYTY_SYSV_ABI NpSessionSignalingInitialize(void* param) {
 	PRINT_NAME();
 
@@ -1508,8 +1542,72 @@ static int KYTY_SYSV_ABI NpSessionSignalingInitialize(void* param) {
 	return 0;
 }
 
+// Creates a signaling context. A context is local bookkeeping: it names the
+// user and remembers the handlers, and a title passes the id back to the rest
+// of the API. ProsperoX signals no peers, so no handler is ever called -- an
+// offline console reaches no one either, and a title that waits for a peer
+// waits for one that is not there rather than for a context that never existed.
+static int KYTY_SYSV_ABI NpSessionSignalingCreateContext2(
+    const NpSessionSignalingContextParam2* param, int32_t* ctx_id) {
+	PRINT_NAME();
+
+	if (param == nullptr || ctx_id == nullptr) {
+		return NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+	}
+
+	LOGF("\t user_id  = %d\n"
+	     "\t handlers = 0x%016" PRIx64 ", 0x%016" PRIx64 ", 0x%016" PRIx64 "\n",
+	     param->user_id, reinterpret_cast<uint64_t>(param->handler[0].func),
+	     reinterpret_cast<uint64_t>(param->handler[1].func),
+	     reinterpret_cast<uint64_t>(param->handler[2].func));
+
+	std::lock_guard lock(g_np_signaling_mutex);
+
+	for (int index = 0; index < NP_SIGNALING_CONTEXT_MAX; index++) {
+		auto& context = g_np_signaling_contexts[index];
+		if (context.used) {
+			continue;
+		}
+		context.used    = true;
+		context.user_id = param->user_id;
+		for (int i = 0; i < 3; i++) {
+			context.handler[i] = param->handler[i];
+		}
+		// Ids are one-based so that a title cannot mistake one for "no context".
+		*ctx_id = index + 1;
+		return 0;
+	}
+
+	return NP_SIGNALING_ERROR_OUT_OF_MEMORY;
+}
+
+// Activates a context and hands back the id of the request that does it.
+// Identified from the call site rather than a name table: Ghost calls it
+// immediately after a successful create, passing the context id it was just
+// given and a four-byte output it never reads back.
+static int KYTY_SYSV_ABI NpSessionSignalingActivate(int32_t ctx_id, uint32_t* request_id) {
+	PRINT_NAME();
+
+	LOGF("\t ctx_id = %d\n", ctx_id);
+
+	std::lock_guard lock(g_np_signaling_mutex);
+
+	if (ctx_id < 1 || ctx_id > NP_SIGNALING_CONTEXT_MAX ||
+	    !g_np_signaling_contexts[ctx_id - 1].used) {
+		return NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+	}
+
+	if (request_id != nullptr) {
+		*request_id = g_np_signaling_next_request++;
+	}
+
+	return 0;
+}
+
 LIB_DEFINE(InitNet_1_NpSessionSignaling) {
 	LIB_FUNC("ysmw6J-P8Ak", NpSessionSignalingInitialize);
+	LIB_FUNC("aBuX0PX-T7I", NpSessionSignalingCreateContext2);
+	LIB_FUNC("r8mVMwlafF8", NpSessionSignalingActivate);
 }
 
 } // namespace LibNpSessionSignaling
