@@ -503,6 +503,29 @@ int Run(const char* mode) {
           "primitive ABI writes two context and three user-config registers from the shader");
     for(const auto* guard : {&cx.front(),&cx.back(),&uc.front(),&uc.back()})
         Check(guard->offset==0xaabbccdd && guard->value==0x12345678,"primitive outputs preserve adjacent bytes");
+    {
+        // The jump emitter is reachable under the Agc identity, so its size
+        // companion has to be too: a title sizes the buffer with one and fills
+        // it with the other. Ghost of Yotei (PPSA26344) calls this one.
+        Loader::SymbolResolve jumpKey{"xSAR0LTcRKM","Agc",1,"Agc",1,1,Loader::SymbolType::Func};
+        Loader::SymbolResolve sizeKey{"VEGu4dixjUg","Agc",1,"Agc",1,1,Loader::SymbolType::Func};
+        const auto* jumpEntry=symbols.Find(jumpKey);
+        const auto* sizeEntry=symbols.Find(sizeKey);
+        Check(jumpEntry!=nullptr && sizeEntry!=nullptr,
+            "qualified jump emitter and its size query both resolve");
+        using JumpSize=KYTY_SYSV_ABI uint32_t (*)();
+        using Jump=KYTY_SYSV_ABI uint32_t* (*)(Libs::Graphics::Gen5::CommandBuffer*,uint8_t,uint8_t,
+            const uint32_t*,uint32_t);
+        const auto jumpSize=reinterpret_cast<JumpSize>(sizeEntry->vaddr)();
+        packet.fill(0xaabbccdd); buffer.up=packet.data()+1; buffer.down=packet.data()+6;
+        command=reinterpret_cast<Jump>(jumpEntry->vaddr)(
+            reinterpret_cast<Libs::Graphics::Gen5::CommandBuffer*>(&buffer),0,0,nullptr,0);
+        Check(command==packet.data()+1 &&
+            jumpSize==static_cast<uint32_t>((buffer.up-command)*sizeof(uint32_t)),
+            "jump size query matches the bytes the jump emitter writes");
+        sizeKey.module_version_minor=2;
+        Check(!symbols.Find(sizeKey),"jump size identity remains strict");
+    }
     std::puts("PHASE6_AGC_PASS exact_identity=1 state_preserved=1 versions=0..13 repeated=1 version13_defaults=1");
     return 0;
 }

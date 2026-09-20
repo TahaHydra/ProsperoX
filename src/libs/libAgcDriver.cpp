@@ -241,6 +241,13 @@ LIB_DEFINE(Init) {
 	LIB_FUNC("t1vNu082-jM", Graphics::Gen5::AgcDcbDrawIndexIndirect);
 	LIB_FUNC("1q1titRBL6o", Graphics::Gen5::AgcDcbDrawIndirect);
 	LIB_FUNC("xSAR0LTcRKM", Graphics::Gen5::AgcDcbJump);
+	// Reviewed: the size companion of the jump emitter above, which this list
+	// already carries. AgcDcbJumpGetSize takes no arguments, reads nothing and
+	// returns the constant 16 -- the size of the packet AgcDcbJump writes -- so
+	// there is no state for the library identity to change. Ghost of Yotei
+	// (PPSA26344) calls it 23 times as VEGu4dixjUg[Agc_v1][Agc_v1.1] while
+	// sizing its command buffers, and terminated on it.
+	LIB_FUNC("VEGu4dixjUg", Graphics::Gen5::AgcDcbJumpGetSize);
 	LIB_FUNC("RmaJwLtc8rY", Graphics::Gen5::AgcDcbSetBaseIndirectArgs);
 	LIB_FUNC("l4fM9K-Lyks", Graphics::Gen5::AgcDcbSetIndexBuffer);
 	LIB_FUNC("8N2tmT3jmC8", Graphics::Gen5::AgcDcbSetIndexCount);
