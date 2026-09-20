@@ -638,19 +638,18 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 	const bool reserved = port_state->used && port_state->handle == next_port;
 	if (reserved) {
 		port_state->audio_handle = audio_handle;
-		if (needs_pcm && audio_handle == 0) {
-			*port_state = AudioOut2PortStateEntry {};
-		}
 	}
 	g_audioout2_port_mutex.Unlock();
 	if (!reserved) {
 		audioout2_close_audio_handle(audio_handle);
 		return AUDIO_OUT2_ERROR_INVALID_PARAM;
 	}
-	if (needs_pcm && audio_handle == 0) {
-		LOGF("AudioOut2: PCM backend unavailable or unsupported port/format\n");
-		return AUDIO_OUT2_ERROR_NOT_READY;
-	}
+if (needs_pcm && audio_handle == 0) {
+// AudioOut2 ports are guest-visible logical ports. Failure to open an
+// additional host PCM sink must not invalidate a valid guest port.
+// Keep it alive as a silent/null-backed logical output.
+LOGF("AudioOut2: PCM backend unavailable; using silent logical port\n");
+}
 
 	*port = next_port;
 
