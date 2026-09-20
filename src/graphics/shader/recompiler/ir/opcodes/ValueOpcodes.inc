@@ -237,6 +237,10 @@ VALUE_OPCODE(LoadAddressU32, U32, AddressResource, U32, U32, U1)
 VALUE_OPCODE(StoreAddressU8, Void, AddressResource, U32, U32, U8, U1)
 VALUE_OPCODE(StoreAddressU16, Void, AddressResource, U32, U32, U16, U1)
 VALUE_OPCODE(StoreAddressU32, Void, AddressResource, U32, U32, U32, U1)
+// Converts a buffer element whose format the host could not resolve at bind
+// time. The format and the destination swizzle are the descriptor's own fields,
+// read at runtime, and the four dwords are the raw element.
+VALUE_OPCODE(UnpackBufferFormatU32x4, U32x4, U32, U32, U32, U32, U32, U32)
 VALUE_OPCODE(LoadBufferU8, U8, BufferResource, U32, U32, U32, U1)
 VALUE_OPCODE(LoadBufferU16, U16, BufferResource, U32, U32, U32, U1)
 VALUE_OPCODE(LoadBufferU32, U32, BufferResource, U32, U32, U32, U1)

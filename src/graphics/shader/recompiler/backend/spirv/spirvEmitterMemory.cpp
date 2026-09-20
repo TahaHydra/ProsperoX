@@ -1107,6 +1107,148 @@ void StoreWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compo
 
 } // namespace
 
+// A buffer whose descriptor the host could not resolve at bind time carries its
+// format and its destination swizzle as runtime values, so the conversion the
+// host would otherwise have specialized has to happen in the shader. One
+// function per module decodes every format this recompiler knows and is called
+// from each such access, rather than pasting a switch at every one of them.
+void DefineUnpackBufferFormat(EmitterState& state) {
+	const auto needed = [&] {
+		for (const auto* block: state.program.blocks) {
+			for (const auto& inst: *block) {
+				if (inst.GetOpcode() == IR::ValueOpcode::UnpackBufferFormatU32x4) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}();
+	if (!needed) {
+		return;
+	}
+
+	const auto u32     = TypeU32(state);
+	const auto vector4 = TypeU32Vector(state, 4);
+	const auto function_type =
+	    state.builder.Type(OpTypeFunction, {vector4, u32, u32, u32, u32, u32, u32});
+	state.format_unpack_function = state.builder.AllocateId();
+	state.builder.AddName(state.format_unpack_function, "unpack_buffer_format");
+	state.builder.AddFunction(
+	    {OpFunction, vector4, state.format_unpack_function, FunctionControlNone, function_type});
+	const auto format  = state.builder.AllocateId();
+	const auto swizzle = state.builder.AllocateId();
+	uint32_t   raw[4] {};
+	state.builder.AddFunction({OpFunctionParameter, u32, format});
+	state.builder.AddFunction({OpFunctionParameter, u32, swizzle});
+	for (auto& word: raw) {
+		word = state.builder.AllocateId();
+		state.builder.AddFunction({OpFunctionParameter, u32, word});
+	}
+	EmitLabel(state, state.builder.AllocateId());
+
+	// Every format the 7-bit descriptor field can name and this recompiler
+	// knows how to decode gets a case; anything else keeps the raw dwords,
+	// which is what the bound path does for an unknown format.
+	std::vector<Prospero::BufferFormat> formats;
+	for (uint32_t value = 1; value < 128u; value++) {
+		const auto candidate = static_cast<Prospero::BufferFormat>(value);
+		if (Format::IsKnownFormat(candidate) && Format::GetFormatInfo(candidate).byte_size != 0u) {
+			formats.push_back(candidate);
+		}
+	}
+
+	const auto            default_label = state.builder.AllocateId();
+	const auto            merge_label   = state.builder.AllocateId();
+	std::vector<uint32_t> labels(formats.size());
+	std::vector<uint32_t> switch_words {OpSwitch, format, default_label};
+	for (size_t index = 0; index < formats.size(); index++) {
+		labels[index] = state.builder.AllocateId();
+		switch_words.push_back(static_cast<uint32_t>(formats[index]));
+		switch_words.push_back(labels[index]);
+	}
+	state.builder.AddFunction({OpSelectionMerge, merge_label, SelectionControlNone});
+	state.builder.AddFunction(switch_words);
+
+	std::vector<uint32_t> phi_words {OpPhi, vector4, state.builder.AllocateId()};
+	const auto            compose = [&](const uint32_t (&values)[4]) {
+		       const auto result = state.builder.AllocateId();
+		       state.builder.AddFunction({OpCompositeConstruct, vector4, result, values[0], values[1],
+		                                  values[2], values[3]});
+		       return result;
+	};
+
+	EmitLabel(state, default_label);
+	phi_words.push_back(compose(raw));
+	phi_words.push_back(default_label);
+	state.builder.AddFunction({OpBranch, merge_label});
+
+	for (size_t index = 0; index < formats.size(); index++) {
+		EmitLabel(state, labels[index]);
+		const auto info = Format::GetFormatInfo(formats[index]);
+		const bool is_signed = IsSignedFormatComponent(info.type);
+
+		uint32_t component[4] {};
+		for (uint32_t c = 0; c < 4u; c++) {
+			if (c >= info.component_count) {
+				component[c] = ConstantU32(state, 0);
+				continue;
+			}
+			const auto offset = info.component_bit_offset[c];
+			const auto bits   = info.component_bits[c];
+			const auto source = raw[std::min(offset / 32u, 3u)];
+			const auto shift  = offset % 32u;
+			uint32_t   value  = 0;
+			if (is_signed) {
+				const auto extracted = state.builder.AllocateId();
+				state.builder.AddFunction({OpBitFieldSExtract, TypeI32(state), extracted,
+				                           Unary(state, OpBitcast, TypeI32(state), source),
+				                           ConstantU32(state, shift), ConstantU32(state, bits)});
+				value = Unary(state, OpBitcast, u32, extracted);
+			} else {
+				value = state.builder.AllocateId();
+				state.builder.AddFunction({OpBitFieldUExtract, u32, value, source,
+				                           ConstantU32(state, shift), ConstantU32(state, bits)});
+			}
+			component[c] = NormalizeFormatComponent(state, info, c, value);
+		}
+
+		// The descriptor's destination swizzle picks per output channel, and a
+		// selector past the format's channel count wraps, the way the bound
+		// path resolves it before the swizzle is applied.
+		const auto one = ConstantU32(state, Format::FormattedConstantBits(
+		                                        info, Format::FormattedSourceKind::One));
+		uint32_t   selected[4] {};
+		for (uint32_t out = 0; out < 4u; out++) {
+			const auto selector =
+			    Binary(state, OpBitwiseAnd, u32,
+			           Binary(state, OpShiftRightLogical, u32, swizzle,
+			                  ConstantU32(state, out * 3u)),
+			           ConstantU32(state, 7u));
+			uint32_t value = ConstantU32(state, 0);
+			const auto pick = [&](uint32_t match, uint32_t candidate) {
+				const auto equal = Binary(state, OpIEqual, TypeBool(state), selector,
+				                          ConstantU32(state, match));
+				const auto next  = state.builder.AllocateId();
+				state.builder.AddFunction({OpSelect, u32, next, equal, candidate, value});
+				value = next;
+			};
+			pick(1u, one);
+			for (uint32_t channel = 0; channel < 4u; channel++) {
+				pick(4u + channel, component[channel % info.component_count]);
+			}
+			selected[out] = value;
+		}
+		phi_words.push_back(compose(selected));
+		phi_words.push_back(labels[index]);
+		state.builder.AddFunction({OpBranch, merge_label});
+	}
+
+	EmitLabel(state, merge_label);
+	state.builder.AddFunction(phi_words);
+	state.builder.AddFunction({OpReturnValue, phi_words[2]});
+	state.builder.AddFunction({OpFunctionEnd});
+}
+
 void DefineGetBdaPointer(EmitterState& state) {
 	if (!state.program.info.uses_dma) {
 		return;
@@ -1213,6 +1355,15 @@ bool EmitValueMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 			                EmitMemoryElementPointer(state, access, element)});
 			           return value;
 		           }));
+		return true;
+	}
+	if (op == IR::ValueOpcode::UnpackBufferFormatU32x4) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction({OpFunctionCall, TypeU32Vector(state, 4), result,
+		                           state.format_unpack_function, ctx.Arg(inst, 0),
+		                           ctx.Arg(inst, 1), ctx.Arg(inst, 2), ctx.Arg(inst, 3),
+		                           ctx.Arg(inst, 4), ctx.Arg(inst, 5)});
+		ctx.Define(inst, result);
 		return true;
 	}
 	const auto address_info = IR::AddressOpcodeInfoOf(op);

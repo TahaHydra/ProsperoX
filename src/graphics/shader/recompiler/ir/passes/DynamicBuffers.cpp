@@ -26,6 +26,7 @@ BufferShape ShapeOf(ValueOpcode opcode) {
 		case ValueOpcode::LoadBufferU32x2: return {ValueOpcode::LoadAddressU32, 32, 2, false};
 		case ValueOpcode::LoadBufferU32x3: return {ValueOpcode::LoadAddressU32, 32, 3, false};
 		case ValueOpcode::LoadBufferU32x4: return {ValueOpcode::LoadAddressU32, 32, 4, false};
+
 		case ValueOpcode::StoreBufferU8: return {ValueOpcode::StoreAddressU8, 8, 1, true};
 		case ValueOpcode::StoreBufferU16: return {ValueOpcode::StoreAddressU16, 16, 1, true};
 		case ValueOpcode::StoreBufferU32: return {ValueOpcode::StoreAddressU32, 32, 1, true};
@@ -103,11 +104,10 @@ void LowerDynamicBuffers(Program& program) {
 				continue;
 			}
 			const auto memory = program.memory_info[flags.index];
-			// A typed or formatted access converts through the descriptor's
-			// dfmt/nfmt fields, and an indexed one addresses through its stride
-			// and swizzle bits. Those are runtime values here, so those forms
-			// stay unsupported and are still reported against the descriptor.
-			if (memory.typed || memory.formatted) {
+			// A typed access carries its format in the instruction and its
+			// destination swizzle nowhere this pass can use, so it stays
+			// unsupported and is still reported against the descriptor.
+			if (memory.typed || (memory.formatted && (shape.store || scalar))) {
 				LOGF("dynamic buffer: %s has a runtime descriptor but is typed=%d formatted=%d\n",
 				     std::string(ValueOpcodeName(inst.GetOpcode())).c_str(), memory.typed ? 1 : 0,
 				     memory.formatted ? 1 : 0);
@@ -177,14 +177,21 @@ void LowerDynamicBuffers(Program& program) {
 			    emit(ValueOpcode::ShiftRightLogical32, {index, index_log2});
 			const auto index_lsb = emit(ValueOpcode::BitwiseAnd32, {index, index_mask});
 
-			const auto           element_bytes = std::max(shape.data_bits / 8u, 1u);
-			std::array<Value, 4> loaded {};
-			for (uint32_t element = 0; element < shape.dwords; element++) {
+			const auto element_bytes = std::max(shape.data_bits / 8u, 1u);
+
+			// One element of the access: where it lands in the buffer, and
+			// whether the descriptor says that is inside it.
+			struct Placement {
+				Value address;
+				Value in_range;
+				Value predicate;
+			};
+			const auto place = [&](uint32_t element, uint32_t bytes) {
 				const auto offset =
 				    element == 0u
 				        ? record_offset
 				        : emit(ValueOpcode::IAdd32,
-				               {record_offset, Value(element * element_bytes)});
+				               {record_offset, Value(element * bytes)});
 				const auto linear = emit(ValueOpcode::IAdd32,
 				                         {emit(ValueOpcode::IMul32, {index, stride}), offset});
 				const auto offset_msb =
@@ -204,28 +211,31 @@ void LowerDynamicBuffers(Program& program) {
 				          {emit(ValueOpcode::ShiftLeftLogical32, {index_lsb, element_log2}),
 				           offset_lsb})});
 				const auto record =
-				    emit(ValueOpcode::SelectU32, {swizzled_buffer, swizzled, linear});
+				    scalar ? linear
+				           : emit(ValueOpcode::SelectU32, {swizzled_buffer, swizzled, linear});
 				const auto address = emit(ValueOpcode::IAdd32, {record, soffset});
 
 				// Out of range reads zero and drops writes, the way the
-				// hardware's own bounds check does. A structured access is bounded
-				// by the record count and the record size; a raw one by the whole
-				// extent.
+				// hardware's own bounds check does. A structured access is
+				// bounded by the record count and the record size; a raw one by
+				// the whole extent.
 				const auto structured =
 				    emit(ValueOpcode::LogicalAnd,
 				         {emit(ValueOpcode::ULessThan32, {index, dword2}),
 				          emit(ValueOpcode::ULessThanEqual32,
-				               {emit(ValueOpcode::IAdd32, {offset, Value(element_bytes)}),
-				                stride})});
-				const auto raw = emit(ValueOpcode::ULessThanEqual32,
-				                      {emit(ValueOpcode::IAdd32, {record, Value(element_bytes)}),
-				                       limit});
+				               {emit(ValueOpcode::IAdd32, {offset, Value(bytes)}), stride})});
+				const auto raw_range =
+				    emit(ValueOpcode::ULessThanEqual32,
+				         {emit(ValueOpcode::IAdd32, {record, Value(bytes)}), limit});
 				const auto in_range =
 				    memory.idxen && !scalar
-				        ? emit(ValueOpcode::SelectU1, {has_stride, structured, raw})
-				        : raw;
-				const auto predicate = emit(ValueOpcode::LogicalAnd, {active, in_range});
+				        ? emit(ValueOpcode::SelectU1, {has_stride, structured, raw_range})
+				        : raw_range;
+				return Placement {address, in_range,
+				                  emit(ValueOpcode::LogicalAnd, {active, in_range})};
+			};
 
+			const auto load_dword = [&](const Placement& at, uint32_t element, uint32_t count) {
 				auto component            = memory;
 				component.kind            = ResourceKind::Global;
 				component.resource        = 0;
@@ -234,30 +244,96 @@ void LowerDynamicBuffers(Program& program) {
 				component.data_dwords     = 1u;
 				component.data_bits       = shape.data_bits;
 				component.component_index = element;
-				component.component_count = 1u;
+				component.component_count = count;
 				component.address_is_full = true;
 				component.idxen           = false;
 				component.offen           = false;
+				component.typed           = false;
+				component.formatted       = false;
 				program.memory_info.push_back(component);
 				const MemoryFlags new_flags {
 				    .index = static_cast<uint32_t>(program.memory_info.size() - 1u),
 				    .pc    = flags.pc};
-				const auto packed = std::bit_cast<uint64_t>(new_flags);
+				return emit(shape.address_opcode,
+				            {resource, at.address, Value(0u), at.predicate},
+				            std::bit_cast<uint64_t>(new_flags));
+			};
 
+			if (memory.formatted) {
+				// The element is read as four raw dwords -- no known format is
+				// wider -- and the descriptor's own format and swizzle fields
+				// turn them into channels, because neither was resolvable when
+				// the binding would have been specialized.
+				std::array<Value, 4> words {};
+				for (uint32_t element = 0; element < 4u; element++) {
+					const auto at = place(element, sizeof(uint32_t));
+					words[element] =
+					    emit(ValueOpcode::SelectU32,
+					         {at.in_range, load_dword(at, element, 4u), Value(0u)});
+				}
+				const auto format = emit(
+				    ValueOpcode::BitwiseAnd32,
+				    {emit(ValueOpcode::ShiftRightLogical32, {dword3, Value(12u)}), Value(0x7fu)});
+				const auto swizzle =
+				    emit(ValueOpcode::BitwiseAnd32, {dword3, Value(0xfffu)});
+				const auto unpacked =
+				    emit(ValueOpcode::UnpackBufferFormatU32x4,
+				         {format, swizzle, words[0], words[1], words[2], words[3]});
+				std::array<Value, 4> channels {};
+				for (uint32_t channel = 0; channel < shape.dwords; channel++) {
+					channels[channel] = emit(ValueOpcode::CompositeExtractU32x4,
+					                         {unpacked, Value(channel)});
+				}
+				Value result = channels[0];
+				if (shape.dwords == 2u) {
+					result = emit(CompositeConstructFor(2u), {channels[0], channels[1]});
+				} else if (shape.dwords == 3u) {
+					result =
+					    emit(CompositeConstructFor(3u), {channels[0], channels[1], channels[2]});
+				} else if (shape.dwords == 4u) {
+					result = emit(CompositeConstructFor(4u),
+					              {channels[0], channels[1], channels[2], channels[3]});
+				}
+				inst.ReplaceUsesWith(result);
+				inst.Invalidate();
+				continue;
+			}
+
+			std::array<Value, 4> loaded {};
+			for (uint32_t element = 0; element < shape.dwords; element++) {
+				const auto at = place(element, element_bytes);
 				if (shape.store) {
 					const auto element_data =
 					    shape.dwords == 1u
 					        ? data
 					        : emit(CompositeExtractFor(shape.dwords), {data, Value(element)});
+					auto component            = memory;
+					component.kind            = ResourceKind::Global;
+					component.resource        = 0;
+					component.sampler         = 0;
+					component.offset          = 0;
+					component.data_dwords     = 1u;
+					component.data_bits       = shape.data_bits;
+					component.component_index = element;
+					component.component_count = shape.dwords;
+					component.address_is_full = true;
+					component.idxen           = false;
+					component.offen           = false;
+					component.typed           = false;
+					component.formatted       = false;
+					program.memory_info.push_back(component);
+					const MemoryFlags new_flags {
+					    .index = static_cast<uint32_t>(program.memory_info.size() - 1u),
+					    .pc    = flags.pc};
 					emit(shape.address_opcode,
-					     {resource, address, Value(0u), element_data, predicate}, packed);
+					     {resource, at.address, Value(0u), element_data, at.predicate},
+					     std::bit_cast<uint64_t>(new_flags));
 					continue;
 				}
-				const auto value =
-				    emit(shape.address_opcode, {resource, address, Value(0u), predicate}, packed);
+				const auto value = load_dword(at, element, shape.dwords);
 				loaded[element] =
 				    shape.data_bits == 32u
-				        ? emit(ValueOpcode::SelectU32, {in_range, value, Value(0u)})
+				        ? emit(ValueOpcode::SelectU32, {at.in_range, value, Value(0u)})
 				        : value;
 			}
 

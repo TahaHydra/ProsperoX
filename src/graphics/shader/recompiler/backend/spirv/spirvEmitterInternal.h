@@ -376,6 +376,7 @@ struct EmitterState {
 	uint32_t                                         bda_pagetable_variable  = 0;
 	uint32_t                                         fault_buffer_variable   = 0;
 	uint32_t                                         bda_pointer_function    = 0;
+	uint32_t                                         format_unpack_function  = 0;
 	uint32_t                                         gds_variable            = 0;
 	uint32_t                                         gds_length              = 0;
 	uint32_t                                         push_constant_variable  = 0;
@@ -787,6 +788,9 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst);
 void EmitProgram(EmitterState& state, const IR::Program& program);
 
 void DefineGetBdaPointer(EmitterState& state);
+
+// Emits the runtime buffer-format decoder, once, when some access needs it.
+void DefineUnpackBufferFormat(EmitterState& state);
 
 // These templates accept local lambdas from several emitter translation units.
 template <typename Fn>

@@ -675,6 +675,7 @@ void EmitProgram(EmitterState& state, const IR::Program& program) {
 		}
 	}
 	DefineGetBdaPointer(state);
+	DefineUnpackBufferFormat(state);
 	for (const auto* block: program.blocks) {
 		if (std::ranges::any_of(*block, [](const IR::Inst& inst) {
 			    return inst.GetOpcode() == IR::ValueOpcode::SwizzleU32 ||
