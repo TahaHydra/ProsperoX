@@ -1946,6 +1946,11 @@ int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, m
 	return result;
 }
 
+RuntimeLinker::TlsGeometry RuntimeLinker::TlsLayoutFor(uint64_t memsz, uint64_t align) noexcept {
+	const auto block_size = align != 0 ? AlignUp(memsz, align) : memsz;
+	return {.block_size = block_size, .tcb_offset = block_size};
+}
+
 uint8_t* RuntimeLinker::TlsGetAddr(Program* program) {
 	EXIT_IF(program == nullptr);
 
@@ -1957,31 +1962,39 @@ uint8_t* RuntimeLinker::TlsGetAddr(Program* program) {
 		constexpr uint64_t TCB_SIZE  = 0x40;
 		constexpr uint64_t TCB_ALIGN = 0x20;
 
-		const auto tcb_offset =
-		    program->tls.tcb_offset != 0 ? program->tls.tcb_offset : program->tls.image_size;
-		const auto alloc_size = AlignUp(tcb_offset, TCB_ALIGN) + TCB_SIZE;
+		// Variant II thread-local layout: the thread pointer sits exactly one
+		// aligned TLS block above the image, so a variable the linker placed at
+		// image offset o is read back at tp - block_size + o. Padding between
+		// the image and the TCB would move every one of them, so the TCB's own
+		// alignment is paid for below the image instead of above it.
+		const auto block_size = program->tls.image_size;
+		const auto lead       = AlignUp(block_size, TCB_ALIGN) - block_size;
+		const auto alloc_size = lead + block_size + TCB_SIZE;
+
 		tls.ptr        = reinterpret_cast<uint8_t*>(Libs::LibKernel::Memory::AllocateRuntimeMemory(
 		    0, alloc_size, Common::VirtualMemory::Mode::ReadWrite, "thread_local_storage"));
 		tls.free_func  = nullptr;
 		tls.vm_alloc   = true;
 		tls.alloc_size = alloc_size;
+		tls.image_offset = lead;
 
 		EXIT_IF(tls.ptr == nullptr);
 
 		std::memset(tls.ptr, 0, alloc_size);
 
+		auto* image = tls.ptr + lead;
 		if (!program->tls.init_image.empty()) {
-			std::memcpy(tls.ptr, program->tls.init_image.data(), program->tls.init_image.size());
+			std::memcpy(image, program->tls.init_image.data(), program->tls.init_image.size());
 		} else {
-			std::memcpy(tls.ptr, reinterpret_cast<void*>(program->tls.image_vaddr),
+			std::memcpy(image, reinterpret_cast<void*>(program->tls.image_vaddr),
 			            program->tls.init_size);
 		}
 
-		auto* tcb = reinterpret_cast<uint64_t*>(tls.ptr + tcb_offset);
+		auto* tcb = reinterpret_cast<uint64_t*>(image + block_size);
 		tcb[0]    = reinterpret_cast<uint64_t>(tcb);
 	}
 
-	return tls.ptr;
+	return tls.ptr + tls.image_offset;
 }
 
 void RuntimeLinker::DeleteTls(Program* program, int thread_id) {
@@ -2140,10 +2153,12 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		if (phdr[i].p_type == PT_TLS) {
 			EXIT_IF(phdr[i].p_vaddr >= program->base_size);
 
+			const auto geometry = TlsLayoutFor(phdr[i].p_memsz, phdr[i].p_align);
+
 			program->tls.image_vaddr = phdr[i].p_vaddr + program->base_vaddr;
-			program->tls.init_size   = std::min(phdr[i].p_filesz, GetAlignedSize(phdr + i));
-			program->tls.image_size  = GetAlignedSize(phdr + i);
-			program->tls.tcb_offset  = AlignUp(program->tls.image_size, uint64_t{0x20});
+			program->tls.init_size   = std::min(phdr[i].p_filesz, geometry.block_size);
+			program->tls.image_size  = geometry.block_size;
+			program->tls.tcb_offset  = geometry.tcb_offset;
 
 			LOGF("tls addr = 0x%016" PRIx64 "\n"
 			     "tls init   = %" PRIu64 "\n"

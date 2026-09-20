@@ -721,6 +721,33 @@ int Tls() {
     });
     for (auto& worker: workers) worker.join();
     Check(first.tls.tlss.empty() && late.tls.tlss.empty(), "TLS lifecycle releases all blocks");
+
+    // The guest reads its thread-locals at negative offsets from the thread
+    // pointer, so the pointer has to sit exactly one aligned TLS block above
+    // the image. A block whose size is not already a multiple of the TCB
+    // alignment is where that goes wrong: rounding the gap up moves every
+    // variable in the module. Ghost of Yotei's main executable is exactly this
+    // shape -- a 0x190-byte block -- and read its own thread id 16 bytes past
+    // where the linker put it.
+    const auto geometry = RuntimeLinker::TlsLayoutFor(0x188, 0x10);
+    Check(geometry.block_size == 0x190 && geometry.tcb_offset == 0x190,
+        "the thread pointer sits exactly one aligned TLS block above the image");
+    Program skewed;
+    skewed.tls.image_size = geometry.block_size;
+    skewed.tls.tcb_offset = geometry.tcb_offset;
+    skewed.tls.init_image.assign(0x190, 0);
+    skewed.tls.init_image[0x58] = 0xab;
+    skewed.tls.init_image[0x18f] = 0xcd;
+    auto* skewed_image = RuntimeLinker::TlsGetAddr(&skewed);
+    auto* skewed_tcb = skewed_image + skewed.tls.tcb_offset;
+    Check(*reinterpret_cast<uint64_t*>(skewed_tcb) == reinterpret_cast<uint64_t>(skewed_tcb),
+        "unaligned TLS block still places the TCB self pointer");
+    Check((reinterpret_cast<uintptr_t>(skewed_tcb) & 0x1f) == 0,
+        "thread pointer keeps its alignment when the block size does not");
+    Check(skewed_tcb[-0x138] == 0xab && skewed_tcb[-1] == 0xcd,
+        "thread-locals are read at their linked offsets below the thread pointer");
+    RuntimeLinker::DeleteTls(&skewed, Common::Thread::GetThreadIdUnique());
+
     std::puts("PHASE1_PASS 32 threads, 16 TLS lifecycles, two module blocks, zero live blocks");
     return 0;
 }

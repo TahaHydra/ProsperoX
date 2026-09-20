@@ -53,6 +53,10 @@ struct ThreadLocalStorage {
 		application_heap_free_func_t free_func  = nullptr;
 		bool                         vm_alloc   = false;
 		uint64_t                     alloc_size = 0;
+		// Where the TLS image starts inside the allocation. The block is
+		// allocated low enough that the thread pointer above the image can
+		// still satisfy the TCB's alignment.
+		uint64_t                     image_offset = 0;
 	};
 
 	~ThreadLocalStorage();
@@ -227,6 +231,16 @@ public:
 	Program*        FindProgramByAddr(uint64_t vaddr);
 	Program*        FindProgramById(int32_t id);
 	Program*        FindProgramByFileName(const std::filesystem::path& elf_name);
+
+	// Where a module's TLS image starts and ends relative to its thread
+	// pointer. The guest reads thread-locals at negative offsets from that
+	// pointer, so the distance to it is exactly the aligned block size:
+	// rounding it up to suit the TCB would move every variable in the module.
+	struct TlsGeometry {
+		uint64_t block_size = 0;
+		uint64_t tcb_offset = 0;
+	};
+	[[nodiscard]] static TlsGeometry TlsLayoutFor(uint64_t memsz, uint64_t align) noexcept;
 
 	static uint8_t* TlsGetAddr(Program* program);
 	static void     DeleteTls(Program* program, int thread_id);
