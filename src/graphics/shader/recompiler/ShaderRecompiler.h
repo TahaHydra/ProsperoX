@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "common/stringUtils.h"
+#include "graphics/shader/recompiler/ShaderProvenance.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
 
@@ -17,6 +18,11 @@ struct CompileOptions {
 	uint32_t                    user_data_base  = 0;
 	uint32_t                    scratch_dwords  = 0;
 	uint64_t                    shader_hash     = 0;
+	// Where the guest put this shader and how big it said it was. A recompiler
+	// failure that cannot name the bytes it choked on identifies nothing.
+	uint64_t                    code_base       = 0;
+	uint32_t                    code_size_bytes = 0;
+	const char*                 code_source     = nullptr;
 	bool                        dump_ir                    = true;
 	bool                        early_dump                 = false;
 	const char*                 dump_label                 = nullptr;

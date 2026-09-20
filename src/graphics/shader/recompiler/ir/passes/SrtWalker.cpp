@@ -16,19 +16,9 @@ namespace {
 
 constexpr uint64_t AddressMask = 0x0000ffffffffffffull;
 
-const char* StageName(ShaderType stage) {
-	switch (stage) {
-		case ShaderType::Vertex: return "vertex";
-		case ShaderType::Pixel: return "pixel";
-		case ShaderType::Fetch: return "fetch";
-		case ShaderType::Compute: return "compute";
-		default: return "unknown";
-	}
-}
-
 std::string Diagnostic(const ResourcePlan& program, uint32_t pc, const std::string& message) {
-	return fmt::format("shader SRT: hash=0x{:016x} stage={} pc=0x{:08x} {}", program.shader_hash,
-	                   StageName(program.stage), pc, message);
+	return fmt::format("shader SRT: pc=0x{:08x} {}\n {}", pc, message,
+	                   DescribeProvenance(program.origin));
 }
 
 bool AddSignedAddress(uint64_t base, int64_t offset, uint64_t& result) {

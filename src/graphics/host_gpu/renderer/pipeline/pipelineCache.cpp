@@ -349,6 +349,9 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::CompileOptions options;
 		options.stage       = stage;
 		options.shader_hash = params.hash;
+		options.code_base       = params.Base();
+		options.code_size_bytes = static_cast<uint32_t>(params.code.size_bytes());
+		options.code_source     = params.source;
 		options.user_data   = params.user_data;
 		options.back_code      = params.back_code;
 		options.dump_ir     = Config::GetShaderLogDirection() != Config::ShaderLogDirection::Silent;

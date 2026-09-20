@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "common/stringUtils.h"
 #include "graphics/guest_gpu/gpu_defs.h"
+#include "graphics/shader/recompiler/ShaderProvenance.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
@@ -519,6 +520,9 @@ struct ResourcePlan {
 	uint64_t                      shader_hash     = 0;
 	uint32_t                      user_data_base  = 0;
 	uint32_t                      user_data_count = 64;
+	// Where the guest put these bytes. A pass that rejects a shader has to be
+	// able to say which shader, not just which hash.
+	Provenance                    origin;
 	std::list<Inst>                     value_storage;
 	std::vector<MemoryInfo>             memory_info;
 	std::vector<DescriptorSource>       descriptor_sources;
@@ -564,6 +568,11 @@ struct Program: ResourcePlan {
 };
 
 std::string ProgramToString(const Program& program);
+
+// One descriptor dword, or any other value, printed as the expression that
+// produces it. A pass that rejects a value has to be able to show what the value
+// was, not only that it was rejected.
+std::string ValueGraphToString(Value value, uint32_t max_depth = 6);
 
 void  ValidateProgram(const Program& program, bool require_ssa);
 void  ResolveControlFlowIdentities(Program& program);

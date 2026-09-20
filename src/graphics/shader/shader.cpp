@@ -107,7 +107,7 @@ static uint64_t GetDeclaredShaderHash(uint64_t shader_addr) {
 
 static ShaderParams GetShaderParams(uint64_t shader_addr, const char* label, uint64_t declared_hash,
 	                                std::span<const uint32_t> user_data,
-	                                const ShaderMappedData& data) {
+	                                const ShaderMappedData& data, const char* source) {
 	if (data.code_size_bytes == 0 || data.code_size_bytes % sizeof(uint32_t) != 0) {
 		EXIT("%s hash=0x%016" PRIx64 " shader=0x%016" PRIx64
 		     " has invalid AGC shader_size=0x%08" PRIx32 "\n",
@@ -120,6 +120,7 @@ static ShaderParams GetShaderParams(uint64_t shader_addr, const char* label, uin
 	    .user_data = std::vector<uint32_t>(user_data.begin(), user_data.end()),
 	    .hash      = declared_hash != 0 ? declared_hash
 	                                    : XXH3_64bits(code.data(), code.size_bytes()),
+	    .source    = source,
 	};
 }
 
@@ -752,7 +753,8 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	auto        params = GetShaderParams(
 	    regs.es_regs.data_addr, "ShaderRecompiler VS",
 	    GetDeclaredShaderHash(regs.es_regs.data_addr),
-	    std::span<const uint32_t>(regs.gs_user_sgpr.value, regs.gs_regs.rsrc2.user_sgpr), data);
+	    std::span<const uint32_t>(regs.gs_user_sgpr.value, regs.gs_regs.rsrc2.user_sgpr), data,
+	    "es_regs.data_addr");
 	if ((context.GetShaderStages() & 0x20u) == 0) {
 		if (!ShaderGetStaticInputInfoVS(regs, sh, data, info)) {
 			EXIT("failed to prepare vertex shader program\n");
@@ -763,7 +765,8 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	const auto back = ShaderGetMappedData(regs.gs_regs.data_addr, "ShaderGetInputInfoGS():");
 	const auto back_params =
 	    GetShaderParams(regs.gs_regs.data_addr, "ShaderRecompiler GS",
-	                    GetDeclaredShaderHash(regs.gs_regs.data_addr), {}, back);
+	                    GetDeclaredShaderHash(regs.gs_regs.data_addr), {}, back,
+	                    "gs_regs.data_addr");
 	params.back_code         = back_params.code;
 	// Merged shaders receive the GS-back user-data pointer in s0:s1, followed
 	// by the ordinary user SGPRs at s8. Keep both in the runtime register snapshot.
@@ -814,7 +817,8 @@ ShaderParams PrepareProgram(
 	ShaderGetStaticInputInfoPS(regs, sh, target_export_mapping, data, ps_info);
 	return GetShaderParams(
 	    regs.ps_regs.data_addr, "ShaderRecompiler PS", GetDeclaredShaderHash(regs.ps_regs.data_addr),
-	    std::span<const uint32_t>(regs.ps_user_sgpr.value, regs.ps_regs.rsrc2.user_sgpr), data);
+	    std::span<const uint32_t>(regs.ps_user_sgpr.value, regs.ps_regs.rsrc2.user_sgpr), data,
+	    "ps_regs.data_addr");
 }
 
 ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
@@ -823,7 +827,8 @@ ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderR
 	ShaderGetStaticInputInfoCS(regs, sh, data, info);
 	return GetShaderParams(
 	    regs.cs_regs.data_addr, "ShaderRecompiler CS", GetDeclaredShaderHash(regs.cs_regs.data_addr),
-	    std::span<const uint32_t>(regs.cs_user_sgpr.value, regs.cs_regs.user_sgpr), data);
+	    std::span<const uint32_t>(regs.cs_user_sgpr.value, regs.cs_regs.user_sgpr), data,
+	    "cs_regs.data_addr");
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

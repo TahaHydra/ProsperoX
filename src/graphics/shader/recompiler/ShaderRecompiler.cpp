@@ -53,6 +53,15 @@ const char* StageName(ShaderType stage) {
 	}
 }
 
+Provenance MakeProvenance(const CompileOptions& options) {
+	return {.stage           = StageName(options.stage),
+	        .source          = options.code_source != nullptr ? options.code_source : "?",
+	        .hash            = options.shader_hash,
+	        .code_base       = options.code_base,
+	        .code_size_bytes = options.code_size_bytes,
+	        .wave_size       = options.wave_size};
+}
+
 void LogDispatcherFallback(const CompileOptions& options, const CFG::Graph& cfg, const char* phase,
                            const std::string& reason) {
 	const auto* block        = cfg.FindBlock(cfg.failure_block);
@@ -552,7 +561,7 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 
 	LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " CFG BuildGraph\n", GetDumpLabel(options),
 	     StageName(options.stage), options.shader_hash);
-	auto cfg = CFG::BuildGraph(decoded);
+	auto cfg = CFG::BuildGraph(decoded, MakeProvenance(options));
 	LOGF("%s phase end: stage=%s hash=0x%016" PRIx64 " CFG BuildGraph blocks=%" PRIu64
 	     " loops=%" PRIu64 " back_edges=%" PRIu64 " elapsed_ms=%" PRIu64 "\n",
 	     GetDumpLabel(options), StageName(options.stage), options.shader_hash,
@@ -632,7 +641,8 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 	};
 	LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " IR TranslateProgram\n",
 	     GetDumpLabel(options), StageName(options.stage), options.shader_hash);
-	auto ir = Frontend::TranslateProgram(decoded, cfg, translate_options);
+	auto ir   = Frontend::TranslateProgram(decoded, cfg, translate_options);
+	ir.origin = MakeProvenance(options);
 	LOGF("%s phase end: stage=%s hash=0x%016" PRIx64 " IR TranslateProgram blocks=%" PRIu64
 	     " elapsed_ms=%" PRIu64 "\n",
 	     GetDumpLabel(options), StageName(options.stage), options.shader_hash,

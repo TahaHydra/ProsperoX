@@ -18,6 +18,9 @@ struct ShaderParams {
 	std::vector<uint32_t>     user_data;
 	uint64_t                  hash = 0;
 	std::span<const uint32_t> back_code;
+	// The register the address came out of. A shader that decodes to nonsense is
+	// usually a wrong address, and this is what points at the command that set it.
+	const char*               source = "?";
 
 	[[nodiscard]] uint64_t Base() const {
 		return reinterpret_cast<uint64_t>(code.data());

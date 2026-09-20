@@ -33,10 +33,18 @@ void SetFailure(Graph& graph, FailureKind kind, uint32_t block_id, const std::st
 	graph.unsupported_reason = message;
 }
 
+// A build failure names the shader it was building. The same words appear in
+// the padding between shaders and in whatever the guest left in that memory
+// earlier, so an offset on its own identifies nothing.
 [[noreturn]] void ExitBuildFailure(Graph& graph, FailureKind kind, uint32_t block_id,
-                                   const std::string& message) {
+                                   const Provenance& origin, const Decoder::Program& program,
+                                   uint32_t pc, const std::string& message) {
 	SetFailure(graph, kind, block_id, message);
-	EXIT("shader CFG build failed: %s", message.c_str());
+	const auto report = pc == UINT32_MAX
+	                        ? fmt::format("{}\n {}\n", message, DescribeProvenance(origin))
+	                        : fmt::format("{}\n {}\n", message,
+	                                      DescribeShaderFailure(origin, program, pc));
+	EXIT("shader CFG build failed: %s", report.c_str());
 	std::abort();
 }
 
@@ -1916,10 +1924,10 @@ bool RouteSharedSelectionArm(Graph& graph, uint32_t route_variable) {
 
 } // namespace
 
-Graph BuildGraph(const Decoder::Program& program) {
+Graph BuildGraph(const Decoder::Program& program, const Provenance& origin) {
 	Graph graph;
 	if (program.instructions.empty()) {
-		ExitBuildFailure(graph, FailureKind::InvalidLabel, UINT32_MAX,
+		ExitBuildFailure(graph, FailureKind::InvalidLabel, UINT32_MAX, origin, program, UINT32_MAX,
 		                 "cannot build CFG for empty shader");
 	}
 
@@ -1931,7 +1939,7 @@ Graph BuildGraph(const Decoder::Program& program) {
 		instruction_pcs.insert(inst.pc);
 		if (inst.opcode == Opcode::UNSUPPORTED) {
 			ExitBuildFailure(
-			    graph, FailureKind::UnsupportedInstruction, UINT32_MAX,
+			    graph, FailureKind::UnsupportedInstruction, UINT32_MAX, origin, program, inst.pc,
 			    fmt::format("unsupported decoded instruction in CFG at pc 0x{:08x}: {}", inst.pc,
 			                Decoder::InstructionToString(inst).c_str()));
 		}
@@ -1947,7 +1955,8 @@ Graph BuildGraph(const Decoder::Program& program) {
 		const auto  next_pc = InstructionEndPc(inst);
 		if (IsBranch(inst.opcode)) {
 			if (!IsValidTarget(inst.branch_target, instruction_pcs, first_pc, end_pc)) {
-				ExitBuildFailure(graph, FailureKind::InvalidBranchTarget, UINT32_MAX,
+				ExitBuildFailure(graph, FailureKind::InvalidBranchTarget, UINT32_MAX, origin, program,
+				                 inst.pc,
 				                 fmt::format("branch at pc 0x{:08x} targets invalid pc 0x{:08x}",
 				                             inst.pc, inst.branch_target));
 			}
@@ -1959,7 +1968,7 @@ Graph BuildGraph(const Decoder::Program& program) {
 			SetpcTargetInfo target_info;
 			if (!ResolveSetpcTargets(program, i, target_info)) {
 				ExitBuildFailure(
-				    graph, FailureKind::InvalidBranchTarget, UINT32_MAX,
+				    graph, FailureKind::InvalidBranchTarget, UINT32_MAX, origin, program, inst.pc,
 				    fmt::format("unsupported dynamic S_SETPC_B64 at pc 0x{:08x}", inst.pc));
 			}
 			const auto& target_pcs = target_info.indirect
@@ -1968,7 +1977,7 @@ Graph BuildGraph(const Decoder::Program& program) {
 			for (const auto target: target_pcs) {
 				if (!IsValidTarget(target, instruction_pcs, first_pc, end_pc)) {
 					ExitBuildFailure(
-					    graph, FailureKind::InvalidBranchTarget, UINT32_MAX,
+					    graph, FailureKind::InvalidBranchTarget, UINT32_MAX, origin, program, inst.pc,
 					    fmt::format("S_SETPC_B64 at pc 0x{:08x} targets invalid pc 0x{:08x}",
 					                inst.pc, target));
 				}
@@ -1992,7 +2001,7 @@ Graph BuildGraph(const Decoder::Program& program) {
 		}
 		if (start != end_pc && !instruction_pcs.contains(start)) {
 			ExitBuildFailure(
-			    graph, FailureKind::InvalidLabel, UINT32_MAX,
+			    graph, FailureKind::InvalidLabel, UINT32_MAX, origin, program, start,
 			    fmt::format("CFG label does not start on an instruction: 0x{:08x}", start));
 		}
 
@@ -2064,7 +2073,7 @@ Graph BuildGraph(const Decoder::Program& program) {
 			const auto fallthrough      = pc_to_block.find(next_pc);
 			if (fallthrough == pc_to_block.end()) {
 				ExitBuildFailure(
-				    graph, FailureKind::MissingFallthrough, block.id,
+				    graph, FailureKind::MissingFallthrough, block.id, origin, program, last.pc,
 				    fmt::format("conditional branch at pc 0x{:08x} has no fallthrough block",
 				                last.pc));
 			}

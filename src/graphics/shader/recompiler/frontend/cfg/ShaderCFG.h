@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "common/stringUtils.h"
+#include "graphics/shader/recompiler/ShaderProvenance.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
 #include <vector>
@@ -109,7 +110,9 @@ struct Graph {
 	uint32_t          FindNearestCommonPostDominator(uint32_t block_a, uint32_t block_b) const;
 };
 
-Graph       BuildGraph(const Decoder::Program& program);
+// The provenance travels with the program so a build failure can name the
+// shader it came from rather than only the offset it died at.
+Graph       BuildGraph(const Decoder::Program& program, const Provenance& origin);
 bool        Structurize(Graph& graph);
 std::string BranchConditionToString(BranchCondition condition);
 std::string FailureKindToString(FailureKind kind);

@@ -638,6 +638,60 @@ void ResolveControlFlowIdentities(Program& program) {
 	}
 }
 
+namespace {
+
+std::string ImmediateToString(Value value) {
+	switch (value.GetType()) {
+		case Type::ScalarReg: return fmt::format("s{}", RegIndex(value.ScalarRegister()));
+		case Type::VectorReg: return fmt::format("v{}", RegIndex(value.VectorRegister()));
+		case Type::U1: return std::string(value.U1() ? "true" : "false");
+		case Type::U8: return fmt::format("{}u8", value.U8());
+		case Type::U16: return fmt::format("{}u16", value.U16());
+		case Type::U32: return fmt::format("0x{:08x}", value.U32());
+		case Type::U64: return fmt::format("0x{:016x}", value.U64());
+		case Type::F16: return fmt::format("f16(0x{:04x})", value.F16Bits());
+		case Type::F32: return fmt::format("{}f", value.F32Value());
+		default: return fmt::format("<{}>", TypeName(value.GetType()));
+	}
+}
+
+void AppendValueGraph(std::string& text, Value value, uint32_t depth) {
+	value = value.Resolve();
+	if (value.IsEmpty()) {
+		text += "<null>";
+		return;
+	}
+	const auto* inst = value.TryInstruction();
+	if (inst == nullptr) {
+		text += ImmediateToString(value);
+		return;
+	}
+	text += ValueOpcodeName(inst->GetOpcode());
+	if (inst->NumArgs() == 0) {
+		return;
+	}
+	if (depth == 0) {
+		text += "(...)";
+		return;
+	}
+	text += '(';
+	for (size_t index = 0; index < inst->NumArgs(); index++) {
+		if (index != 0) {
+			text += ", ";
+		}
+		AppendValueGraph(text, inst->Arg(index), depth - 1);
+	}
+	text += ')';
+}
+
+} // namespace
+
+std::string ValueGraphToString(Value value, uint32_t max_depth) {
+	std::string text;
+	AppendValueGraph(text, value, max_depth);
+	return text;
+}
+
 std::string ProgramToString(const Program& program) {
 	std::map<const Inst*, size_t> ids;
 	size_t                        next_id = 1;
