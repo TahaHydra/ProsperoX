@@ -377,6 +377,20 @@ bool Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_MED3_F16: return Float16Ternary(inst, IR::ValueOpcode::FPMedTri32, false, false);
 
 		case O::V_FREXP_MANT_F32: return V_FREXP_MANT_F32(inst);
+		case O::V_CVT_F64_I32: return FloatUnary(inst, IR::ValueOpcode::ConvertF64S32);
+		case O::V_CVT_F64_U32: return FloatUnary(inst, IR::ValueOpcode::ConvertF64U32);
+		case O::V_CVT_I32_F64: return FloatUnary(inst, IR::ValueOpcode::ConvertS32F64);
+		case O::V_CVT_U32_F64: return FloatUnary(inst, IR::ValueOpcode::ConvertU32F64);
+		case O::V_CVT_F32_F64: return FloatUnary(inst, IR::ValueOpcode::ConvertF32F64);
+		case O::V_CVT_F64_F32: return FloatUnary(inst, IR::ValueOpcode::ConvertF64F32);
+		case O::V_TRUNC_F64: return FloatUnary(inst, IR::ValueOpcode::FPTrunc64);
+		case O::V_CEIL_F64: return FloatUnary(inst, IR::ValueOpcode::FPCeil64);
+		case O::V_RNDNE_F64: return FloatUnary(inst, IR::ValueOpcode::FPRoundEven64);
+		case O::V_FLOOR_F64: return FloatUnary(inst, IR::ValueOpcode::FPFloor64);
+		case O::V_FRACT_F64: return FloatUnary(inst, IR::ValueOpcode::FPFract64);
+		case O::V_RCP_F64: return FloatUnary(inst, IR::ValueOpcode::FPRecip64);
+		case O::V_RSQ_F64: return FloatUnary(inst, IR::ValueOpcode::FPRecipSqrt64);
+		case O::V_SQRT_F64: return FloatUnary(inst, IR::ValueOpcode::FPSqrt64);
 		case O::V_RCP_F32: return FloatUnary(inst, IR::ValueOpcode::FPRecip32);
 		case O::V_RCP_IFLAG_F32: return FloatUnary(inst, IR::ValueOpcode::FPRecipIFlag32);
 		case O::V_FRACT_F32: return FloatUnary(inst, IR::ValueOpcode::FPFract32);
@@ -402,6 +416,12 @@ bool Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_MADAK_F32:
 		case O::V_MAD_F32:
 		case O::V_FMA_F32: return FloatTernary(inst, IR::ValueOpcode::FPFma32, false, true);
+		case O::V_ADD_F64: return FloatBinary(inst, IR::ValueOpcode::FPAdd64, false);
+		case O::V_MUL_F64: return FloatBinary(inst, IR::ValueOpcode::FPMul64, false);
+		case O::V_MIN_F64: return FloatBinary(inst, IR::ValueOpcode::FPMin64, false);
+		case O::V_MAX_F64: return FloatBinary(inst, IR::ValueOpcode::FPMax64, false);
+		case O::V_LDEXP_F64: return FloatBinary(inst, IR::ValueOpcode::FPLdexp64, false);
+		case O::V_FMA_F64: return FloatTernary(inst, IR::ValueOpcode::FPFma64, false, false);
 		case O::V_MIN3_F32: return FloatTernary(inst, IR::ValueOpcode::FPMinTri32, false, false);
 		case O::V_MAX3_F32: return FloatTernary(inst, IR::ValueOpcode::FPMaxTri32, false, false);
 		case O::V_MED3_F32: return FloatTernary(inst, IR::ValueOpcode::FPMedTri32, false, false);

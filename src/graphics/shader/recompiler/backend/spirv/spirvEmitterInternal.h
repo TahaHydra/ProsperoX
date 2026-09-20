@@ -38,6 +38,7 @@ enum : uint32_t {
 	AddressingModelPhysicalStorageBuffer64   = 5348,
 	MemoryModelGLSL450                       = 1,
 	CapabilityShader                         = 1,
+	CapabilityFloat64                        = 10,
 	CapabilityInt64                          = 11,
 	CapabilityInt64Atomics                   = 12,
 	CapabilityImageGatherExtended            = 25,
@@ -193,6 +194,7 @@ enum : uint32_t {
 	OpConvertSToF                  = 111,
 	OpConvertUToF                  = 112,
 	OpUConvert                     = 113,
+	OpFConvert                     = 115,
 	OpConvertUToPtr                = 120,
 	OpBitcast                      = 124,
 	OpSNegate                      = 126,
@@ -296,6 +298,10 @@ enum : uint32_t {
 	GlslLog2            = 30,
 	GlslSqrt            = 31,
 	GlslInverseSqrt     = 32,
+	GlslPackDouble2x32  = 59,
+	GlslUnpackDouble2x32 = 65,
+	GlslNMin            = 79,
+	GlslNMax            = 80,
 	GlslFMin            = 37,
 	GlslFMax            = 40,
 	GlslFClamp          = 43,
@@ -415,6 +421,8 @@ uint32_t TypeU32Pair(EmitterState& state);
 uint32_t TypeI32(EmitterState& state);
 uint32_t TypeI32Pair(EmitterState& state);
 uint32_t TypeF32(EmitterState& state);
+
+uint32_t TypeF64(EmitterState& state);
 uint32_t TypeU32Vector(EmitterState& state, uint32_t components);
 
 uint32_t TypeU32Composite(EmitterState& state, uint32_t components);

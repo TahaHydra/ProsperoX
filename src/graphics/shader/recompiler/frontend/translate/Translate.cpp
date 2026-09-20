@@ -230,6 +230,19 @@ IR::Value Translator::ReadOperand(const Decoder::Operand& operand, IR::Type type
 		const auto pair = ReadU32Pair(operand);
 		return ir.ConstructU64(pair[0], pair[1]);
 	}
+	if (type == IR::Type::F64) {
+		const auto pair  = ReadU32Pair(operand);
+		auto       value = ir.Emit(IR::ValueOpcode::BitCastF64U64,
+		                           {ir.ConstructU64(pair[0], pair[1])});
+		// The neg and abs modifiers apply to the double, not to its low half.
+		if (operand.absolute) {
+			value = ir.Emit(IR::ValueOpcode::FPAbs64, {value});
+		}
+		if (operand.negate) {
+			value = ir.Emit(IR::ValueOpcode::FPNeg64, {value});
+		}
+		return value;
+	}
 	auto bits = ApplyBitSourceModifiers(operand, ReadRawU32(operand));
 	if (TypesOverlap(type, IR::Type::F32) && !TypesOverlap(type, IR::Type::U32)) {
 		auto value = ir.BitCastF32(bits);
@@ -414,6 +427,11 @@ void Translator::WriteOperand(const Decoder::Operand& operand, IR::Value value) 
 	}
 	if (type == IR::Type::U64) {
 		WriteU32Pair(operand, {ir.CompositeExtract(value, 0), ir.CompositeExtract(value, 1)});
+		return;
+	}
+	if (type == IR::Type::F64) {
+		const auto bits = ir.Emit(IR::ValueOpcode::BitCastU64F64, {value});
+		WriteU32Pair(operand, {ir.CompositeExtract(bits, 0), ir.CompositeExtract(bits, 1)});
 		return;
 	}
 	if (type == IR::Type::F32) {

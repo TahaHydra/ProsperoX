@@ -687,6 +687,89 @@ bool EmitValueAlu(ValueEmitContext& ctx, const IR::Inst& inst) {
 		case IR::ValueOpcode::FPCeil32: return ext_unary(GlslCeil);
 		case IR::ValueOpcode::FPTrunc32: return ext_unary(GlslTrunc);
 		case IR::ValueOpcode::FPFract32: return ext_unary(GlslFract);
+
+		// A 64-bit value lives in the IR as the register pair the hardware keeps
+		// it in, so these two are the boundary where it becomes a double.
+		case IR::ValueOpcode::BitCastF64U64:
+			ctx.Define(inst,
+			           EmitExt(state, TypeF64(state), GlslPackDouble2x32, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::BitCastU64F64:
+			ctx.Define(inst, EmitExt(state, ctx.TypeId(IR::Type::U64), GlslUnpackDouble2x32,
+			                         {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::ConvertF64S32: {
+			const auto signed_value = NewUnary(state, OpBitcast, TypeI32(state), ctx.Arg(inst, 0));
+			ctx.Emit(inst, OpConvertSToF, IR::Type::F64, {signed_value});
+			return true;
+		}
+		case IR::ValueOpcode::ConvertF64U32: return unary(OpConvertUToF, IR::Type::F64);
+		case IR::ValueOpcode::ConvertS32F64: {
+			const auto signed_value =
+			    NewUnary(state, OpConvertFToS, TypeI32(state), ctx.Arg(inst, 0));
+			ctx.Emit(inst, OpBitcast, IR::Type::U32, {signed_value});
+			return true;
+		}
+		case IR::ValueOpcode::ConvertU32F64: return unary(OpConvertFToU, IR::Type::U32);
+		case IR::ValueOpcode::ConvertF32F64: return unary(OpFConvert, IR::Type::F32);
+		case IR::ValueOpcode::ConvertF64F32: return unary(OpFConvert, IR::Type::F64);
+		case IR::ValueOpcode::FPAbs64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslFAbs, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::FPNeg64:
+			ctx.Emit(inst, OpFNegate, IR::Type::F64, {ctx.Arg(inst, 0)});
+			return true;
+		case IR::ValueOpcode::FPAdd64: return binary(OpFAdd, IR::Type::F64);
+		case IR::ValueOpcode::FPMul64: return binary(OpFMul, IR::Type::F64);
+		// The hardware minimum and maximum return the operand that is not NaN,
+		// which is what NMin and NMax do and what FMin and FMax leave undefined.
+		case IR::ValueOpcode::FPMin64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslNMin,
+			                         {ctx.Arg(inst, 0), ctx.Arg(inst, 1)}));
+			return true;
+		case IR::ValueOpcode::FPMax64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslNMax,
+			                         {ctx.Arg(inst, 0), ctx.Arg(inst, 1)}));
+			return true;
+		case IR::ValueOpcode::FPFma64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslFma,
+			                         {ctx.Arg(inst, 0), ctx.Arg(inst, 1), ctx.Arg(inst, 2)}));
+			return true;
+		case IR::ValueOpcode::FPRecip64: {
+			// One converts exactly, so this needs no 64-bit literal.
+			const auto one =
+			    NewUnary(state, OpFConvert, TypeF64(state), ConstantF32(state, 0x3f800000u));
+			ctx.Define(inst, NewBinary(state, OpFDiv, TypeF64(state), one, ctx.Arg(inst, 0)));
+			return true;
+		}
+		case IR::ValueOpcode::FPRecipSqrt64:
+			ctx.Define(inst,
+			           EmitExt(state, TypeF64(state), GlslInverseSqrt, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::FPSqrt64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslSqrt, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::FPRoundEven64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslRoundEven, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::FPFloor64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslFloor, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::FPCeil64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslCeil, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::FPTrunc64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslTrunc, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::FPFract64:
+			ctx.Define(inst, EmitExt(state, TypeF64(state), GlslFract, {ctx.Arg(inst, 0)}));
+			return true;
+		case IR::ValueOpcode::FPLdexp64: {
+			const auto exponent = NewUnary(state, OpBitcast, TypeI32(state), ctx.Arg(inst, 1));
+			ctx.Define(inst,
+			           EmitExt(state, TypeF64(state), GlslLdexp, {ctx.Arg(inst, 0), exponent}));
+			return true;
+		}
 		default: return false;
 	}
 }

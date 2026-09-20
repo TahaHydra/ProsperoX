@@ -54,6 +54,13 @@ uint32_t TypeF32(EmitterState& state) {
 	return state.builder.Type(OpTypeFloat, {32});
 }
 
+uint32_t TypeF64(EmitterState& state) {
+	// Nothing else in the module needs this capability, so it is declared where
+	// the type is, rather than from a separate pass that has to remember to.
+	state.builder.RequireCapability(CapabilityFloat64);
+	return state.builder.Type(OpTypeFloat, {64});
+}
+
 uint32_t TypeU32Vector(EmitterState& state, uint32_t components) {
 	return state.builder.Type(OpTypeVector, {TypeU32(state), components});
 }

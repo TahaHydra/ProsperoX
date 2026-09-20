@@ -91,6 +91,8 @@ constexpr OpcodeMap VOP1_OPCODE_LIST[] = {
     {0x00u, Opcode::V_NOP},
     {0x01u, Opcode::V_MOV_B32},
     {0x02u, Opcode::V_READFIRSTLANE_B32},
+    {0x03u, Opcode::V_CVT_I32_F64},
+    {0x04u, Opcode::V_CVT_F64_I32},
     {0x05u, Opcode::V_CVT_F32_I32},
     {0x06u, Opcode::V_CVT_F32_U32},
     {0x07u, Opcode::V_CVT_U32_F32},
@@ -100,6 +102,18 @@ constexpr OpcodeMap VOP1_OPCODE_LIST[] = {
     {0x0cu, Opcode::V_CVT_RPI_I32_F32},
     {0x0du, Opcode::V_CVT_FLR_I32_F32},
     {0x0eu, Opcode::V_CVT_OFF_F32_I4},
+    {0x0fu, Opcode::V_CVT_F32_F64},
+    {0x10u, Opcode::V_CVT_F64_F32},
+    {0x15u, Opcode::V_CVT_U32_F64},
+    {0x16u, Opcode::V_CVT_F64_U32},
+    {0x17u, Opcode::V_TRUNC_F64},
+    {0x18u, Opcode::V_CEIL_F64},
+    {0x19u, Opcode::V_RNDNE_F64},
+    {0x1au, Opcode::V_FLOOR_F64},
+    {0x2fu, Opcode::V_RCP_F64},
+    {0x30u, Opcode::V_RSQ_F64},
+    {0x34u, Opcode::V_SQRT_F64},
+    {0x3eu, Opcode::V_FRACT_F64},
     {0x11u, Opcode::V_CVT_F32_UBYTE0},
     {0x12u, Opcode::V_CVT_F32_UBYTE1},
     {0x13u, Opcode::V_CVT_F32_UBYTE2},
@@ -287,6 +301,12 @@ constexpr OpcodeMap VOP3_OPCODE_LIST[] = {
     {0x15eu, Opcode::V_CVT_PK_U8_F32},
     {0x178u, Opcode::V_XOR3_B32},
     {0x12fu, Opcode::V_CVT_PKRTZ_F16_F32},
+    {0x14cu, Opcode::V_FMA_F64},
+    {0x162u, Opcode::V_ADD_F64},
+    {0x163u, Opcode::V_MUL_F64},
+    {0x164u, Opcode::V_MIN_F64},
+    {0x165u, Opcode::V_MAX_F64},
+    {0x166u, Opcode::V_LDEXP_F64},
     {0x169u, Opcode::V_MUL_LO_U32},
     {0x16au, Opcode::V_MUL_HI_U32},
     {0x16bu, Opcode::V_MUL_LO_I32},
@@ -1340,7 +1360,12 @@ uint32_t NativeVop3SourceCount(Opcode opcode) {
 		case Opcode::V_CVT_PKNORM_I16_F32:
 		case Opcode::V_CVT_PKNORM_U16_F32:
 		case Opcode::V_CVT_PK_U16_U32:
-		case Opcode::V_CVT_PK_I16_I32: return 2;
+		case Opcode::V_CVT_PK_I16_I32:
+		case Opcode::V_ADD_F64:
+		case Opcode::V_MUL_F64:
+		case Opcode::V_MIN_F64:
+		case Opcode::V_MAX_F64:
+		case Opcode::V_LDEXP_F64: return 2;
 		default: return 3;
 	}
 }
@@ -1470,7 +1495,13 @@ bool SupportsNativeVop3SourceModifiers(Opcode opcode) {
 		case Opcode::V_MIN3_F32:
 		case Opcode::V_MAX3_F32:
 		case Opcode::V_MED3_F32:
-		case Opcode::V_LDEXP_F32: return true;
+		case Opcode::V_LDEXP_F32:
+		case Opcode::V_ADD_F64:
+		case Opcode::V_MUL_F64:
+		case Opcode::V_MIN_F64:
+		case Opcode::V_MAX_F64:
+		case Opcode::V_FMA_F64:
+		case Opcode::V_LDEXP_F64: return true;
 		default: return false;
 	}
 }
