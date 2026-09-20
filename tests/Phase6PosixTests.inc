@@ -106,6 +106,52 @@ int Run() {
     F::Umount("/phase6posix");
     std::filesystem::remove(root/"payload");
     std::filesystem::remove(root);
+
+    // sceKernelAioInitializeParam publishes the system defaults into a
+    // caller-owned structure, and a title that wants them unchanged hands the
+    // result straight back to sceKernelAioInitializeImpl. Writing nothing would
+    // pass the kernel whatever was on the caller's stack, so the fixture fills
+    // the buffer with a pattern first and requires every field to be replaced.
+    Loader::SymbolResolve aio_param_key{"nu4a0-arQis","libkernel",1,"libkernel",1,1,
+        Loader::SymbolType::Func};
+    Loader::SymbolResolve aio_impl_key{"vYU8P9Td2Zo","libkernel",1,"libkernel",1,1,
+        Loader::SymbolType::Func};
+    const auto* aio_param_export=symbols.Find(aio_param_key);
+    const auto* aio_impl_export=symbols.Find(aio_impl_key);
+    Check(aio_param_export && aio_impl_export,"qualified AIO initialization exports resolve");
+    using AioParam = KYTY_SYSV_ABI void (*)(void*);
+    using AioImpl = KYTY_SYSV_ABI int (*)(void*,int32_t);
+    const auto aio_param=reinterpret_cast<AioParam>(aio_param_export->vaddr);
+    const auto aio_impl=reinterpret_cast<AioImpl>(aio_impl_export->vaddr);
+
+    constexpr int32_t AIO_PARAM_SIZE=60;
+    alignas(4) uint8_t aio_buffer[AIO_PARAM_SIZE];
+    std::memset(aio_buffer,0xcd,sizeof(aio_buffer));
+    aio_param(aio_buffer);
+    int32_t aio_fields[AIO_PARAM_SIZE/4];
+    std::memcpy(aio_fields,aio_buffer,sizeof(aio_buffer));
+    bool aio_untouched=false;
+    for (const auto field: aio_fields) { aio_untouched = aio_untouched || field==static_cast<int32_t>(0xcdcdcdcd); }
+    Check(!aio_untouched,"AIO parameter defaults leave no field uninitialized");
+    // Three priority classes of five int32 fields: window, delayed count,
+    // split enable, split size, split chunk size. Low and mid split a large
+    // transfer; high runs to completion.
+    for (int cls=0; cls<3; ++cls) {
+        Check(aio_fields[cls*5+0]==32 && aio_fields[cls*5+1]==32,
+            "AIO class publishes the default scheduling window and delayed count");
+        Check(aio_fields[cls*5+3]==0x100000 && aio_fields[cls*5+4]==0x100000,
+            "AIO class publishes the default split size");
+    }
+    Check(aio_fields[2]==1 && aio_fields[7]==1 && aio_fields[12]==0,
+        "AIO enables splitting for low and mid priority only");
+    Check(aio_impl(nullptr,AIO_PARAM_SIZE)==Libs::LibKernel::KERNEL_ERROR_EFAULT,
+        "AIO initialization rejects a null parameter");
+    Check(aio_impl(aio_buffer,AIO_PARAM_SIZE-4)==Libs::LibKernel::KERNEL_ERROR_EINVAL,
+        "AIO initialization rejects a parameter of the wrong size");
+    Check(aio_impl(aio_buffer,AIO_PARAM_SIZE)==0,"AIO initialization accepts the published defaults");
+    Check(aio_impl(aio_buffer,AIO_PARAM_SIZE)==Libs::LibKernel::KERNEL_ERROR_EBUSY,
+        "AIO reports a second initialization rather than repeating it");
+
     std::puts("PHASE6_POSIX_PASS qualified open/close/lseek/fstat, real descriptors, error translation");
     return 0;
 }

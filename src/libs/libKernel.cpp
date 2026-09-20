@@ -2860,6 +2860,64 @@ int chmod(const char* path, int mode) {
 	return OK;
 }
 
+// Scheduling parameters for one AIO priority class, and the three classes a
+// title configures together.
+struct KernelAioSchedulingParam {
+	int32_t scheduling_window_size;
+	int32_t delayed_count_limit;
+	int32_t enable_split;
+	int32_t split_size;
+	int32_t split_chunk_size;
+};
+
+struct KernelAioParam {
+	KernelAioSchedulingParam low;
+	KernelAioSchedulingParam mid;
+	KernelAioSchedulingParam high;
+};
+
+// The size a title passes to sceKernelAioInitializeImpl. Ghost of Yotei asks
+// for the defaults and hands the structure straight back at 0x3c bytes, which
+// is what pins this layout.
+constexpr int32_t KERNEL_AIO_PARAM_SIZE = 60;
+static_assert(sizeof(KernelAioParam) == KERNEL_AIO_PARAM_SIZE);
+
+constexpr int32_t KERNEL_AIO_DEFAULT_WINDOW     = 32;
+constexpr int32_t KERNEL_AIO_DEFAULT_DELAYED    = 32;
+constexpr int32_t KERNEL_AIO_DEFAULT_SPLIT_SIZE = 0x100000;
+
+static std::atomic_bool g_kernel_aio_initialized {false};
+
+// The defaults sceKernelAioInitializeParam publishes. Low and mid priority
+// split a large transfer so a small request cannot end up queued behind it;
+// high priority is meant to run to completion, so it does not split.
+static KernelAioParam KernelAioDefaultParam() {
+	const KernelAioSchedulingParam split {.scheduling_window_size = KERNEL_AIO_DEFAULT_WINDOW,
+	                                      .delayed_count_limit    = KERNEL_AIO_DEFAULT_DELAYED,
+	                                      .enable_split           = 1,
+	                                      .split_size             = KERNEL_AIO_DEFAULT_SPLIT_SIZE,
+	                                      .split_chunk_size       = KERNEL_AIO_DEFAULT_SPLIT_SIZE};
+	auto whole         = split;
+	whole.enable_split = 0;
+	return KernelAioParam {.low = split, .mid = split, .high = whole};
+}
+
+// Publishes the system defaults into a caller-owned structure. A title that
+// wants them unchanged passes the result straight to sceKernelAioInitializeImpl
+// without touching it, so writing nothing here hands the kernel whatever was on
+// the caller's stack.
+void KYTY_SYSV_ABI KernelAioInitializeParam(void* param) {
+	PRINT_NAME();
+
+	LOGF("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+
+	if (param == nullptr) {
+		return;
+	}
+
+	*static_cast<KernelAioParam*>(param) = KernelAioDefaultParam();
+}
+
 int KYTY_SYSV_ABI KernelAioInitializeImpl(void* param, int32_t size) {
 	PRINT_NAME();
 
@@ -2867,13 +2925,21 @@ int KYTY_SYSV_ABI KernelAioInitializeImpl(void* param, int32_t size) {
 	     "\t size  = 0x%08" PRIx32 "\n",
 	     reinterpret_cast<uint64_t>(param), static_cast<uint32_t>(size));
 
+	if (param == nullptr) {
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+	if (size != KERNEL_AIO_PARAM_SIZE) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	// A second initialisation is reported, not applied. Titles branch on this:
+	// Ghost of Yotei accepts EBUSY as "already configured" and only treats any
+	// other non-zero result as a failure.
+	if (g_kernel_aio_initialized.exchange(true, std::memory_order_acq_rel)) {
+		return LibKernel::KERNEL_ERROR_EBUSY;
+	}
+
 	return OK;
-}
-
-void KYTY_SYSV_ABI KernelAioInitializeParam(void* param) {
-	PRINT_NAME();
-
-	LOGF("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 }
 
 constexpr int32_t KERNEL_AIO_STATE_SUBMITTED  = 1;
