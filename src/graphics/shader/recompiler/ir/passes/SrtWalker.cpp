@@ -464,6 +464,12 @@ public:
 		return true;
 	}
 
+	// Set when the shader itself is wrong rather than when its data happens to
+	// be out of reach. A value this walk cannot read is a slot it fills with
+	// zero; a value it cannot read because the encoding is impossible is a
+	// shader nothing should be built from.
+	[[nodiscard]] bool SawMalformedProgram() const noexcept { return m_malformed; }
+
 private:
 	static float Float32(uint64_t bits) {
 		return std::bit_cast<float>(static_cast<uint32_t>(bits));
@@ -597,6 +603,10 @@ private:
 				return false;
 			}
 			if (immediate < 0) {
+				// A scalar buffer offset is unsigned on the hardware; a negative
+				// one means the program was decoded wrong, not that the data is
+				// missing.
+				m_malformed = true;
 				return false;
 			}
 			const auto byte_offset =
@@ -606,8 +616,13 @@ private:
 			const auto size = stride == 0u
 			                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
 			                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
+			// A scalar buffer read past the end of its record range reads zero on
+			// the hardware. Refusing the walk instead would throw away every
+			// binding in the shader over a read the guest already expects to be
+			// zero.
 			if (aligned > size || size - aligned < sizeof(uint32_t)) {
-				return false;
+				result = 0;
+				return true;
 			}
 			address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
 		} else {
@@ -968,6 +983,7 @@ private:
 	std::unordered_map<const Inst*, uint64_t> m_cache;
 	std::vector<const Inst*>                  m_own_visiting;
 	std::vector<const Inst*>&                 m_visiting;
+	bool                                      m_malformed = false;
 	bool                                      m_reserved = false;
 };
 
@@ -1062,6 +1078,9 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 			// the same thing an unmapped read gives the guest -- rather than a
 			// reason to refuse every binding in the shader.
 			if (!selected.Evaluate(read.value, flattened[read.flat_offset])) {
+				if (selected.SawMalformedProgram()) {
+					return false;
+				}
 				flattened[read.flat_offset] = 0u;
 				unresolved++;
 			}

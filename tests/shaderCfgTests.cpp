@@ -82,6 +82,15 @@ void ExpectFatal(Function function, const char *text) {
 }
 #endif
 
+// The graph carries the shader it came from so a failure can name it. A test
+// builds its shader inline, so it says so rather than inventing an address.
+ShaderRecompiler::Provenance TestProvenance() {
+  ShaderRecompiler::Provenance origin;
+  origin.stage = "test";
+  origin.source = "inline test shader";
+  return origin;
+}
+
 ShaderRecompiler::CompileOptions MakeCompileOptions(ShaderType stage) {
   static const ShaderVertexInputInfo vertex{};
   static const ShaderPixelInputInfo pixel{};
@@ -126,7 +135,7 @@ struct TestCompileResult {
 TestCompileResult RecompileForTest(
     std::span<const uint32_t> code,
     const ShaderRecompiler::CompileOptions &options,
-    ShaderRecompiler::IR::SrtMemoryReader read_memory = nullptr,
+    ShaderRecompiler::IR::SrtMemoryReader read_memory = ReadHostTestMemory,
     void *read_memory_data = nullptr, uint32_t push_data_start_dword = 0) {
   auto translated = ShaderRecompiler::TranslateProgram(code, options);
   auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
@@ -4347,7 +4356,7 @@ void TestNewShaderRecompilerCapturedVopcSdwaCmpxClass() {
   translate_options.wave_size = 64u;
   translate_options.pixel = &pixel;
   ShaderRecompiler::Decoder::DecodeProgram(shader, program);
-  graph = ShaderRecompiler::CFG::BuildGraph(program);
+  graph = ShaderRecompiler::CFG::BuildGraph(program, TestProvenance());
   ir = ShaderRecompiler::Frontend::TranslateProgram(program, graph,
                                                     translate_options);
   uint32_t class_compares = 0u;
@@ -4770,7 +4779,7 @@ void TestImageAddressOperands() {
     Frontend::TranslateOptions options{};
     options.stage = ShaderType::Compute;
     options.compute = &compute;
-    auto program = Frontend::TranslateProgram(decoded, CFG::BuildGraph(decoded), options);
+    auto program = Frontend::TranslateProgram(decoded, CFG::BuildGraph(decoded, TestProvenance()), options);
     IR::RewriteToSsa(program.blocks);
     IR::ConstantPropagationPass(program.blocks);
     uint32_t addresses = 0;
@@ -6185,7 +6194,7 @@ void TestNewShaderRecompilerNativeWideScalarMemoryIr() {
   translate_options.wave_size = 64u;
   translate_options.compute = &compute;
   ShaderRecompiler::Decoder::DecodeProgram(shader, decoded);
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   ir = ShaderRecompiler::Frontend::TranslateProgram(decoded, graph,
                                                     translate_options);
   std::vector<uint32_t> address_widths;
@@ -6883,7 +6892,7 @@ void TestNewShaderRecompilerDsReadWrite2Translation() {
   translate_options.wave_size = 64u;
   translate_options.compute = &compute;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   typed = ShaderRecompiler::Frontend::TranslateProgram(decoded, graph,
                                                        translate_options);
   uint32_t scalar_loads = 0;
@@ -7031,7 +7040,7 @@ void TestNewShaderRecompilerDsWideAndAtomicTranslation() {
   translate_options.wave_size = 64u;
   translate_options.compute = &compute;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   typed = ShaderRecompiler::Frontend::TranslateProgram(decoded, graph,
                                                        translate_options);
   std::array<uint32_t, 3> load_widths{};
@@ -7462,7 +7471,7 @@ void TestNewShaderRecompilerCfgLoopHeaderDsAppendConsumeStructured() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_block_count = graph.blocks.size();
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
@@ -7681,7 +7690,7 @@ void TestNewShaderRecompilerCfgNestedLoopExitTailMergeSplit() {
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, program);
 
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(program);
+  graph = ShaderRecompiler::CFG::BuildGraph(program, TestProvenance());
   const auto original_block_count = graph.blocks.size();
   Check(ShaderRecompiler::CFG::Structurize(graph),
         graph.unsupported_reason.c_str());
@@ -7832,7 +7841,7 @@ void TestNewShaderRecompilerCfgLoopGatewaySelection() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(ShaderRecompiler::CFG::Structurize(graph),
@@ -7872,7 +7881,7 @@ void TestNewShaderRecompilerCfgConditionalLoopHeaderSelection() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_block_count = graph.blocks.size();
   Check(ShaderRecompiler::CFG::Structurize(graph),
         graph.unsupported_reason.c_str());
@@ -7923,7 +7932,7 @@ void TestNewShaderRecompilerCfgMultipleLoopLatches() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_block_count = graph.blocks.size();
   Check(graph.back_edges.size() == 2u,
         "multiple-latch fixture lacks two native backedges");
@@ -7997,7 +8006,7 @@ void TestNewShaderRecompilerCfgNestedEarlyExitLoopForwarders() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_block_count = graph.blocks.size();
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
@@ -8060,7 +8069,7 @@ void TestNewShaderRecompilerCfgExecSccSharedArm() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(std::ranges::all_of(original_coverage,
@@ -8113,7 +8122,7 @@ void TestSharedReturnPreservesDescriptorDominance() {
   };
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
-  auto graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  auto graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(ShaderRecompiler::CFG::Structurize(graph),
@@ -8174,7 +8183,7 @@ void TestNewShaderRecompilerCfgNestedTailEarlyExit() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(ShaderRecompiler::CFG::Structurize(graph),
@@ -8224,7 +8233,7 @@ void TestNewShaderRecompilerCfgSharedReturnAfterNestedSelections() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(ShaderRecompiler::CFG::Structurize(graph),
@@ -8273,7 +8282,7 @@ void TestNewShaderRecompilerCfgAlternatingSharedReturns() {
   };
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
-  auto graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  auto graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto coverage = CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(graph.blocks.size() == 5u, "alternating returns fixture has the wrong CFG");
   Check(ShaderRecompiler::CFG::Structurize(graph), graph.unsupported_reason.c_str());
@@ -8310,7 +8319,7 @@ void TestNewShaderRecompilerCfgLoopSharedRegion() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_block_count = graph.blocks.size();
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
@@ -8375,7 +8384,7 @@ void TestNewShaderRecompilerCfgSharedRegionBeforeEarlyBreakLoop() {
 
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
-  auto graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  auto graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(graph.blocks.size() == 9u && graph.natural_loops.size() == 1u,
@@ -8421,7 +8430,7 @@ void TestNewShaderRecompilerCfgOverlappingEarlyExitLadder() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   Check(
       graph.blocks.size() == 6u &&
           graph.blocks[0].successors == std::vector<uint32_t>({1, 2}) &&
@@ -8493,7 +8502,7 @@ void TestNewShaderRecompilerCfgNestedEarlyExitSharedTerminal() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   const bool structured = ShaderRecompiler::CFG::Structurize(graph);
@@ -8542,7 +8551,7 @@ void TestNewShaderRecompilerCfgSharedTerminalEarlyExit() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(ShaderRecompiler::CFG::Structurize(graph),
@@ -8576,7 +8585,7 @@ void TestNewShaderRecompilerCfgPrunesUnreachableSelectionEntry() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   const auto original_coverage =
       CfgInstructionCoverage(graph, decoded.instructions.size());
   Check(original_coverage[1] == 0u,
@@ -9418,7 +9427,7 @@ void TestEmbeddedVertexFormatSwizzle() {
     options.user_data_count = 0;
     options.vertex = &input;
     options.embedded_fetch = &fetch;
-    auto program = Frontend::TranslateProgram(decoded, CFG::BuildGraph(decoded), options);
+    auto program = Frontend::TranslateProgram(decoded, CFG::BuildGraph(decoded, TestProvenance()), options);
     Check(program.info.vertex_fetch_components[0] == test.source_width,
           "vertex fetch width follows destination VGPR count instead of selected source channels");
     const uint32_t source[] = {0x3e800000, 0x3f000000, 0x3f400000, 0x40000000};
@@ -9630,7 +9639,7 @@ void TestNewShaderRecompilerPrunesUnreachableSetpcMetadata() {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
-  graph = ShaderRecompiler::CFG::BuildGraph(decoded);
+  graph = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   Check(!graph.irreducible && graph.code_table_load_pcs.empty(),
         "unreachable S_SETPC retained jump-table metadata or dispatcher mode");
 
@@ -11391,7 +11400,7 @@ void BuildTypedPlan(const uint32_t *code, uint32_t words,
                     ShaderRecompiler::IR::Program &ir) {
   ShaderRecompiler::Decoder::Program decoded;
   ShaderRecompiler::Decoder::DecodeProgram(std::span{code, words}, decoded);
-  auto cfg = ShaderRecompiler::CFG::BuildGraph(decoded);
+  auto cfg = ShaderRecompiler::CFG::BuildGraph(decoded, TestProvenance());
   ShaderComputeInputInfo compute;
   ShaderRecompiler::Frontend::TranslateOptions options{};
   options.stage = ShaderType::Compute;
@@ -11841,12 +11850,15 @@ void TestSrtWalkerRealSBufferTranslation() {
             std::equal(flat.begin(), flat.end(), table.begin() + 1),
         "real S_BUFFER_LOAD walk used the wrong final alignment");
 
+  // The hardware reads zero past the end of a buffer's records, so the last
+  // dword of this load is zero rather than a reason to abandon the walk.
   user_data[10] = 4 * sizeof(uint32_t);
-  const auto flat_before_failure = flat;
   const auto bounds_walked = ShaderRecompiler::IR::WalkSrt(ir, runtime, flat);
-  Check(!bounds_walked, "real S_BUFFER_LOAD walk ignored descriptor bounds");
-  Check(flat == flat_before_failure,
-        "failed real S_BUFFER_LOAD walk changed the prior flat snapshot");
+  Check(bounds_walked, "real S_BUFFER_LOAD walk refused an out-of-range read");
+  Check(flat.size() == 4 &&
+            std::equal(flat.begin(), flat.end() - 1, table.begin() + 1) &&
+            flat.back() == 0u,
+        "real S_BUFFER_LOAD walk did not read zero past the last record");
   CheckFlattenedReadSlots(
       ir, 4, "real S_BUFFER_LOAD patch used the wrong flat offsets");
 
