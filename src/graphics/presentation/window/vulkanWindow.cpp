@@ -642,7 +642,17 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 		swapchain_maintenance.pNext = supported_features2.pNext;
 		supported_features2.pNext = &swapchain_maintenance;
 	}
+	// A lost device is otherwise a bare error code. With this the driver can name
+	// the address that faulted, which is the only way to find a bad shader write.
+	vk::PhysicalDeviceFaultFeaturesEXT supported_fault {};
+	const bool fault_extension = HasExtension(device_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+	if (fault_extension) {
+		supported_fault.pNext     = supported_features2.pNext;
+		supported_features2.pNext = &supported_fault;
+	}
 	physical_device.getFeatures2(&supported_features2);
+	graphics.device_fault_enabled = fault_extension && supported_fault.deviceFault;
+	LOGF("Vulkan device fault reporting: %s\n", graphics.device_fault_enabled ? "true" : "false");
 	graphics.swapchain_maintenance_enabled = swapchain_maintenance.swapchainMaintenance1;
 	graphics.attachment_feedback_loop_enabled =
 	    feedback_extensions && feedback_layout.attachmentFeedbackLoopLayout &&
@@ -763,6 +773,12 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 	if (graphics.swapchain_maintenance_enabled) {
 		swapchain_maintenance.pNext = const_cast<void*>(create_info.pNext);
 		create_info.pNext = &swapchain_maintenance;
+	}
+	vk::PhysicalDeviceFaultFeaturesEXT fault_features {};
+	if (graphics.device_fault_enabled) {
+		fault_features.deviceFault = VK_TRUE;
+		fault_features.pNext       = const_cast<void*>(create_info.pNext);
+		create_info.pNext          = &fault_features;
 	}
 	create_info.pQueueCreateInfos       = &queue_create_info;
 	create_info.queueCreateInfoCount    = 1;
@@ -1156,6 +1172,7 @@ void WindowContext::CreateVulkan() {
 		}
 		for (const auto* extension: {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
 		                             VK_EXT_MESH_SHADER_EXTENSION_NAME,
+		                             VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
 		                             VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME}) {
 			if (HasExtension(available_extensions, extension)) {
 				device_extensions.push_back(extension);

@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 
 namespace Libs::Graphics {
 
@@ -50,6 +51,9 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pValues        = &tick;
 
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	if (result == vk::Result::eErrorDeviceLost) {
+		ReportDeviceFault(m_graphics.device);
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
 }
@@ -69,6 +73,9 @@ bool MasterSemaphore::WaitFor(uint64_t tick, uint64_t timeout_nanoseconds) {
 	wait_info.pValues        = &tick;
 
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, timeout_nanoseconds);
+	if (result == vk::Result::eErrorDeviceLost) {
+		ReportDeviceFault(m_graphics.device);
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess && result != vk::Result::eTimeout);
 	Refresh();
 	return result == vk::Result::eSuccess;

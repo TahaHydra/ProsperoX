@@ -1,9 +1,11 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 
 #include <array>
+#include <cinttypes>
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
@@ -98,6 +100,56 @@ constexpr auto kFormatLookup = MakeFormatLookup();
 vk::Format VulkanFormat(Prospero::BufferFormat guest_format) {
 	const auto index = static_cast<size_t>(guest_format);
 	return index < kFormatLookup.size() ? kFormatLookup[index] : vk::Format::eUndefined;
+}
+
+void ReportDeviceFault(vk::Device device) {
+	if (device == nullptr || VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT == nullptr) {
+		LOGF("Device fault details unavailable: VK_EXT_device_fault is not enabled\n");
+		return;
+	}
+
+	vk::DeviceFaultCountsEXT counts {};
+	counts.sType             = vk::StructureType::eDeviceFaultCountsEXT;
+	const auto counts_result = device.getFaultInfoEXT(&counts, nullptr);
+	if (counts_result != vk::Result::eSuccess && counts_result != vk::Result::eIncomplete) {
+		LOGF("Device fault counts could not be read: %s\n",
+		     vk::to_string(counts_result).c_str());
+		return;
+	}
+	LOGF("Device fault counts: addresses=%u vendor=%u binary=%" PRIu64 "\n",
+	     counts.addressInfoCount, counts.vendorInfoCount, counts.vendorBinarySize);
+
+	std::vector<vk::DeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+	std::vector<vk::DeviceFaultVendorInfoEXT>  vendors(counts.vendorInfoCount);
+	counts.vendorBinarySize = 0;
+
+	vk::DeviceFaultInfoEXT info {};
+	info.sType         = vk::StructureType::eDeviceFaultInfoEXT;
+	info.pAddressInfos = addresses.empty() ? nullptr : addresses.data();
+	info.pVendorInfos  = vendors.empty() ? nullptr : vendors.data();
+	const auto result  = device.getFaultInfoEXT(&counts, &info);
+	if (result != vk::Result::eSuccess && result != vk::Result::eIncomplete) {
+		LOGF("Device fault info could not be read: %s\n", vk::to_string(result).c_str());
+		return;
+	}
+
+	LOGF("Device fault: %s\n", info.description.data());
+	for (uint32_t index = 0; index < counts.addressInfoCount; index++) {
+		const auto& address = addresses[index];
+		// The driver reports a range the fault fell inside, not an exact address.
+		const auto  mask    = ~(address.addressPrecision - 1);
+		LOGF("Device fault address: %s at 0x%016" PRIx64 " .. 0x%016" PRIx64 "\n",
+		     vk::to_string(address.addressType).c_str(), address.reportedAddress & mask,
+		     (address.reportedAddress & mask) + address.addressPrecision - 1);
+	}
+	for (uint32_t index = 0; index < counts.vendorInfoCount; index++) {
+		const auto& vendor = vendors[index];
+		LOGF("Device fault vendor: %s (code 0x%" PRIx64 ", data 0x%" PRIx64 ")\n",
+		     vendor.description.data(), vendor.vendorFaultCode, vendor.vendorFaultData);
+	}
+	if (counts.addressInfoCount == 0 && counts.vendorInfoCount == 0) {
+		LOGF("Device fault: the driver reported no address or vendor detail\n");
+	}
 }
 
 void RequireVulkanSuccess(vk::Result result, const char* operation) {

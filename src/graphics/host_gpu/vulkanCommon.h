@@ -28,6 +28,11 @@ using VulkanMemoryBarrier = vk::MemoryBarrier;
 vk::Format  VulkanFormat(Prospero::BufferFormat guest_format);
 void        RequireVulkanSuccess(vk::Result result, const char* operation);
 
+// Asks the driver what it knows about a lost device. Without VK_EXT_device_fault
+// a loss is a bare error code; with it the guilty GPU address and access type
+// come back, which is what turns "device lost" into a fixable bug.
+void        ReportDeviceFault(vk::Device device);
+
 template <typename Handle, typename... Args>
 void SetVulkanObjectNameF(vk::Device device, Handle handle, fmt::format_string<Args...> format,
                           Args&&... args) {
