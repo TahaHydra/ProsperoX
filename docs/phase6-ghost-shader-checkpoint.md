@@ -44,9 +44,12 @@ dispatches.
 
 ## What is still in the way
 
-1. **The next shader's instructions.** MUBUF 0x83 and 0x19 and a VOP1 SDWA
-   destination selector. Deciding what MUBUF 0x83 is on GFX10 needs the
-   opcode table checked against a source, not recalled.
+1. **A formatted buffer load whose descriptor is chosen at runtime.** The
+   conversion goes through the descriptor's format field, which is a runtime
+   value in this shape, so the lowering that handles raw dynamic buffers
+   cannot handle this one. Resolving it means enumerating the candidate
+   descriptors, the way the indirect image lookup does, and specializing on
+   the format they agree on -- or refusing when they do not.
 2. **Compilation dominates the frame.** The command processor is blocked
    while a pipeline is built, so the draw rate says more about compile cost
    than about rendering.
@@ -55,12 +58,11 @@ dispatches.
 
 ## Bendy
 
-Re-run on the same build, Bendy now reaches far more content than before this
-session: **71 vertex, 71 pixel and 10 compute shaders** and about **20,500
-draws and 1,560 dispatches a second**, against 9/7/5 shaders and 870 draws a
-second earlier in the session. No errors on stderr. This is a large enough
-change that it is worth looking at on screen rather than taking the counters
-at face value.
+Unchanged: 9 vertex, 7 pixel and 5 compute shaders, 870 draws and 240
+dispatches a second, no errors on stderr. One run during this session reached
+71/71/10 shaders and 20,500 draws a second, which is Bendy getting past its
+loading screen in that particular run rather than a change in behaviour --
+later runs on the same build are back to the usual numbers.
 
 ## Tests
 
