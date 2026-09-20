@@ -17,8 +17,8 @@ cutoff without terminating at all.
 It is not stable. Most wall-clock time goes into compiling newly encountered
 shaders — the command processor is blocked while that happens — and each new
 shader can still reach an instruction or a descriptor shape the recompiler
-does not implement. The current stop is a shader using MUBUF opcodes 0x83 and
-0x19 and a VOP1 SDWA destination selector.
+does not implement. The current stop is a formatted buffer load whose
+descriptor is chosen at runtime, described below.
 
 For contrast, at the start of this session Ghost compiled 6 compute shaders,
 had never compiled a vertex or pixel shader, and had issued **zero** draws and
