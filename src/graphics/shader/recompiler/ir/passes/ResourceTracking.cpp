@@ -12,6 +12,10 @@
 namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
 
+// A counter that reaches the descriptor index through more phis than this is
+// not a shape this pass can still call a counter.
+constexpr size_t MaxCountedKeyChain = 16;
+
 constexpr uint32_t SamplerBorderClampMask    = (1u << 2u) | (1u << 5u) | (1u << 8u);
 constexpr uint32_t SamplerDword3ReservedMask = 0x3ffff000u;
 
@@ -392,6 +396,95 @@ private:
 		std::array<bool, 8>        exclusive {};
 	};
 
+	// A key that is a loop counter takes only the values the loop lets it reach.
+	// The counter is a phi that starts at zero and is stepped by one through
+	// however many phis the structurizer left between the increment and the
+	// header; the bound is whatever constant the loop compares it against. That
+	// is a real bound on the lookup, and the only one available when the
+	// descriptors sit behind a raw pointer.
+	bool MatchCountedKeyLimit(Value key, uint32_t& limit) const {
+		const auto* counter = key.Resolve().TryInstruction();
+		if (counter == nullptr || counter->GetOpcode() != ValueOpcode::Phi) {
+			return false;
+		}
+
+		// Every value the counter's own definition passes through, so the
+		// comparison can name any of them.
+		std::vector<const Inst*> chain;
+		std::vector<const Inst*> pending {counter};
+		bool                     starts_at_zero = false;
+		while (!pending.empty()) {
+			const auto* current = pending.back();
+			pending.pop_back();
+			if (std::ranges::find(chain, current) != chain.end()) {
+				continue;
+			}
+			if (chain.size() >= MaxCountedKeyChain) {
+				return false;
+			}
+			chain.push_back(current);
+			for (size_t index = 0; index < current->NumArgs(); index++) {
+				const auto arg = current->Arg(index).Resolve();
+				uint32_t   immediate = 0;
+				if (ImmediateU32(arg, immediate)) {
+					if (immediate == 0u && current->GetOpcode() == ValueOpcode::Phi) {
+						starts_at_zero = true;
+						continue;
+					}
+					if (immediate == 1u && current->GetOpcode() == ValueOpcode::IAdd32) {
+						continue;
+					}
+					return false;
+				}
+				const auto* next = arg.TryInstruction();
+				if (next == nullptr || (next->GetOpcode() != ValueOpcode::Phi &&
+				                        next->GetOpcode() != ValueOpcode::IAdd32)) {
+					return false;
+				}
+				pending.push_back(next);
+			}
+		}
+		if (!starts_at_zero) {
+			return false;
+		}
+
+		// The loop's own test against a constant is the bound. Take the
+		// smallest one any of the counter's values is compared against, so a
+		// second test inside the body cannot widen the set.
+		bool     found = false;
+		uint32_t bound = 0;
+		for (const auto* block: m_program.blocks) {
+			for (const auto& inst: *block) {
+				const auto opcode = inst.GetOpcode();
+				const bool inclusive = opcode == ValueOpcode::SLessThanEqual32 ||
+				                       opcode == ValueOpcode::ULessThanEqual32;
+				if (opcode != ValueOpcode::SLessThan32 && opcode != ValueOpcode::ULessThan32 &&
+				    !inclusive) {
+					continue;
+				}
+				const auto* counted = inst.Arg(0).Resolve().TryInstruction();
+				uint32_t    against = 0;
+				if (counted == nullptr || std::ranges::find(chain, counted) == chain.end() ||
+				    !ImmediateU32(inst.Arg(1), against)) {
+					continue;
+				}
+				if (inclusive) {
+					if (against == UINT32_MAX) {
+						continue;
+					}
+					against++;
+				}
+				bound = found ? std::min(bound, against) : against;
+				found = true;
+			}
+		}
+		if (!found || bound == 0u) {
+			return false;
+		}
+		limit = bound;
+		return true;
+	}
+
 	bool TryMatchIndirectDescriptor(const Inst& handle, uint32_t read_count, uint32_t pc,
 	                                IndirectDescriptorMatch& match) {
 		Inst*    heap_handle = nullptr;
@@ -501,8 +594,11 @@ private:
 				material_source_index = DescriptorSource::IndirectImage::NoKeyTable;
 			}
 		}
+		uint32_t key_limit = 0;
 		if (material_source_index == DescriptorSource::IndirectImage::NoKeyTable) {
-			if (heap_is_address) {
+			// A buffer heap states its own extent, which bounds the keys on its
+			// own. A raw pointer does not, so the key has to bound itself.
+			if (heap_is_address && !MatchCountedKeyLimit(key_value, key_limit)) {
 				return false;
 			}
 			selector_stride = 0;
@@ -526,6 +622,7 @@ private:
 		    .dword_count     = read_count,
 		    .key_mask        = key_mask,
 		    .heap_is_address = heap_is_address,
+		    .key_limit       = key_limit,
 		};
 		match.key = key_value;
 		return true;

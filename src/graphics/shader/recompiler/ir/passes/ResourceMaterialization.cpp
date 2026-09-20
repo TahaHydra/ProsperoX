@@ -332,15 +332,20 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 		// No table to walk: the keys that matter are the ones the heap can
 		// address. A larger key reads past the end of the buffer, which the
 		// hardware answers with zero, and a null descriptor is already the
-		// candidate at index zero.
-		ShaderBufferResource heap_bounds;
-		if (!DecodeBufferDescriptor(heap_value, heap_bounds)) {
-			return SpecializationFail("indirect descriptor table has an invalid buffer descriptor");
+		// candidate at index zero. A raw pointer states no extent, so there the
+		// bound comes from the counter the key is.
+		uint64_t count = indirect.key_limit;
+		if (indirect.key_limit == 0u) {
+			ShaderBufferResource heap_bounds;
+			if (!DecodeBufferDescriptor(heap_value, heap_bounds)) {
+				return SpecializationFail(
+				    "indirect descriptor table has an invalid buffer descriptor");
+			}
+			const auto size  = ScalarBufferSize(heap_bounds);
+			const auto first = static_cast<uint64_t>(indirect.heap_offset);
+			const auto span  = std::max<uint64_t>(indirect.heap_stride, 1u);
+			count            = size > first ? (size - first) / span + 1u : 0u;
 		}
-		const auto size  = ScalarBufferSize(heap_bounds);
-		const auto first = static_cast<uint64_t>(indirect.heap_offset);
-		const auto span  = std::max<uint64_t>(indirect.heap_stride, 1u);
-		const auto count = size > first ? (size - first) / span + 1u : 0u;
 		if (count > MaxIndirectImageProbes) {
 			return SpecializationFail(
 			    fmt::format("indirect descriptor table holds {} records, over the {} this pass "
@@ -1318,8 +1323,11 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 						memory.point_sampler = sampler_plan.point_sampler[memory.sampler];
 				}
 			}
+			// Only the operations the emitter can run once per candidate may
+			// name an indirect root directly.
 			EXIT_IF(image.indirect_root == memory.resource &&
-			        inst.GetOpcode() != ValueOpcode::ImageSampleRaw);
+			        inst.GetOpcode() != ValueOpcode::ImageSampleRaw &&
+			        inst.GetOpcode() != ValueOpcode::ImageRead);
 		}
 	}
 	for (auto* block: program.blocks) {

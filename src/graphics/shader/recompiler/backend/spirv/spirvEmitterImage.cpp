@@ -3,10 +3,12 @@
 #include "graphics/shader/recompiler/frontend/decode/ImageOps.h"
 
 #include <algorithm>
+#include <functional>
 #include <bit>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
+
 
 uint32_t DmaskComponentIndex(uint32_t dmask, uint32_t component) {
 	uint32_t index = 0;
@@ -590,6 +592,107 @@ bool IsImageFloatMinMax(IR::ValueOpcode opcode) {
 
 } // namespace
 
+// The descriptor an operation reads through can be chosen at dispatch time.
+// The host writes the keys it found and the candidate each one selects; the
+// shader searches that table for its own key and runs the operation on
+// whichever candidate matched. Returns the merged result, or zero once the
+// failure has been reported.
+uint32_t EmitIndirectImageSelection(ValueEmitContext& ctx, const IR::Inst& inst,
+                                    const IR::ImageResource& image,
+                                    IR::Value                image_arg,
+                                    const std::function<uint32_t(uint32_t)>& emit) {
+	auto& state = ctx.state;
+	const auto* handle = image_arg.ResolveInstruction();
+	const auto* source = image.source < ctx.program.descriptor_sources.size()
+	                         ? &ctx.program.descriptor_sources[image.source]
+	                         : nullptr;
+	if (handle == nullptr || source == nullptr || !source->indirect_image.has_value() ||
+	    source->indirect_image->key_arg >= handle->NumArgs()) {
+		ctx.Fail(inst, "has invalid indirect image key provenance");
+		return 0;
+	}
+	const auto key = ctx.Def(handle->Arg(source->indirect_image->key_arg));
+	if (state.flattened_srt_variable == 0 || image.indirect_search_iterations == 0u ||
+	    image.indirect_resources.size() < 2u) {
+		ctx.Fail(inst, "has no indirect image runtime mapping");
+		return 0;
+	}
+	const auto LoadMapping = [&](uint32_t index) {
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction({OpAccessChain, TypeStorageBufferElementPointer(state),
+		                           pointer, state.flattened_srt_variable, ConstantU32(state, 0),
+		                           index});
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction({OpLoad, TypeU32(state), value, pointer});
+		return value;
+	};
+	const auto mapping  = ConstantU32(state, image.indirect_mapping_offset);
+	auto       low      = ConstantU32(state, 0u);
+	auto       high     = LoadMapping(mapping);
+	auto       selected = ConstantU32(state, 0u);
+	for (uint32_t iteration = 0; iteration < image.indirect_search_iterations; iteration++) {
+		const auto active = Binary(state, OpULessThan, TypeBool(state), low, high);
+		const auto mid =
+		    Binary(state, OpShiftRightLogical, TypeU32(state),
+		           Binary(state, OpIAdd, TypeU32(state), low, high), ConstantU32(state, 1u));
+		const auto probe = state.builder.AllocateId();
+		state.builder.AddFunction(
+		    {OpSelect, TypeU32(state), probe, active, mid, ConstantU32(state, 0u)});
+		const auto entry      = Binary(state, OpIAdd, TypeU32(state), mapping,
+		                               Binary(state, OpIAdd, TypeU32(state),
+		                                      Binary(state, OpShiftLeftLogical, TypeU32(state),
+		                                             probe, ConstantU32(state, 1u)),
+		                                      ConstantU32(state, 1u)));
+		const auto mapped_key = LoadMapping(entry);
+		const auto candidate =
+		    LoadMapping(Binary(state, OpIAdd, TypeU32(state), entry, ConstantU32(state, 1u)));
+		const auto equal         = Binary(state, OpIEqual, TypeBool(state), mapped_key, key);
+		const auto match         = Binary(state, OpLogicalAnd, TypeBool(state), active, equal);
+		const auto next_selected = state.builder.AllocateId();
+		state.builder.AddFunction(
+		    {OpSelect, TypeU32(state), next_selected, match, candidate, selected});
+		selected              = next_selected;
+		const auto less       = Binary(state, OpULessThan, TypeBool(state), mapped_key, key);
+		const auto take_upper = Binary(state, OpLogicalAnd, TypeBool(state), active, less);
+		const auto take_lower = Binary(state, OpLogicalAnd, TypeBool(state), active,
+		                               Unary(state, OpLogicalNot, TypeBool(state), less));
+		const auto next_low   = state.builder.AllocateId();
+		state.builder.AddFunction(
+		    {OpSelect, TypeU32(state), next_low, take_upper,
+		     Binary(state, OpIAdd, TypeU32(state), mid, ConstantU32(state, 1u)), low});
+		low                  = next_low;
+		const auto next_high = state.builder.AllocateId();
+		state.builder.AddFunction({OpSelect, TypeU32(state), next_high, take_lower, mid, high});
+		high = next_high;
+	}
+	const auto            default_label = state.builder.AllocateId();
+	const auto            merge_label   = state.builder.AllocateId();
+	std::vector<uint32_t> labels(image.indirect_resources.size() - 1u);
+	std::vector<uint32_t> switch_words {OpSwitch, selected, default_label};
+	for (uint32_t candidate = 1; candidate < image.indirect_resources.size(); candidate++) {
+		labels[candidate - 1u] = state.builder.AllocateId();
+		switch_words.push_back(candidate);
+		switch_words.push_back(labels[candidate - 1u]);
+	}
+	state.builder.AddFunction({OpSelectionMerge, merge_label, SelectionControlNone});
+	state.builder.AddFunction(switch_words);
+	std::vector<uint32_t> phi_words {OpPhi, TypeU32Vector(state, 4),
+	                                 state.builder.AllocateId()};
+	EmitLabel(state, default_label);
+	phi_words.push_back(emit(image.indirect_resources[0]));
+	phi_words.push_back(default_label);
+	state.builder.AddFunction({OpBranch, merge_label});
+	for (uint32_t candidate = 1; candidate < image.indirect_resources.size(); candidate++) {
+		EmitLabel(state, labels[candidate - 1u]);
+		phi_words.push_back(emit(image.indirect_resources[candidate]));
+		phi_words.push_back(labels[candidate - 1u]);
+		state.builder.AddFunction({OpBranch, merge_label});
+	}
+	EmitLabel(state, merge_label);
+	state.builder.AddFunction(phi_words);
+	return phi_words[2];
+}
+
 bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto op         = inst.GetOpcode();
 	const auto image_info = IR::ImageOpcodeInfoOf(op);
@@ -630,32 +733,43 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return true;
 	}
 	if (op == IR::ValueOpcode::ImageRead) {
-		const auto  dimension      = image.dimension;
-		const auto& dimension_info = ImageDimensionInfoFor(dimension);
-		const auto  numeric_class  = image.numeric_class;
-		const auto  condition      = ctx.Arg(inst, 2);
-		ctx.Define(
-		    inst,
-		    EmitValueOrDefaultIfCondition(
-		        state, condition, TypeU32Vector(state, 4), ConstantU32CompositeZero(state, 4),
-		        [&]() {
-			        const auto descriptor = LoadSampledImageDescriptor(state, mem.resource);
-			        const auto color      = state.builder.AllocateId();
-			        const auto coord      = CoordU32(ctx, mem, *address, dimension);
-			        if (dimension_info.multisampled != 0u) {
-				        state.builder.AddFunction(
-				            {OpImageFetch, ImageVectorType(state, numeric_class, 4), color,
-				             descriptor, coord, ImageOperandsSampleMask,
-				             AddressU32(ctx, mem, *address, dimension_info.coordinate_components)});
-			        } else {
-				        state.builder.AddFunction({OpImageFetch,
-				                                   ImageVectorType(state, numeric_class, 4), color,
-				                                   descriptor, coord, ImageOperandsLodMask,
-				                                   LodU32(ctx, mem, *address, dimension)});
-			        }
-			        return ResultVector(ctx, UnpackImageTexel(ctx, mem, color), numeric_class,
-			                            false, mem);
-		        }));
+		const auto condition = ctx.Arg(inst, 2);
+		// Each candidate is typed on its own terms: two descriptors the same
+		// lookup can select need not agree on dimension or numeric class.
+		const auto EmitRead = [&](uint32_t resource) {
+			auto selected                  = mem;
+			selected.resource              = resource;
+			const auto& candidate          = state.program.info.images[resource];
+			const auto  dimension          = candidate.dimension;
+			const auto& dimension_info     = ImageDimensionInfoFor(dimension);
+			const auto  numeric_class      = candidate.numeric_class;
+			const auto  descriptor         = LoadSampledImageDescriptor(state, resource);
+			const auto  color              = state.builder.AllocateId();
+			const auto  coord              = CoordU32(ctx, selected, *address, dimension);
+			if (dimension_info.multisampled != 0u) {
+				state.builder.AddFunction(
+				    {OpImageFetch, ImageVectorType(state, numeric_class, 4), color, descriptor,
+				     coord, ImageOperandsSampleMask,
+				     AddressU32(ctx, selected, *address, dimension_info.coordinate_components)});
+			} else {
+				state.builder.AddFunction({OpImageFetch, ImageVectorType(state, numeric_class, 4),
+				                           color, descriptor, coord, ImageOperandsLodMask,
+				                           LodU32(ctx, selected, *address, dimension)});
+			}
+			return ResultVector(ctx, UnpackImageTexel(ctx, selected, color), numeric_class, false,
+			                    selected);
+		};
+		ctx.Define(inst,
+		           EmitValueOrDefaultIfCondition(
+		               state, condition, TypeU32Vector(state, 4),
+		               ConstantU32CompositeZero(state, 4), [&]() -> uint32_t {
+			               if (image.indirect_root != mem.resource) {
+				               return EmitRead(mem.resource);
+			               }
+			               const auto selected = EmitIndirectImageSelection(ctx, inst, image,
+			                                                               image_arg, EmitRead);
+			               return selected != 0 ? selected : ConstantU32CompositeZero(state, 4);
+		               }));
 		return true;
 	}
 	if (op == IR::ValueOpcode::ImageWrite) {
@@ -808,95 +922,11 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			ctx.Define(inst, EmitSample(mem.resource));
 			return true;
 		}
-		const auto* handle = image_arg.ResolveInstruction();
-		const auto* source = image.source < ctx.program.descriptor_sources.size()
-		                         ? &ctx.program.descriptor_sources[image.source]
-		                         : nullptr;
-		if (handle == nullptr || source == nullptr || !source->indirect_image.has_value() ||
-		    source->indirect_image->key_arg >= handle->NumArgs()) {
-			ctx.Fail(inst, "has invalid indirect image key provenance");
-			return true;
+		const auto selected_sample =
+		    EmitIndirectImageSelection(ctx, inst, image, image_arg, EmitSample);
+		if (selected_sample != 0) {
+			ctx.Define(inst, selected_sample);
 		}
-		const auto key = ctx.Def(handle->Arg(source->indirect_image->key_arg));
-		if (state.flattened_srt_variable == 0 || image.indirect_search_iterations == 0u ||
-		    image.indirect_resources.size() < 2u) {
-			ctx.Fail(inst, "has no indirect image runtime mapping");
-			return true;
-		}
-		const auto LoadMapping = [&](uint32_t index) {
-			const auto pointer = state.builder.AllocateId();
-			state.builder.AddFunction({OpAccessChain, TypeStorageBufferElementPointer(state),
-			                           pointer, state.flattened_srt_variable, ConstantU32(state, 0),
-			                           index});
-			const auto value = state.builder.AllocateId();
-			state.builder.AddFunction({OpLoad, TypeU32(state), value, pointer});
-			return value;
-		};
-		const auto mapping  = ConstantU32(state, image.indirect_mapping_offset);
-		auto       low      = ConstantU32(state, 0u);
-		auto       high     = LoadMapping(mapping);
-		auto       selected = ConstantU32(state, 0u);
-		for (uint32_t iteration = 0; iteration < image.indirect_search_iterations; iteration++) {
-			const auto active = Binary(state, OpULessThan, TypeBool(state), low, high);
-			const auto mid =
-			    Binary(state, OpShiftRightLogical, TypeU32(state),
-			           Binary(state, OpIAdd, TypeU32(state), low, high), ConstantU32(state, 1u));
-			const auto probe = state.builder.AllocateId();
-			state.builder.AddFunction(
-			    {OpSelect, TypeU32(state), probe, active, mid, ConstantU32(state, 0u)});
-			const auto entry      = Binary(state, OpIAdd, TypeU32(state), mapping,
-			                               Binary(state, OpIAdd, TypeU32(state),
-			                                      Binary(state, OpShiftLeftLogical, TypeU32(state),
-			                                             probe, ConstantU32(state, 1u)),
-			                                      ConstantU32(state, 1u)));
-			const auto mapped_key = LoadMapping(entry);
-			const auto candidate =
-			    LoadMapping(Binary(state, OpIAdd, TypeU32(state), entry, ConstantU32(state, 1u)));
-			const auto equal         = Binary(state, OpIEqual, TypeBool(state), mapped_key, key);
-			const auto match         = Binary(state, OpLogicalAnd, TypeBool(state), active, equal);
-			const auto next_selected = state.builder.AllocateId();
-			state.builder.AddFunction(
-			    {OpSelect, TypeU32(state), next_selected, match, candidate, selected});
-			selected              = next_selected;
-			const auto less       = Binary(state, OpULessThan, TypeBool(state), mapped_key, key);
-			const auto take_upper = Binary(state, OpLogicalAnd, TypeBool(state), active, less);
-			const auto take_lower = Binary(state, OpLogicalAnd, TypeBool(state), active,
-			                               Unary(state, OpLogicalNot, TypeBool(state), less));
-			const auto next_low   = state.builder.AllocateId();
-			state.builder.AddFunction(
-			    {OpSelect, TypeU32(state), next_low, take_upper,
-			     Binary(state, OpIAdd, TypeU32(state), mid, ConstantU32(state, 1u)), low});
-			low                  = next_low;
-			const auto next_high = state.builder.AllocateId();
-			state.builder.AddFunction({OpSelect, TypeU32(state), next_high, take_lower, mid, high});
-			high = next_high;
-		}
-		const auto            default_label = state.builder.AllocateId();
-		const auto            merge_label   = state.builder.AllocateId();
-		std::vector<uint32_t> labels(image.indirect_resources.size() - 1u);
-		std::vector<uint32_t> switch_words {OpSwitch, selected, default_label};
-		for (uint32_t candidate = 1; candidate < image.indirect_resources.size(); candidate++) {
-			labels[candidate - 1u] = state.builder.AllocateId();
-			switch_words.push_back(candidate);
-			switch_words.push_back(labels[candidate - 1u]);
-		}
-		state.builder.AddFunction({OpSelectionMerge, merge_label, SelectionControlNone});
-		state.builder.AddFunction(switch_words);
-		std::vector<uint32_t> phi_words {OpPhi, TypeU32Vector(state, 4),
-		                                 state.builder.AllocateId()};
-		EmitLabel(state, default_label);
-		phi_words.push_back(EmitSample(image.indirect_resources[0]));
-		phi_words.push_back(default_label);
-		state.builder.AddFunction({OpBranch, merge_label});
-		for (uint32_t candidate = 1; candidate < image.indirect_resources.size(); candidate++) {
-			EmitLabel(state, labels[candidate - 1u]);
-			phi_words.push_back(EmitSample(image.indirect_resources[candidate]));
-			phi_words.push_back(labels[candidate - 1u]);
-			state.builder.AddFunction({OpBranch, merge_label});
-		}
-		EmitLabel(state, merge_label);
-		state.builder.AddFunction(phi_words);
-		ctx.Define(inst, phi_words[2]);
 		return true;
 	}
 	const auto atomic_opcode = ImageAtomicOpcode(op);

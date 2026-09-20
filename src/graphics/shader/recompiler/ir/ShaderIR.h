@@ -487,6 +487,11 @@ struct DescriptorSource {
 		// table holding the descriptors does not have to be bounded; the one
 		// holding the keys does, and is always a buffer.
 		bool     heap_is_address = false;
+		// A key that counts through a loop with constant bounds takes a known
+		// set of values. That is the only thing that bounds the lookup when the
+		// descriptors live behind a raw pointer, which states no extent of its
+		// own. Zero when no such bound was proven.
+		uint32_t key_limit       = 0;
 
 		bool operator==(const IndirectImage& other) const = default;
 	};
