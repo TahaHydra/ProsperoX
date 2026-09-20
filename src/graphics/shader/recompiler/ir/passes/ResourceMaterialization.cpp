@@ -732,10 +732,11 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 		if (storage || image.conversion_format != Prospero::BufferFormat::kInvalid) {
 			image.shader_swizzle = DescriptorImageSwizzle(descriptor);
 		}
-		// Addressed as raw 32-bit texels through an R32_UINT view rather than
-		// through the format conversion.
-		const bool raw_texel_storage = (storage && format == Prospero::BufferFormat::k32SInt &&
-		                                base.written && !base.read && !base.atomic) ||
+		// Write-only signed integer storage is addressed through an unsigned view of the same
+		// width. The store preserves the guest texel bit pattern, so signedness is unobserved.
+		const bool raw_texel_storage = (storage && (format == Prospero::BufferFormat::k16SInt ||
+                         format == Prospero::BufferFormat::k32SInt) &&
+                         base.written && !base.read && !base.atomic) ||
 		                               raw_atomic_bits;
 		image.numeric_class          = Prospero::SampledTextureNumericClass(format);
 		if (storage) {

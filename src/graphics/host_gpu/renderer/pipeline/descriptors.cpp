@@ -370,7 +370,8 @@ static bool IsSupportedStorageTextureEncoding(const ShaderRecompiler::IR::ImageR
 // 32-bit single-component formats a shader may address as raw texels through
 // an R32_UINT view of a mutable-format image.
 bool IsRawTexelStorageFormat(Prospero::BufferFormat format) {
-	return format == Prospero::BufferFormat::k32SInt ||
+	return format == Prospero::BufferFormat::k16SInt ||
+	       format == Prospero::BufferFormat::k32SInt ||
 	       format == Prospero::BufferFormat::k32Float ||
 	       format == Prospero::BufferFormat::k32UInt;
 }
@@ -679,8 +680,11 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	}
 	const bool raw_texel_view = storage && IsRawTexelStorageFormat(format) &&
 	                            resource.numeric_class == Prospero::TextureNumericClass::Uint;
+	const auto raw_texel_view_format = format == Prospero::BufferFormat::k16SInt
+	                                       ? vk::Format::eR16Uint
+	                                       : vk::Format::eR32Uint;
 	const auto storage_view_format = raw_texel_view
-	                                     ? vk::Format::eR32Uint
+	                                     ? raw_texel_view_format
 	                                     : SrgbStorageViewFormat(pixel_format);
 	const auto view_format         = storage && storage_view_format != vk::Format::eUndefined
 	                                     ? storage_view_format
