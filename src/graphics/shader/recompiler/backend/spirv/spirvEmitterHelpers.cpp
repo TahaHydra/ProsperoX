@@ -90,6 +90,28 @@ DppTargetLane EmitDppMirrorTargetLane(EmitterState& state, uint32_t subid, bool 
 	return {target, EmitTrueBool(state)};
 }
 
+DppTargetLane EmitDpp8TargetLane(EmitterState& state, uint32_t subid, uint32_t selects) {
+	// DPP8 swizzles inside each group of eight lanes: lane i of a group reads the
+	// lane named by the i-th 3-bit select. Every select addresses a lane in its
+	// own group, so unlike the DPP16 row shifts there is no out-of-range target.
+	const auto group    = state.builder.AllocateId();
+	const auto index    = state.builder.AllocateId();
+	const auto shift    = state.builder.AllocateId();
+	const auto shifted  = state.builder.AllocateId();
+	const auto selected = state.builder.AllocateId();
+	const auto target   = state.builder.AllocateId();
+	state.builder.AddFunction(
+	    {OpBitwiseAnd, TypeU32(state), group, subid, ConstantU32(state, 0xfffffff8u)});
+	state.builder.AddFunction({OpBitwiseAnd, TypeU32(state), index, subid, ConstantU32(state, 7)});
+	state.builder.AddFunction({OpIMul, TypeU32(state), shift, index, ConstantU32(state, 3)});
+	state.builder.AddFunction(
+	    {OpShiftRightLogical, TypeU32(state), shifted, ConstantU32(state, selects), shift});
+	state.builder.AddFunction(
+	    {OpBitwiseAnd, TypeU32(state), selected, shifted, ConstantU32(state, 7)});
+	state.builder.AddFunction({OpBitwiseOr, TypeU32(state), target, group, selected});
+	return {target, EmitTrueBool(state)};
+}
+
 DppTargetLane EmitDppTargetLane(EmitterState& state, uint32_t control) {
 	const auto subid = EmitSubgroupLocalInvocationId(state);
 	if (control <= 0xffu) {
@@ -117,6 +139,13 @@ DppTargetLane EmitDppTargetLane(EmitterState& state, uint32_t control) {
 		return {target, EmitTrueBool(state)};
 	}
 	return {subid, EmitTrueBool(state)};
+}
+
+DppTargetLane EmitDppTargetLane(EmitterState& state, const IR::DppMoveFlags& flags) {
+	if (flags.dpp8) {
+		return EmitDpp8TargetLane(state, EmitSubgroupLocalInvocationId(state), flags.control);
+	}
+	return EmitDppTargetLane(state, flags.control);
 }
 
 uint32_t EmitHostSubgroupLocalInvocationId(EmitterState& state) {

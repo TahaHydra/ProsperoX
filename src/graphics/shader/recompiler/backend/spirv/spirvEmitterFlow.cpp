@@ -145,7 +145,7 @@ uint32_t EmitDppWriteCondition(ValueEmitContext& ctx, const IR::DppMoveFlags& fl
 	state.builder.AddFunction({OpLogicalAnd, TypeBool(state), masks_ok, bank_ok, row_ok});
 	uint32_t writable = masks_ok;
 	if (!flags.bound_control) {
-		const auto target  = EmitDppTargetLane(state, flags.control);
+		const auto target  = EmitDppTargetLane(state, flags);
 		const auto bounded = state.builder.AllocateId();
 		state.builder.AddFunction({OpLogicalAnd, TypeBool(state), bounded, writable, target.valid});
 		writable = bounded;
@@ -565,7 +565,7 @@ bool EmitValueFlow(ValueEmitContext& ctx, const IR::Inst& inst) {
 			return true;
 		case IR::ValueOpcode::DppMoveU32: {
 			const auto flags    = inst.Flags<IR::DppMoveFlags>();
-			const auto target   = EmitDppTargetLane(state, flags.control);
+			const auto target   = EmitDppTargetLane(state, flags);
 			const auto shuffled = ctx.Shuffle(inst, 0, target.lane);
 			if (flags.fetch_inactive) {
 				ctx.Define(inst, shuffled);

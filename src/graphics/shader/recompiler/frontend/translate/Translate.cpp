@@ -35,6 +35,7 @@ Decoder::Operand Translator::DestinationOperand(const Decoder::Instruction& inst
 		destination.dpp_bank_mask      = source.dpp_bank_mask;
 		destination.dpp_fetch_inactive = source.dpp_fetch_inactive;
 		destination.dpp_bound_ctrl     = source.dpp_bound_ctrl;
+		destination.dpp8               = source.dpp8;
 		break;
 	}
 	return destination;
@@ -174,11 +175,12 @@ IR::U32 Translator::ReadScalarCode(uint32_t code) {
 IR::U32 Translator::ApplyBitSourceModifiers(const Decoder::Operand& operand, IR::U32 value) {
 	if (operand.dpp) {
 		const IR::DppMoveFlags flags {
-		    .control        = static_cast<uint16_t>(operand.dpp_ctrl),
+		    .control        = operand.dpp_ctrl,
 		    .row_mask       = static_cast<uint8_t>(operand.dpp_row_mask),
 		    .bank_mask      = static_cast<uint8_t>(operand.dpp_bank_mask),
 		    .fetch_inactive = operand.dpp_fetch_inactive,
 		    .bound_control  = operand.dpp_bound_ctrl,
+		    .dpp8           = operand.dpp8,
 		};
 		value = IR::U32(ir.Emit(IR::ValueOpcode::DppMoveU32, {value, ir.GetExec()}, flags));
 	}
@@ -308,11 +310,12 @@ void Translator::WriteRawU32(const Decoder::Operand& operand, IR::U32 value) {
 			const auto old = ir.GetVectorReg(reg);
 			if (operand.dpp) {
 				const IR::DppMoveFlags flags {
-				    .control        = static_cast<uint16_t>(operand.dpp_ctrl),
+				    .control        = operand.dpp_ctrl,
 				    .row_mask       = static_cast<uint8_t>(operand.dpp_row_mask),
 				    .bank_mask      = static_cast<uint8_t>(operand.dpp_bank_mask),
 				    .fetch_inactive = operand.dpp_fetch_inactive,
 				    .bound_control  = operand.dpp_bound_ctrl,
+				    .dpp8           = operand.dpp8,
 				};
 				value = IR::U32(
 				    ir.Emit(IR::ValueOpcode::DppUpdateU32, {value, old, ir.GetExec()}, flags));

@@ -615,7 +615,11 @@ DppTargetLane EmitDppRowRotateRightTargetLane(EmitterState& state, uint32_t subi
 
 DppTargetLane EmitDppMirrorTargetLane(EmitterState& state, uint32_t subid, bool half_row);
 
+DppTargetLane EmitDpp8TargetLane(EmitterState& state, uint32_t subid, uint32_t selects);
+
 DppTargetLane EmitDppTargetLane(EmitterState& state, uint32_t control);
+
+DppTargetLane EmitDppTargetLane(EmitterState& state, const IR::DppMoveFlags& flags);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
 

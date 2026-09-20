@@ -553,8 +553,22 @@ uint32_t ImageAtomicOpcode(IR::ValueOpcode opcode) {
 		case IR::ValueOpcode::ImageAtomicAnd32: return OpAtomicAnd;
 		case IR::ValueOpcode::ImageAtomicOr32: return OpAtomicOr;
 		case IR::ValueOpcode::ImageAtomicXor32: return OpAtomicXor;
+		case IR::ValueOpcode::ImageAtomicISub32: return OpAtomicISub;
+		case IR::ValueOpcode::ImageAtomicSMin32: return OpAtomicSMin;
+		case IR::ValueOpcode::ImageAtomicSMax32: return OpAtomicSMax;
 		default: return 0;
 	}
+}
+
+// image_atomic_fmin and image_atomic_fmax have no single SPIR-V instruction
+// that reaches a storage image: OpAtomicFMinEXT and OpAtomicFMaxEXT need
+// shaderImageFloat32AtomicMinMax, which drivers may not offer even where the
+// hardware instruction exists. A compare-exchange loop over the texel gives
+// the same result on every device, and reuses the ordering the buffer float
+// atomics already use, so both paths agree on NaN and signed zero.
+bool IsImageFloatMinMax(IR::ValueOpcode opcode) {
+	return opcode == IR::ValueOpcode::ImageAtomicFMin32 ||
+	       opcode == IR::ValueOpcode::ImageAtomicFMax32;
 }
 
 } // namespace
@@ -869,8 +883,9 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return true;
 	}
 	const auto atomic_opcode = ImageAtomicOpcode(op);
-	if (atomic_opcode != 0u) {
+	if (atomic_opcode != 0u || IsImageFloatMinMax(op)) {
 		const auto dimension = image.dimension;
+		const auto max_value = op == IR::ValueOpcode::ImageAtomicFMax32;
 		ctx.Define(inst, EmitValueOrZeroIfCondition(state, ctx.Arg(inst, 3), [&]() {
 			           const auto pointer = state.builder.AllocateId();
 			           const auto pointer_type =
@@ -879,11 +894,17 @@ bool EmitValueImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			               {OpImageTexelPointer, pointer_type, pointer,
 			                StorageImageDescriptorPointer(state, mem.resource),
 			                CoordU32(ctx, mem, *address, dimension), ConstantU32(state, 0)});
+			           const auto source = ctx.Arg(inst, 2);
+			           if (atomic_opcode == 0u) {
+				           return AtomicUpdate(
+				               state, pointer, IR::ResourceKind::Image, [&](uint32_t old) {
+					               return EmitFloatAtomicReplacement(state, old, source, max_value);
+				               });
+			           }
 			           const auto old = state.builder.AllocateId();
 			           state.builder.AddFunction({atomic_opcode, TypeU32(state), old, pointer,
 			                                      ConstantU32(state, ScopeDevice),
-			                                      ConstantU32(state, MemorySemanticsNone),
-			                                      ctx.Arg(inst, 2)});
+			                                      ConstantU32(state, MemorySemanticsNone), source});
 			           EmitDeviceAtomicMemoryBarrier(state);
 			           return old;
 		           }));

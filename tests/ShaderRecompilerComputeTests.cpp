@@ -646,6 +646,16 @@ constexpr u32 EncodeVop1Dpp(u32 src0, u32 dpp_ctrl = 0, u32 row_mask = 0xf,
          ((bank_mask & 0xfu) << 24u) | ((row_mask & 0xfu) << 28u);
 }
 
+// DPP8 replaces the DPP16 control word with eight 3-bit lane selects, so there
+// is nowhere left for the row/bank masks or the source neg/abs bits.
+constexpr u32 EncodeDpp8(u32 src0, u32 sel0, u32 sel1, u32 sel2, u32 sel3,
+                         u32 sel4, u32 sel5, u32 sel6, u32 sel7) {
+  return (src0 & 0xffu) | ((sel0 & 0x7u) << 8u) | ((sel1 & 0x7u) << 11u) |
+         ((sel2 & 0x7u) << 14u) | ((sel3 & 0x7u) << 17u) |
+         ((sel4 & 0x7u) << 20u) | ((sel5 & 0x7u) << 23u) |
+         ((sel6 & 0x7u) << 26u) | ((sel7 & 0x7u) << 29u);
+}
+
 constexpr u32 EncodeVop2(u32 opcode, u32 dst, u32 src0, u32 src1) {
   return ((opcode & 0x3fu) << 25u) | ((dst & 0xffu) << 17u) |
          ((src1 & 0xffu) << 9u) | (src0 & 0x1ffu);
@@ -18369,6 +18379,61 @@ TestCase VectorDppBoundsControlZeroPreservesDestination() {
   return test;
 }
 
+// Ghost of Yotei (PPSA26344) reduces across a wave with DPP8; the src0 escape
+// 0xe9 used to decode as an unsupported operand encoding.
+TestCase VectorDpp8ReverseLanes() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 1, 100);
+  code.push_back(EncodeVop2(0x25, 2, 233, 1));
+  code.push_back(EncodeDpp8(0, 7, 6, 5, 4, 3, 2, 1, 0));
+  code.push_back(EncodeVop2(0x1a, 3, InlineU32(2), 0));
+  AppendBufferStoreDword(&code, 2, 3);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "VectorDpp8ReverseLanes";
+  test.code = code;
+  test.expected = {107, 106, 105, 104, 103, 102, 101, 100};
+  test.opcodes = {O::V_MOV_B32, O::V_ADD_NC_U32, O::V_LSHLREV_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.compute_info.threads_num[0] = 8;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
+// A select names a lane inside its own group of eight, so the second group
+// reads lane 11, not lane 3. Sixteen threads prove the group base is applied.
+TestCase VectorDpp8BroadcastWithinGroup() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 1, 100);
+  code.push_back(EncodeVop2(0x25, 2, 233, 1));
+  code.push_back(EncodeDpp8(0, 3, 3, 3, 3, 3, 3, 3, 3));
+  code.push_back(EncodeVop2(0x1a, 3, InlineU32(2), 0));
+  AppendBufferStoreDword(&code, 2, 3);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "VectorDpp8BroadcastWithinGroup";
+  test.code = code;
+  test.expected = {103, 103, 103, 103, 103, 103, 103, 103,
+                   111, 111, 111, 111, 111, 111, 111, 111};
+  test.opcodes = {O::V_MOV_B32, O::V_ADD_NC_U32, O::V_LSHLREV_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.compute_info.threads_num[0] = 16;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
 TestCase Vop3FmacF32NegatedSourceAccumulates() {
   using O = ShaderOpcode;
 
@@ -24337,6 +24402,114 @@ TestCase ImageAtomicSwapReturnsPreviousTexel() {
   return test;
 }
 
+// Ghost of Yotei (PPSA26344) reaches an R32_FLOAT image with image_atomic_fmax.
+// The host driver reports shaderImageFloat32AtomicMinMax false, so the float
+// compare is done over a compare-exchange loop on the raw texel bits, through
+// the same R32_UINT view the store below uses. 2.0 beats the stored 1.0 and the
+// instruction returns what was there before.
+TestCase ImageAtomicFmaxOnFloatImageRaisesTexel() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 2);
+  AppendVMovU32(&code, 21, 1);
+  AppendVMovU32(&code, 22, 0);
+  AppendVMovLiteral(&code, 0, 0x3f800000u);
+  code.push_back(EncodeMimg0(0x08, 0x1));
+  code.push_back(EncodeMimg1(0, 20));
+  AppendVMovLiteral(&code, 0, 0x40000000u);
+  code.push_back(EncodeMimg0(0x1f, 0x1, 0, true));
+  code.push_back(EncodeMimg1(0, 20));
+  AppendStoreVgpr(&code, 0, 0);
+  AppendEnd(&code);
+
+  std::vector<u32> expected_image(16, 0);
+  expected_image[1 * 4 + 2] = 0x40000000u;
+
+  TestCase test;
+  test.name = "ImageAtomicFmaxOnFloatImageRaisesTexel";
+  test.code = std::move(code);
+  test.expected = {0x3f800000u};
+  test.opcodes = {O::V_MOV_B32, O::IMAGE_STORE, O::IMAGE_ATOMIC_FMAX,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.user_data = MakeStorageTextureData(Prospero::BufferFormat::k32Float);
+  test.has_user_data = true;
+  test.storage_image_r32ui = std::vector<u32>(16, 0);
+  test.expected_storage_image_r32ui = std::move(expected_image);
+  test.required_spirv = {"OpImageTexelPointer", "OpAtomicCompareExchange"};
+  return test;
+}
+
+// The other half of the same lowering: a larger candidate must lose, and the
+// texel must survive the compare-exchange loop unchanged.
+TestCase ImageAtomicFminOnFloatImageKeepsSmallerTexel() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 2);
+  AppendVMovU32(&code, 21, 1);
+  AppendVMovU32(&code, 22, 0);
+  AppendVMovLiteral(&code, 0, 0x3f800000u);
+  code.push_back(EncodeMimg0(0x08, 0x1));
+  code.push_back(EncodeMimg1(0, 20));
+  AppendVMovLiteral(&code, 0, 0x40000000u);
+  code.push_back(EncodeMimg0(0x1e, 0x1, 0, true));
+  code.push_back(EncodeMimg1(0, 20));
+  AppendStoreVgpr(&code, 0, 0);
+  AppendEnd(&code);
+
+  std::vector<u32> expected_image(16, 0);
+  expected_image[1 * 4 + 2] = 0x3f800000u;
+
+  TestCase test;
+  test.name = "ImageAtomicFminOnFloatImageKeepsSmallerTexel";
+  test.code = std::move(code);
+  test.expected = {0x3f800000u};
+  test.opcodes = {O::V_MOV_B32, O::IMAGE_STORE, O::IMAGE_ATOMIC_FMIN,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.user_data = MakeStorageTextureData(Prospero::BufferFormat::k32Float);
+  test.has_user_data = true;
+  test.storage_image_r32ui = std::vector<u32>(16, 0);
+  test.expected_storage_image_r32ui = std::move(expected_image);
+  test.required_spirv = {"OpImageTexelPointer", "OpAtomicCompareExchange"};
+  return test;
+}
+
+// The signed minimum and maximum have direct SPIR-V opcodes, so they take the
+// image-atomic path rather than the compare-exchange loop.
+TestCase ImageAtomicSmaxKeepsLargerSignedTexel() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 2);
+  AppendVMovU32(&code, 21, 1);
+  AppendVMovU32(&code, 22, 0);
+  AppendVMovU32(&code, 0, 7);
+  code.push_back(EncodeMimg0(0x08, 0x1));
+  code.push_back(EncodeMimg1(0, 20));
+  AppendVMovLiteral(&code, 0, 0xfffffffeu);
+  code.push_back(EncodeMimg0(0x16, 0x1, 0, true));
+  code.push_back(EncodeMimg1(0, 20));
+  AppendStoreVgpr(&code, 0, 0);
+  AppendEnd(&code);
+
+  std::vector<u32> expected_image(16, 0);
+  expected_image[1 * 4 + 2] = 7;
+
+  TestCase test;
+  test.name = "ImageAtomicSmaxKeepsLargerSignedTexel";
+  test.code = std::move(code);
+  test.expected = {7};
+  test.opcodes = {O::V_MOV_B32, O::IMAGE_STORE, O::IMAGE_ATOMIC_SMAX,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.user_data = MakeStorageTextureData(Prospero::BufferFormat::k32UInt);
+  test.has_user_data = true;
+  test.storage_image_r32ui = std::vector<u32>(16, 0);
+  test.expected_storage_image_r32ui = std::move(expected_image);
+  test.required_spirv = {"OpAtomicSMax", "OpImageTexelPointer"};
+  return test;
+}
+
 TestCase ImageStoreAndAtomicUseSeparateBindings() {
   using O = ShaderOpcode;
 
@@ -24935,6 +25108,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorDppRowXmask);
   AddCase(VectorDppBankMaskPreservesDestination);
   AddCase(VectorDppBoundsControlZeroPreservesDestination);
+  AddCase(VectorDpp8ReverseLanes);
+  AddCase(VectorDpp8BroadcastWithinGroup);
   AddCase(Vop3FmacF32NegatedSourceAccumulates);
   AddCase(Vop3LdexpSourceModifier);
   AddCase(Vop1MoveRelSource);
@@ -25130,6 +25305,9 @@ std::vector<TestCase> MakeCases() {
   AddCase(ComputeTgSizeSgprUsesWaveMetadata);
   AddCase(ImageStoreAndAtomicShareTypedBinding);
   AddCase(ImageAtomicSwapReturnsPreviousTexel);
+  AddCase(ImageAtomicFmaxOnFloatImageRaisesTexel);
+  AddCase(ImageAtomicFminOnFloatImageKeepsSmallerTexel);
+  AddCase(ImageAtomicSmaxKeepsLargerSignedTexel);
   AddCase(ImageStoreAndAtomicUseSeparateBindings);
   AddCase(ImageAtomicVariants);
   AddCase(ImageAtomicGlc0DoesNotReturnOldValue);

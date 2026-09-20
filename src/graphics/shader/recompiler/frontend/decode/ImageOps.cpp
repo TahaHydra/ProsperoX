@@ -201,14 +201,28 @@ constexpr MimgGatherInfo MIMG_GATHER_OPCODE_LIST[] = {
     {0x61u, "image_gather4h", Opcode::IMAGE_GATHER4H, ImageSampleFlagGatherHorizontal, 2u},
 };
 
+// GFX10 MIMG atomic opcodes. The numbering is generation-specific -- GFX6-9
+// used a different one -- and these are the GFX10 column of the AMDGPU backend
+// tables, which the sample and gather numbering above already agrees with.
+// Four GFX10 atomics are deliberately absent. image_atomic_cmpswap and
+// image_atomic_fcmpswap take two data registers rather than one, which the
+// operand model here does not describe yet. image_atomic_inc and
+// image_atomic_dec wrap against the operand rather than counting freely, and
+// nothing here establishes the exact comparison they use. All four report as
+// an unimplemented MIMG opcode, which now names the shader they came from.
 constexpr MimgAtomicInfo MIMG_ATOMIC_OPCODE_LIST[] = {
     {0x0fu, "image_atomic_swap", Opcode::IMAGE_ATOMIC_SWAP},
     {0x11u, "image_atomic_add", Opcode::IMAGE_ATOMIC_ADD},
+    {0x12u, "image_atomic_sub", Opcode::IMAGE_ATOMIC_SUB},
+    {0x14u, "image_atomic_smin", Opcode::IMAGE_ATOMIC_SMIN},
     {0x15u, "image_atomic_umin", Opcode::IMAGE_ATOMIC_UMIN},
+    {0x16u, "image_atomic_smax", Opcode::IMAGE_ATOMIC_SMAX},
     {0x17u, "image_atomic_umax", Opcode::IMAGE_ATOMIC_UMAX},
     {0x18u, "image_atomic_and", Opcode::IMAGE_ATOMIC_AND},
     {0x19u, "image_atomic_or", Opcode::IMAGE_ATOMIC_OR},
     {0x1au, "image_atomic_xor", Opcode::IMAGE_ATOMIC_XOR},
+    {0x1eu, "image_atomic_fmin", Opcode::IMAGE_ATOMIC_FMIN},
+    {0x1fu, "image_atomic_fmax", Opcode::IMAGE_ATOMIC_FMAX},
 };
 
 constexpr auto MIMG_SAMPLE_OPS = Detail::MakeOpcodeTable<0x100>(MIMG_SAMPLE_OPCODE_LIST);

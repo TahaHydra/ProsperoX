@@ -546,11 +546,16 @@ enum class Opcode {
 	IMAGE_STORE_MIP,
 	IMAGE_ATOMIC_SWAP,
 	IMAGE_ATOMIC_ADD,
+	IMAGE_ATOMIC_SUB,
+	IMAGE_ATOMIC_SMIN,
 	IMAGE_ATOMIC_UMIN,
+	IMAGE_ATOMIC_SMAX,
 	IMAGE_ATOMIC_UMAX,
 	IMAGE_ATOMIC_AND,
 	IMAGE_ATOMIC_OR,
 	IMAGE_ATOMIC_XOR,
+	IMAGE_ATOMIC_FMIN,
+	IMAGE_ATOMIC_FMAX,
 	IMAGE_SAMPLE,
 	IMAGE_GATHER4_LZ,
 	IMAGE_GATHER4_C,
@@ -602,6 +607,10 @@ enum class OperandKind {
 	PopsExitingWaveId,
 	Null,
 	Vgpr,
+	// An operand encoding this decoder does not model. The instruction carrying
+	// it becomes UNSUPPORTED, so the failure is reported with the shader it came
+	// from rather than terminating inside the operand decoder.
+	Unsupported,
 };
 
 enum ImageSampleFlag : uint32_t {
@@ -650,6 +659,10 @@ struct Operand {
 	bool     sdwa_sext          = false;
 	bool     dpp_fetch_inactive = false;
 	bool     dpp_bound_ctrl     = false;
+	// DPP8 spends the whole control field on eight 3-bit lane selects, so it has
+	// no row/bank masks, no bound-control, and no neg/abs bits. `dpp_ctrl` holds
+	// the selects instead of a DPP16 control when this is set.
+	bool     dpp8               = false;
 	bool     op_sel             = false;
 	bool     op_sel_hi          = false;
 	bool     negate             = false;
@@ -707,7 +720,7 @@ struct Instruction {
 		bool     compr  = false;
 		bool     vm     = false;
 	} exp;
-	std::string_view unsupported_reason;
+	std::string      unsupported_reason;
 };
 
 struct Program {
@@ -727,7 +740,9 @@ void DecodeVectorGpr(uint32_t reg, Operand& operand);
 void ReadLiteralOperands(std::span<const uint32_t> code, uint32_t word_index, Instruction& inst);
 void SetRawWords(Instruction& inst, std::span<const uint32_t> code, uint32_t word_index,
                  uint32_t word_count);
-void SetUnsupported(Instruction& inst, Family family, uint32_t opcode_id, const char* reason);
+void SetUnsupported(Instruction& inst, Family family, uint32_t opcode_id, std::string reason);
+void DecodeInstructionFamily(std::span<const uint32_t> code, uint32_t word_index,
+                             Instruction& inst);
 std::string OperandToString(const Operand& operand);
 const char* ImageDimensionToString(ImageDimension dimension);
 std::string InstructionToString(const Instruction& inst);

@@ -217,6 +217,11 @@ ImageOpcodeInfo ImageOpcodeInfoOf(ValueOpcode opcode) {
 		case ValueOpcode::ImageAtomicAnd32:
 		case ValueOpcode::ImageAtomicOr32:
 		case ValueOpcode::ImageAtomicXor32:
+		case ValueOpcode::ImageAtomicISub32:
+		case ValueOpcode::ImageAtomicSMin32:
+		case ValueOpcode::ImageAtomicSMax32:
+		case ValueOpcode::ImageAtomicFMin32:
+		case ValueOpcode::ImageAtomicFMax32:
 			return {ImageAccess::Atomic, ImageResourceClass::Storage, false};
 		default: return {};
 	}

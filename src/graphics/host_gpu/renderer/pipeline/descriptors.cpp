@@ -367,6 +367,14 @@ static bool IsSupportedStorageTextureEncoding(const ShaderRecompiler::IR::ImageR
 	       (descriptor.fields[5] & ~field5_max_mip_mask) == field5_expected;
 }
 
+// 32-bit single-component formats a shader may address as raw texels through
+// an R32_UINT view of a mutable-format image.
+bool IsRawTexelStorageFormat(Prospero::BufferFormat format) {
+	return format == Prospero::BufferFormat::k32SInt ||
+	       format == Prospero::BufferFormat::k32Float ||
+	       format == Prospero::BufferFormat::k32UInt;
+}
+
 void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
                             const ShaderTextureResource& descriptor, uint64_t size) {
 	const auto format        = descriptor.Format();
@@ -374,11 +382,10 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	const bool descriptor_ok = IsSupportedStorageTextureDescriptor(resource, descriptor);
 	const bool encoding_ok   = IsSupportedStorageTextureEncoding(resource, descriptor);
 	const bool uint_resource    = resource.numeric_class == Prospero::TextureNumericClass::Uint;
-	const bool raw_sint_storage = format == Prospero::BufferFormat::k32SInt && uint_resource &&
-	                              resource.written && !resource.read && !resource.atomic;
+	const bool raw_bits_storage = uint_resource && IsRawTexelStorageFormat(format);
 	const auto numeric_class = Prospero::SampledTextureNumericClass(format);
 	const bool format_ok =
-	    raw_sint_storage ||
+	    raw_bits_storage ||
 	    (numeric_class != Prospero::TextureNumericClass::Unsupported &&
 	     numeric_class != Prospero::TextureNumericClass::Sint &&
 	     uint_resource == (numeric_class == Prospero::TextureNumericClass::Uint) &&
@@ -670,7 +677,9 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			pixel_format = depth_format->depth_attachment_format;
 		}
 	}
-	const auto storage_view_format = storage && format == Prospero::BufferFormat::k32SInt
+	const bool raw_texel_view = storage && IsRawTexelStorageFormat(format) &&
+	                            resource.numeric_class == Prospero::TextureNumericClass::Uint;
+	const auto storage_view_format = raw_texel_view
 	                                     ? vk::Format::eR32Uint
 	                                     : SrgbStorageViewFormat(pixel_format);
 	const auto view_format         = storage && storage_view_format != vk::Format::eUndefined

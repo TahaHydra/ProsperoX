@@ -262,7 +262,10 @@ void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand) {
 		case 252u: operand.kind = OperandKind::ExecZ; return;
 		case 253u: operand.kind = OperandKind::Scc; return;
 		case 255u: operand.kind = OperandKind::LiteralConstant; return;
-		default: EXIT("unsupported scalar source operand 0x%08x at pc 0x%08x", code, pc);
+		default:
+			operand.kind  = OperandKind::Unsupported;
+			operand.value = code;
+			return;
 	}
 }
 
@@ -282,7 +285,10 @@ void DecodeScalarDestination(uint32_t code, uint32_t pc, Operand& operand) {
 		case 125u: operand.kind = OperandKind::Null; return;
 		case 126u: operand.kind = OperandKind::ExecLo; return;
 		case 127u: operand.kind = OperandKind::ExecHi; return;
-		default: EXIT("unsupported scalar destination operand 0x%08x at pc 0x%08x", code, pc);
+		default:
+			operand.kind  = OperandKind::Unsupported;
+			operand.value = code;
+			return;
 	}
 }
 
@@ -315,11 +321,11 @@ void SetRawWords(Instruction& inst, std::span<const uint32_t> code, uint32_t wor
 	}
 }
 
-void SetUnsupported(Instruction& inst, Family family, uint32_t opcode_id, const char* reason) {
+void SetUnsupported(Instruction& inst, Family family, uint32_t opcode_id, std::string reason) {
 	inst.opcode             = Opcode::UNSUPPORTED;
 	inst.family             = family;
 	inst.opcode_id          = opcode_id;
-	inst.unsupported_reason = reason;
+	inst.unsupported_reason = std::move(reason);
 }
 
 Family GetInstructionFamily(uint32_t word) {
@@ -355,7 +361,45 @@ Family GetInstructionFamily(uint32_t word) {
 	}
 }
 
+namespace {
+
+// An operand encoding the decoder does not model leaves the whole instruction
+// unsupported, so the CFG reports it against the shader it belongs to instead
+// of the decoder terminating with an offset and nothing else.
+bool HasUnsupportedOperand(const Instruction& inst) {
+	for (const auto* operand: {&inst.dst, &inst.dst2, &inst.src0, &inst.src1, &inst.src2,
+	                           &inst.src3}) {
+		if (operand->kind == OperandKind::Unsupported) {
+			return true;
+		}
+	}
+	return false;
+}
+
+std::string UnsupportedOperandReason(const Instruction& inst) {
+	static const char* const names[] = {"dst", "dst2", "src0", "src1", "src2", "src3"};
+	const Operand* const     operands[] = {&inst.dst, &inst.dst2, &inst.src0, &inst.src1,
+	                                       &inst.src2, &inst.src3};
+	for (size_t i = 0; i < std::size(operands); i++) {
+		if (operands[i]->kind == OperandKind::Unsupported) {
+			return fmt::format("unsupported {} operand encoding 0x{:03x}", names[i],
+			                   operands[i]->value);
+		}
+	}
+	return "unsupported operand encoding";
+}
+
+} // namespace
+
 void DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Instruction& inst) {
+	DecodeInstructionFamily(code, word_index, inst);
+	if (inst.opcode != Opcode::UNSUPPORTED && HasUnsupportedOperand(inst)) {
+		SetUnsupported(inst, inst.family, inst.opcode_id, UnsupportedOperandReason(inst));
+	}
+}
+
+void DecodeInstructionFamily(std::span<const uint32_t> code, uint32_t word_index,
+                             Instruction& inst) {
 	const uint32_t pc = word_index * sizeof(uint32_t);
 	switch (GetInstructionFamily(code[word_index])) {
 		case Family::SOP1: DecodeSop1(pc, code, word_index, inst); return;
@@ -377,7 +421,16 @@ void DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Inst
 		case Family::MIMG: DecodeMimg(pc, code, word_index, inst); return;
 		case Family::EXP: DecodeExp(pc, code, word_index, inst); return;
 		default:
-			EXIT("unknown RDNA2 instruction family at pc 0x%08x, raw=0x%08x", pc, code[word_index]);
+			// Length is unknown, so decoding cannot continue past this word, but
+			// the CFG still gets to report it against its shader.
+			inst.pc         = pc;
+			inst.word       = code[word_index];
+			inst.word_count = 1;
+			SetRawWords(inst, code, word_index, 1);
+			SetUnsupported(inst, Family::Unknown, 0,
+			               fmt::format("unknown RDNA2 instruction family, raw=0x{:08x}",
+			                           code[word_index]));
+			return;
 	}
 }
 
@@ -451,7 +504,14 @@ std::string OperandToString(const Operand& operand) {
 	if (operand.clamp) {
 		text += ".clamp";
 	}
-	if (operand.dpp) {
+	if (operand.dpp8) {
+		text += ".dpp8[";
+		for (uint32_t lane = 0; lane < 8u; lane++) {
+			text +=
+			    fmt::format("{}{}", lane == 0 ? "" : ",", (operand.dpp_ctrl >> (lane * 3u)) & 7u);
+		}
+		text += fmt::format("](fi={})", operand.dpp_fetch_inactive ? 1u : 0u);
+	} else if (operand.dpp) {
 		text += fmt::format(".dpp(ctrl=0x{:x},fi={},bc={})", operand.dpp_ctrl,
 		                    operand.dpp_fetch_inactive ? 1u : 0u, operand.dpp_bound_ctrl ? 1u : 0u);
 	}
@@ -546,11 +606,16 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::IMAGE_STORE_MIP:
 		case Opcode::IMAGE_ATOMIC_SWAP:
 		case Opcode::IMAGE_ATOMIC_ADD:
+		case Opcode::IMAGE_ATOMIC_SUB:
+		case Opcode::IMAGE_ATOMIC_SMIN:
 		case Opcode::IMAGE_ATOMIC_UMIN:
+		case Opcode::IMAGE_ATOMIC_SMAX:
 		case Opcode::IMAGE_ATOMIC_UMAX:
 		case Opcode::IMAGE_ATOMIC_AND:
 		case Opcode::IMAGE_ATOMIC_OR:
 		case Opcode::IMAGE_ATOMIC_XOR:
+		case Opcode::IMAGE_ATOMIC_FMIN:
+		case Opcode::IMAGE_ATOMIC_FMAX:
 		case Opcode::IMAGE_LOAD:
 		case Opcode::IMAGE_LOAD_MIP:
 		case Opcode::IMAGE_GET_RESINFO:

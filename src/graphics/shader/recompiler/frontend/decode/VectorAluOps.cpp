@@ -690,6 +690,21 @@ void ApplyDppModifier(Operand& operand, uint32_t modifier) {
 	operand.dpp_row_mask       = (modifier >> 28u) & 0xfu;
 }
 
+// DPP8 is a different encoding, not a variant of DPP16: bits [31:8] of the
+// second word are eight 3-bit lane selects, which leaves no room for the row
+// mask, bank mask, bound-control, or source neg/abs that DPP16 carries. Even
+// fetch-inactive is not a field - it is the difference between the two src0
+// escapes, 0xe9 (fetch inactive off) and 0xea (on).
+void ApplyDpp8Modifier(Operand& operand, uint32_t modifier, bool fetch_inactive) {
+	operand.dpp                = true;
+	operand.dpp8               = true;
+	operand.dpp_ctrl           = (modifier >> 8u) & 0xffffffu;
+	operand.dpp_fetch_inactive = fetch_inactive;
+	operand.dpp_bound_ctrl     = false;
+	operand.dpp_bank_mask      = 0xfu;
+	operand.dpp_row_mask       = 0xfu;
+}
+
 void DecodeVop1Dpp(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                    uint32_t opcode, uint32_t vdst, Instruction& inst) {
 	const auto modifier = code[word_index + 1u];
@@ -714,6 +729,24 @@ void DecodeVop1Dpp(uint32_t pc, std::span<const uint32_t> code, uint32_t word_in
 	ReadLiteralOperands(code, word_index, inst);
 }
 
+template <bool FetchInactive>
+void DecodeVop1Dpp8(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
+                    [[maybe_unused]] uint32_t opcode, uint32_t vdst, Instruction& inst) {
+	const auto modifier = code[word_index + 1u];
+	const auto src0     = modifier & 0xffu;
+	SetRawWords(inst, code, word_index, 2);
+
+	if (UsesScalarDestination(inst.opcode)) {
+		DecodeScalarDestination(vdst, pc, inst.dst);
+	} else {
+		DecodeVectorGpr(vdst, inst.dst);
+	}
+	DecodeScalarSource(src0 + 256u, pc, inst.src0);
+	ApplyDpp8Modifier(inst.src0, modifier, FetchInactive);
+	inst.src_count = 1;
+	ReadLiteralOperands(code, word_index, inst);
+}
+
 using Vop1ModifierDecodeFn = void (*)(uint32_t pc, std::span<const uint32_t> code,
                                       uint32_t word_index, uint32_t opcode, uint32_t vdst,
                                       Instruction& inst);
@@ -724,6 +757,8 @@ struct Vop1ModifierDecoder {
 };
 
 constexpr Vop1ModifierDecoder VOP1_MODIFIER_DECODERS[] = {
+    {233u, DecodeVop1Dpp8<false>},
+    {234u, DecodeVop1Dpp8<true>},
     {249u, DecodeVop1Sdwa},
     {250u, DecodeVop1Dpp},
 };
@@ -1107,6 +1142,21 @@ void DecodeVop2Dpp(uint32_t pc, std::span<const uint32_t> code, uint32_t word_in
 	FinalizeVop2Instruction(code, word_index, inst);
 }
 
+template <bool FetchInactive>
+void DecodeVop2Dpp8(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
+                    [[maybe_unused]] uint32_t opcode, uint32_t vdst, uint32_t vsrc1,
+                    Instruction& inst) {
+	const auto modifier = code[word_index + 1u];
+	const auto src0     = modifier & 0xffu;
+	SetRawWords(inst, code, word_index, 2);
+
+	DecodeVectorGpr(vdst, inst.dst);
+	DecodeVectorGpr(vsrc1, inst.src1);
+	DecodeScalarSource(src0 + 256u, pc, inst.src0);
+	ApplyDpp8Modifier(inst.src0, modifier, FetchInactive);
+	FinalizeVop2Instruction(code, word_index, inst);
+}
+
 using Vop2ModifierDecodeFn = void (*)(uint32_t pc, std::span<const uint32_t> code,
                                       uint32_t word_index, uint32_t opcode, uint32_t vdst,
                                       uint32_t vsrc1, Instruction& inst);
@@ -1117,6 +1167,8 @@ struct Vop2ModifierDecoder {
 };
 
 constexpr Vop2ModifierDecoder VOP2_MODIFIER_DECODERS[] = {
+    {233u, DecodeVop2Dpp8<false>},
+    {234u, DecodeVop2Dpp8<true>},
     {249u, DecodeVop2Sdwa},
     {250u, DecodeVop2Dpp},
 };
@@ -1228,6 +1280,30 @@ void DecodeVopcDpp(uint32_t pc, std::span<const uint32_t> code, uint32_t word_in
 	inst.src1.negate   = ((modifier >> 22u) & 0x1u) != 0u;
 	inst.src1.absolute = ((modifier >> 23u) & 0x1u) != 0u;
 	inst.src_count     = 2;
+	ReadLiteralOperands(code, word_index, inst);
+}
+
+template <bool FetchInactive>
+void DecodeVopcDpp8(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
+                    uint32_t opcode, uint32_t vsrc1, Instruction& inst) {
+	const auto modifier = code[word_index + 1u];
+	const auto src0     = modifier & 0xffu;
+	SetRawWords(inst, code, word_index, 2);
+	if (inst.opcode == Opcode::UNSUPPORTED) {
+		SetUnsupported(inst, Family::VOPC, opcode, "VOPC opcode is not implemented");
+		return;
+	}
+	const auto* info = Detail::FindOpcode(VOPC_OPS, opcode);
+	if (info == nullptr || !info->supports_dpp) {
+		SetUnsupported(inst, Family::VOPC, opcode,
+		               "VOPC DPP8 modifier is not supported for opcode");
+		return;
+	}
+	DecodeVectorGpr(vsrc1, inst.src1);
+	DecodeScalarSource(src0 + 256u, pc, inst.src0);
+	inst.dst.kind = IsVopcCompareExec(inst.opcode) ? OperandKind::ExecLo : OperandKind::VccLo;
+	ApplyDpp8Modifier(inst.src0, modifier, FetchInactive);
+	inst.src_count = 2;
 	ReadLiteralOperands(code, word_index, inst);
 }
 
@@ -1607,6 +1683,8 @@ void DecodeVopc(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	SetRawWords(inst, code, word_index, 1);
 
 	switch (src0) {
+		case 233u: DecodeVopcDpp8<false>(pc, code, word_index, opcode, vsrc1, inst); return;
+		case 234u: DecodeVopcDpp8<true>(pc, code, word_index, opcode, vsrc1, inst); return;
 		case 249u: DecodeVopcSdwa(pc, code, word_index, opcode, vsrc1, inst); return;
 		case 250u: DecodeVopcDpp(pc, code, word_index, opcode, vsrc1, inst); return;
 		default: break;

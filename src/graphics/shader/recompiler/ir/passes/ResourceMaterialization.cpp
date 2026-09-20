@@ -550,12 +550,23 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 		image.cube      = DescriptorIsCube(descriptor);
 		const auto format =
 		    static_cast<Prospero::BufferFormat>((descriptor.dwords[1] >> 20u) & 0x1ffu);
-		if (base.atomic && format != Prospero::BufferFormat::k32UInt) {
+		const bool storage = base.resource_class == ImageResourceClass::Storage;
+		// An image atomic addresses the stored 32-bit texel, not a converted
+		// value: the hardware instruction and the compare-exchange loop that
+		// stands in for image_atomic_fmin/fmax both work on the bits. For the
+		// three single-component 32-bit formats the conversion a load or store
+		// would apply is the identity anyway, so one raw R32_UINT view serves
+		// the atomic and the ordinary accesses alike and a float image can
+		// carry an atomic without needing a second view of the same image.
+		const bool raw_atomic_bits = storage && base.atomic &&
+		                             (format == Prospero::BufferFormat::k32Float ||
+		                              format == Prospero::BufferFormat::k32SInt ||
+		                              format == Prospero::BufferFormat::k32UInt);
+		if (base.atomic && format != Prospero::BufferFormat::k32UInt && !raw_atomic_bits) {
 			return SpecializationFail(
 			    fmt::format("atomic image descriptor {} uses unsupported format {}", i,
 			                static_cast<uint32_t>(format)));
 		}
-		const bool storage      = base.resource_class == ImageResourceClass::Storage;
 		image.fmask             = Prospero::IsFmaskTextureFormat(format);
 		if (image.fmask) {
 			if (storage || base.depth_compare ||
@@ -569,17 +580,20 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 		if (storage || image.conversion_format != Prospero::BufferFormat::kInvalid) {
 			image.shader_swizzle = DescriptorImageSwizzle(descriptor);
 		}
-		const bool raw_sint_storage = storage && format == Prospero::BufferFormat::k32SInt &&
-		                              base.written && !base.read && !base.atomic;
-		image.numeric_class         = Prospero::SampledTextureNumericClass(format);
+		// Addressed as raw 32-bit texels through an R32_UINT view rather than
+		// through the format conversion.
+		const bool raw_texel_storage = (storage && format == Prospero::BufferFormat::k32SInt &&
+		                                base.written && !base.read && !base.atomic) ||
+		                               raw_atomic_bits;
+		image.numeric_class          = Prospero::SampledTextureNumericClass(format);
 		if (storage) {
-			if ((!raw_sint_storage && image.numeric_class == Prospero::TextureNumericClass::Sint) ||
+			if ((!raw_texel_storage && image.numeric_class == Prospero::TextureNumericClass::Sint) ||
 			    image.numeric_class == Prospero::TextureNumericClass::Unsupported) {
 				return SpecializationFail(
 				    fmt::format("storage image descriptor {} uses unsupported format {}", i,
 				                static_cast<uint32_t>(format)));
 			}
-			if (raw_sint_storage) {
+			if (raw_texel_storage) {
 				image.numeric_class = Prospero::TextureNumericClass::Uint;
 			}
 		} else if (image.numeric_class == Prospero::TextureNumericClass::Unsupported ||

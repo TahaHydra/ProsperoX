@@ -33,12 +33,16 @@ struct ImageOpcodeInfo {
 	bool               needs_sampler  = false;
 };
 
+// DPP16 and DPP8 both lower to the same lane shuffle, so they share one opcode.
+// `control` is a 9-bit DPP16 control word, or eight 3-bit lane selects when
+// `dpp8` is set; the masks and bound-control only exist in the DPP16 encoding.
 struct DppMoveFlags {
-	uint16_t control        = 0;
-	uint8_t  row_mask       = 0xf;
-	uint8_t  bank_mask      = 0xf;
-	bool     fetch_inactive = false;
-	bool     bound_control  = false;
+	uint32_t control            = 0;
+	uint8_t  row_mask           = 0xf;
+	uint8_t  bank_mask          = 0xf;
+	bool     fetch_inactive : 1 = false;
+	bool     bound_control  : 1 = false;
+	bool     dpp8           : 1 = false;
 };
 static_assert(sizeof(DppMoveFlags) <= sizeof(uint64_t));
 static_assert(std::is_trivially_copyable_v<DppMoveFlags>);
