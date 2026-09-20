@@ -291,6 +291,25 @@ LIB_DEFINE(Init) {
 	LIB_FUNC("h9z6+0hEydk", Graphics::Gen5::AgcSuspendPoint);
 	LIB_FUNC("YUeqkyT7mEQ", Graphics::Gen5::AgcDcbSetFlip);
 	LIB_FUNC("TRO721eVt4g", Graphics::Gen5::AgcDcbResetQueue);
+
+	// Reviewed as a set, from the four imports Ghost of Yotei (PPSA26344) makes
+	// under the Agc identity that Bendy does not. The audit
+	// (--audit-game) reports them as AliasCandidate: implemented under
+	// Graphics5, reachable by the title only under Agc. Each was read before
+	// being listed and meets the same bar as the entries above -- it either
+	// writes PM4 into a command buffer the guest owns or computes register
+	// values from guest-supplied shader metadata, and reads no emulator state.
+	//
+	// AgcDcbCondExec writes one five-dword IT_COND_EXEC packet naming a guest
+	// address and a dword count. AgcDcbContextStateOp writes the context-state
+	// NOP sequence for the requested operation. AgcDcbDrawIndexIndirectMulti
+	// writes one ten-dword IT_DRAW_INDEX_INDIRECT_MULTI packet. Only
+	// AgcGetGsOversubscription writes no packet at all: it fills the caller's
+	// two-entry register array from the GS shader's own occupancy limits.
+	LIB_FUNC("BIPexNBSGog", Graphics::Gen5::AgcDcbCondExec);
+	LIB_FUNC("qj7QZpgr9Uw", Graphics::Gen5::AgcDcbContextStateOp);
+	LIB_FUNC("ypVBz4uPKcQ", Graphics::Gen5::AgcDcbDrawIndexIndirectMulti);
+	LIB_FUNC("NKIzURsgV7I", Graphics::Gen5::AgcGetGsOversubscription);
 }
 } // namespace AgcQualified
 
