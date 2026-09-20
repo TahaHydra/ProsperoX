@@ -2,102 +2,70 @@
 
 2026-09-20. Target: Windows 11, Ryzen 7 7800X3D, RX 7800 XT, 32 GB.
 **Phase 6 remains OPEN. Phase 7 has not started.** This checkpoint records
-where Ghost of Yōtei PPSA26344 stops today, what was crossed to get there, and
-what the next blocker actually is. Bendy PPSA27624 was re-run against the same
-build and is unchanged.
+where Ghost of Yōtei PPSA26344 stands, what was crossed to get there, and what
+the next blocker actually is. Bendy PPSA27624 was re-run against the same
+build.
 
-## Where Ghost stops
+## Where Ghost stands
 
-Ghost boots, links, runs guest code, reaches AGC command submission and starts
-building pipelines. It compiles **25 compute shaders** and terminates while
-translating the 26th:
+Ghost boots, links, runs guest code, reaches AGC submission, builds pipelines,
+and **executes draws and dispatches**. Over a 150-second run it compiles
+**57 compute, 6 vertex and 6 pixel shaders** and sustains **4.7–5.0 draws and
+40–78 dispatches a second** between compiles. One run reached the 200-second
+cutoff without terminating at all.
 
-```
-shader resource tracking: pc=0x000005c8 GetSamplerResource dword 0 is not a
-valid runtime value: ReadConstBuffer(GetBufferResource(...), IMul32(
-ReadConstBuffer(GetBufferResource(...), ShiftLeftLogical32(Phi(...), 2)), 0x368))
- shader stage=CS source=cs_regs.data_addr hash=0x34be6ffcc212383c
- guest=0x00000080003b2200..0x00000080003b2da0 size=2976 bytes wave64
-```
+It is not stable. Most wall-clock time goes into compiling newly encountered
+shaders — the command processor is blocked while that happens — and each new
+shader can still reach an instruction or a descriptor shape the recompiler
+does not implement. The current stop is a shader using MUBUF opcodes 0x83 and
+0x19 and a VOP1 SDWA destination selector.
 
-The GPU statistics for the run are `draws=0 dispatches=0`: **Ghost has not yet
-executed a single draw or dispatch, and no vertex or pixel shader has been
-compiled for it at all.** Everything below is progress through pipeline
-creation, not evidence of rendering.
+For contrast, at the start of this session Ghost compiled 6 compute shaders,
+had never compiled a vertex or pixel shader, and had issued **zero** draws and
+dispatches.
 
-## What the 26th shader does
-
-It is a clustered-shading compute pass. Per iteration of a loop it reads a
-material index out of one buffer, then reads a whole 0x368-byte material record
-out of another:
-
-```
-0x5b0: S_MUL_I32            vcc_lo, s60, 0x368
-0x5bc: S_BUFFER_LOAD_DWORDX8 s12, s52, vcc_lo ; offset=136
-0x5c8: image_sample_d       v14, v0, s16, s12 ; r128=1
-```
-
-That one eight-dword load fetches an r128 image descriptor (s12..s15) and its
-sampler (s16..s19) together, from a record selected by a loop-varying index.
-The image half now resolves; the sampler half does not, and that is the next
-blocker.
-
-## Crossed in this session
+## What was crossed
 
 | Blocker | Resolution |
 | --- | --- |
-| Shader failures could not be attributed | Provenance carried from the register that supplied the address, through the CFG and into every IR pass |
-| `image_atomic_fmax` decoded as an unknown MIMG opcode | Completed the GFX10 MIMG atomic table from LLVM's `MIMGInstructions.td`, with IR opcodes and SPIR-V lowering |
-| Float image atomics unsupported by the host driver | `shaderImageFloat32AtomicMinMax` is false on this RX 7800 XT, so the float compare runs as a compare-exchange loop over the raw texel bits |
-| An R32_FLOAT image could not carry an atomic | The conversion for the single-component 32-bit formats is the identity, so one raw R32_UINT view serves the atomic and the ordinary accesses alike |
-| `src0 = 0xe9` decoded as an unsupported operand encoding | DPP8 decoded for VOP1/VOP2/VOPC, both fetch-inactive escapes, lowered to the existing lane shuffle |
-| Four Agc entry points unreachable under the title's identity | Reviewed individually and added to the qualified list; none reads emulator state |
-| An image descriptor held inside a larger record was rejected | The indirect-image lookup no longer assumes a packed 32-byte table: it carries the heap stride and the descriptor's offset inside the record, accepts a shift as a multiply, and handles r128 |
+| Shader failures could not be attributed | Provenance carried from the register that supplied the address, through the CFG and into every IR pass; failures now also list every unsupported instruction in the shader |
+| `image_atomic_fmax` decoded as unknown | Completed the GFX10 MIMG atomic table from LLVM's `MIMGInstructions.td` |
+| Float image atomics unsupported by the driver | `shaderImageFloat32AtomicMinMax` is false here, so the compare runs as a compare-exchange loop over the raw texel bits through an R32_UINT view |
+| `src0 = 0xe9` unsupported operand | DPP8 decoded for VOP1/VOP2/VOPC, both fetch-inactive escapes |
+| Four Agc entry points unreachable | Reviewed individually and added to the qualified list |
+| Descriptor held inside a larger record | Indirect lookup carries heap stride and in-record offset, accepts shifts, handles r128 |
+| Samplers and pointer-backed tables | Planned by the same routine as images, each with its own source; key may be masked, or a loop counter bounded by the heap's own extent |
+| The descriptor walk faulted the host | It no longer dereferences an address it has not validated; unreadable flat slots are zero rather than fatal; value equivalence walks with an explicit stack |
+| Double-precision instructions | `IR::Type::F64`, native SPIR-V doubles via PackDouble2x32, the GFX10 conversions, rounding group, reciprocal, sqrt, and the VOP3 arithmetic |
+| Buffer descriptor chosen at runtime | Buffer access lowered to address arithmetic over the four descriptor dwords, including the swizzled indexed form and the hardware's bounds behaviour |
+| Flat stores refused for lack of ownership tracking | A second page bitmap in the fault buffer records what a shader wrote; those pages are marked GPU-modified |
+| Packed 32-bit and 8-bit sRGB formats | Sampled as raw dwords and unpacked with normalization; one- and two-channel sRGB made renderable |
+| Half-precision compares, 64-bit LDS bitwise | Filled in the four runs of six; DS_AND/OR/XOR_B64 as a pair of 32-bit atomics, which is exact for bitwise operations |
 
 ## What is still in the way
 
-1. **Indirect sampler descriptors.** The image lookup selects a resource at
-   runtime by key; the sampler for that sample instruction is still resolved as
-   a single compile-time descriptor. The same key has to drive both. This is
-   the immediate blocker and it is the symmetric twin of the work already done
-   for images.
-2. **The whole graphics path is unexercised for this title.** No VS, PS or mesh
-   shader has been compiled, no render target has been bound, nothing has been
-   presented. Whatever Ghost's graphics shaders need is entirely unmeasured.
-3. **77 imports are unimplemented** in `--audit-game`, 3 of them under `Agc_v1`
-   (`AAeX-U5-P3M`, `GPbUp9jXQa8`, `ebixW91gpPw`). Most may never be called;
-   each one that is called terminates the title on the first call.
+1. **The next shader's instructions.** MUBUF 0x83 and 0x19 and a VOP1 SDWA
+   destination selector. Deciding what MUBUF 0x83 is on GFX10 needs the
+   opcode table checked against a source, not recalled.
+2. **Compilation dominates the frame.** The command processor is blocked
+   while a pipeline is built, so the draw rate says more about compile cost
+   than about rendering.
+3. **77 imports are unimplemented** in `--audit-game`, three of them under
+   `Agc_v1`. Most may never be called; each one that is terminates the title.
 
-## How far along this is
+## Bendy
 
-**Estimate: 35–45% of the way to Ghost drawing a menu.** The reasoning, not a
-number to quote on its own:
-
-- Boot, loader, TLS, kernel synchronization and the service imports Ghost
-  actually calls are in reasonable shape — that work is largely behind us, and
-  it is what consumed the previous sessions.
-- Pipeline creation is where the title now spends its life, and the first
-  compute pass is the first thing it builds. 25 of 26 compiling is not 96% of
-  anything; it is one shader batch.
-- The unexercised graphics path is the large unknown. It is not possible to
-  size it honestly before a single draw has been attempted, and the estimate
-  above assumes it behaves roughly like Bendy's, which is an assumption and
-  not a measurement.
-
-Treat the range as a statement about confidence, not a schedule.
-
-## Bendy regression
-
-Re-run on the same build: reaches gameplay, 840 draws/s and 240 dispatches/s
-steady, 9 VS / 7 PS / 5 CS compiled, no errors on stderr. Unchanged from
-before this work.
+Re-run on the same build, Bendy now reaches far more content than before this
+session: **71 vertex, 71 pixel and 10 compute shaders** and about **20,500
+draws and 1,560 dispatches a second**, against 9/7/5 shaders and 870 draws a
+second earlier in the session. No errors on stderr. This is a large enough
+change that it is worth looking at on screen rather than taking the counters
+at face value.
 
 ## Tests
 
-`--phase4-corpus` passes: `decoded_translated_validated=299 compute_executed=294
-compile_only=5 graphics_executed=13`. New fixtures execute on the GPU:
-
-- `VectorDpp8ReverseLanes`, `VectorDpp8BroadcastWithinGroup`
-- `ImageAtomicFmaxOnFloatImageRaisesTexel`,
-  `ImageAtomicFminOnFloatImageKeepsSmallerTexel`,
-  `ImageAtomicSmaxKeepsLargerSignedTexel`
+`--phase4-corpus` passes throughout: `decoded_translated_validated=299
+compute_executed=294 compile_only=5 graphics_executed=13`. New fixtures that
+execute on the GPU: DPP8 reversal and in-group broadcast; the float image
+minimum and maximum over the compare-exchange loop; the signed image maximum
+over its direct opcode.
