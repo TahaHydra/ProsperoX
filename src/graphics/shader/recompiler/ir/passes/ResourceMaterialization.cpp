@@ -247,7 +247,9 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 	    !DecodeBufferDescriptor(heap_value, heap)) {
 		return false;
 	}
-	if (material.Stride() != indirect.selector_stride) {
+	// A scalar buffer may declare no stride at all; when it declares one it has
+	// to agree with the record size the shader indexes by.
+	if (material.Stride() != 0u && material.Stride() != indirect.selector_stride) {
 		return false;
 	}
 
@@ -285,11 +287,14 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 	next.candidates.reserve(next.keys.size());
 	next.descriptors.reserve(
 	    std::min(next.keys.size(), static_cast<size_t>(ShaderInfo::MaxImages)));
+	const auto descriptor_dwords = std::min<uint32_t>(indirect.dword_count, 8u);
 	for (const auto key: next.keys) {
 		DescriptorValue candidate;
-		candidate.dword_count  = 8u;
-		const auto heap_offset = key << 5u;
-		for (uint32_t dword = 0; dword < candidate.dword_count; dword++) {
+		candidate.dword_count = 8u;
+		// Scalar addressing wraps at 32 bits, so compute the record offset the
+		// same way the shader's own multiply does.
+		const auto heap_offset = key * indirect.heap_stride + indirect.heap_offset;
+		for (uint32_t dword = 0; dword < descriptor_dwords; dword++) {
 			if (!ReadScalarBufferWord(heap, heap_offset, dword * sizeof(uint32_t), runtime,
 			                          candidate.dwords[dword])) {
 				return false;

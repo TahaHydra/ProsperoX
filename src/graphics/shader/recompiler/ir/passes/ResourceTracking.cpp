@@ -63,16 +63,6 @@ Value CanonicalizeSampleAdjustDword3(Value value) {
 	}
 }
 
-const char* StageName(ShaderType stage) {
-	switch (stage) {
-		case ShaderType::Vertex: return "vertex";
-		case ShaderType::Pixel: return "pixel";
-		case ShaderType::Fetch: return "fetch";
-		case ShaderType::Compute: return "compute";
-		default: return "unknown";
-	}
-}
-
 uint32_t ByteExtent(const MemoryInfo& memory) {
 	const auto bytes = std::max((memory.data_bits + 7u) / 8u, 1u);
 	const auto count = std::max(memory.data_dwords, 1u);
@@ -122,15 +112,16 @@ public:
 			for (uint32_t dword = 5u; dword < plan.roots.size(); dword++) {
 				plan.handle->SetArg(dword, plan.key);
 			}
-			for (const auto index: plan.memory) {
-				m_program.memory_info[index].planning_only = true;
+			for (uint32_t dword = 0; dword < plan.read_count; dword++) {
+				m_program.memory_info[plan.memory[dword]].planning_only = true;
 			}
 		}
 		std::erase_if(m_program.dynamic_reads, [&](Value value) {
 			const auto* inst = value.Resolve().TryInstruction();
 			return std::any_of(m_indirect_images.begin(), m_indirect_images.end(),
 			                   [&](const IndirectImagePlan& plan) {
-				return std::ranges::find(plan.reads, inst) != plan.reads.end();
+				return std::find(plan.reads.begin(), plan.reads.begin() + plan.read_count, inst) !=
+				       plan.reads.begin() + plan.read_count;
 			});
 		});
 		m_program.descriptor_sources         = std::move(m_sources);
@@ -152,8 +143,9 @@ private:
 	};
 
 	struct IndirectImagePlan {
-		Inst*                      handle = nullptr;
-		uint32_t                   source = 0;
+		Inst*                      handle     = nullptr;
+		uint32_t                   read_count = 8;
+		uint32_t                   source     = 0;
 		Value                      key;
 		std::array<Value, 8>       roots {};
 		std::array<uint32_t, 8>    memory {};
@@ -161,9 +153,8 @@ private:
 	};
 
 	[[noreturn]] void Fail(uint32_t pc, const std::string& reason) const {
-		const auto message =
-		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
-		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
+		const auto message = fmt::format("shader resource tracking: pc=0x{:08x} {}\n {}", pc, reason,
+		                                 DescribeProvenance(m_program.origin));
 		EXIT("%s", message.c_str());
 		std::abort();
 	}
@@ -283,8 +274,11 @@ private:
 		return true;
 	}
 
-	bool MatchMaterialOffset(Value value, Value& selector, uint32_t& stride,
-	                         uint32_t& offset) const {
+	// Matches `index * stride + offset` however the shader spelled it. A compiler
+	// emits the multiply as a shift whenever the stride is a power of two, and
+	// folds the constant term in either order, so all of those are the same
+	// addressing pattern and none of them says anything about the index itself.
+	bool MatchScaledOffset(Value value, Value& index, uint32_t& stride, uint32_t& offset) const {
 		value           = value.Resolve();
 		offset          = 0;
 		auto* candidate = value.TryInstruction();
@@ -300,21 +294,29 @@ private:
 			}
 			offset = immediate;
 		}
-		const auto* multiply = value.TryInstruction();
-		if (multiply == nullptr || multiply->GetOpcode() != ValueOpcode::IMul32 ||
-		    multiply->NumArgs() != 2u) {
+		const auto* scale = value.TryInstruction();
+		if (scale == nullptr || scale->NumArgs() != 2u) {
 			return false;
 		}
-		if (ImmediateU32(multiply->Arg(0), stride)) {
-			selector = multiply->Arg(1).Resolve();
-		} else if (ImmediateU32(multiply->Arg(1), stride)) {
-			selector = multiply->Arg(0).Resolve();
+		if (scale->GetOpcode() == ValueOpcode::IMul32) {
+			if (ImmediateU32(scale->Arg(0), stride)) {
+				index = scale->Arg(1).Resolve();
+			} else if (ImmediateU32(scale->Arg(1), stride)) {
+				index = scale->Arg(0).Resolve();
+			} else {
+				return false;
+			}
+		} else if (scale->GetOpcode() == ValueOpcode::ShiftLeftLogical32) {
+			uint32_t shift = 0;
+			if (!ImmediateU32(scale->Arg(1), shift) || shift >= 32u) {
+				return false;
+			}
+			stride = uint32_t {1} << shift;
+			index  = scale->Arg(0).Resolve();
 		} else {
 			return false;
 		}
-		const auto* selector_inst = selector.TryInstruction();
-		return stride != 0u && selector_inst != nullptr &&
-		       selector_inst->GetOpcode() == ValueOpcode::ReadFirstLane;
+		return stride != 0u && index.TryInstruction() != nullptr;
 	}
 
 	bool TryMakeIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
@@ -322,18 +324,36 @@ private:
 			return false;
 		}
 
+		// An r128 image descriptor is four dwords; GetImageResource always has
+		// eight arguments and the translator pads the tail with zero.
+		uint32_t   read_count = 8u;
+		const auto padded     = [&](uint32_t dword) {
+			uint32_t immediate = 0;
+			return ImmediateU32(handle.Arg(dword), immediate) && immediate == 0u;
+		};
+		if (padded(4u) && padded(5u) && padded(6u) && padded(7u)) {
+			read_count = 4u;
+		}
+
 		std::array<Inst*, 8> heap_reads {};
 		Inst*                heap_handle = nullptr;
 		Value                heap_offset;
-		for (uint32_t dword = 0; dword < heap_reads.size(); dword++) {
+		uint32_t             heap_base = 0;
+		for (uint32_t dword = 0; dword < read_count; dword++) {
 			heap_reads[dword] = handle.Arg(dword).Resolve().TryInstruction();
 			if (heap_reads[dword] == nullptr) {
 				return false;
 			}
 			uint32_t    memory_index = 0;
 			const auto* memory       = ScalarReadMemory(*heap_reads[dword], memory_index);
-			if (memory == nullptr || memory->offset != dword * sizeof(uint32_t) ||
-			    !MemoryIndexBelongsTo(memory_index, *heap_reads[dword])) {
+			if (memory == nullptr || !MemoryIndexBelongsTo(memory_index, *heap_reads[dword])) {
+				return false;
+			}
+			// The descriptor is read as one consecutive run; where inside the
+			// record that run starts is the guest's business, not ours.
+			if (dword == 0u) {
+				heap_base = memory->offset;
+			} else if (memory->offset != heap_base + dword * sizeof(uint32_t)) {
 				return false;
 			}
 			auto* current_handle = heap_reads[dword]->Arg(0).Resolve().TryInstruction();
@@ -351,21 +371,20 @@ private:
 			plan.reads[dword]  = heap_reads[dword];
 		}
 
-		const auto* shift        = heap_offset.TryInstruction();
-		uint32_t    shift_amount = 0;
-		if (shift == nullptr || shift->GetOpcode() != ValueOpcode::ShiftLeftLogical32 ||
-		    shift->NumArgs() != 2u || !ImmediateU32(shift->Arg(1), shift_amount) ||
-		    shift_amount != 5u) {
+		Value    key_value;
+		uint32_t heap_stride = 0;
+		uint32_t heap_extra  = 0;
+		if (!MatchScaledOffset(heap_offset, key_value, heap_stride, heap_extra)) {
 			return false;
 		}
-		auto* material_read = shift->Arg(0).Resolve().TryInstruction();
+		auto* material_read = key_value.TryInstruction();
 		if (material_read == nullptr) {
 			return false;
 		}
 		uint32_t    material_memory_index = 0;
 		const auto* material_memory       = ScalarReadMemory(*material_read, material_memory_index);
-		if (material_memory == nullptr || material_memory->offset != 0u ||
-		    !MemoryIndexBelongsTo(material_memory_index, *material_read)) {
+		if (material_memory == nullptr || !MemoryIndexBelongsTo(material_memory_index,
+		                                                        *material_read)) {
 			return false;
 		}
 		auto* material_handle = material_read->Arg(0).Resolve().TryInstruction();
@@ -376,20 +395,20 @@ private:
 		Value    selector;
 		uint32_t selector_stride = 0;
 		uint32_t selector_offset = 0;
-		if (!MatchMaterialOffset(material_read->Arg(1), selector, selector_stride,
-		                         selector_offset)) {
+		if (!MatchScaledOffset(material_read->Arg(1), selector, selector_stride,
+		                       selector_offset)) {
 			return false;
 		}
+		selector_offset += material_memory->offset;
 
-		const std::array<const Inst*, 1> material_users {shift};
-		std::array<const Inst*, 8>       heap_users {};
-		std::copy(heap_reads.begin(), heap_reads.end(), heap_users.begin());
+		// The descriptor dwords themselves must feed nothing but this handle:
+		// they stop being real loads once the lookup is planned. The key and the
+		// scaled offset may well have other readers -- a record that holds a
+		// descriptor usually holds ordinary data beside it -- and those readers
+		// keep working, so they are not a reason to refuse the lookup.
 		const std::array<const Inst*, 1> image_users {&handle};
-		if (!UsesOnly(*material_read, material_users) || !UsesOnly(*shift, heap_users)) {
-			return false;
-		}
-		for (const auto* read: heap_reads) {
-			if (!UsesOnly(*read, image_users)) {
+		for (uint32_t dword = 0; dword < read_count; dword++) {
+			if (!UsesOnly(*heap_reads[dword], image_users)) {
 				return false;
 			}
 		}
@@ -411,12 +430,21 @@ private:
 		std::copy(heap_source.dwords.begin(), heap_source.dwords.begin() + 4u,
 		          image_source.dwords.begin() + 4u);
 		image_source.indirect_image = DescriptorSource::IndirectImage {
-		    material_source_index, heap_source_index, selector_stride, selector_offset, 0u};
+		    .material_source = material_source_index,
+		    .heap_source     = heap_source_index,
+		    .selector_stride = selector_stride,
+		    .selector_offset = selector_offset,
+		    .key_arg         = 0u,
+		    .heap_stride     = heap_stride,
+		    .heap_offset     = heap_extra + heap_base,
+		    .dword_count     = read_count,
+		};
 
-		plan.handle = &handle;
-		plan.source = InternSource(image_source);
-		plan.key    = Value(material_read);
-		plan.roots  = image_source.dwords;
+		plan.handle     = &handle;
+		plan.read_count = read_count;
+		plan.source     = InternSource(image_source);
+		plan.key        = Value(material_read);
+		plan.roots      = image_source.dwords;
 		return true;
 	}
 
@@ -432,7 +460,8 @@ private:
 	bool IsIndirectPlanningMemory(uint32_t index) const {
 		return std::any_of(m_indirect_images.begin(), m_indirect_images.end(),
 		                   [&](const IndirectImagePlan& plan) {
-			return std::ranges::find(plan.memory, index) != plan.memory.end();
+			return std::find(plan.memory.begin(), plan.memory.begin() + plan.read_count, index) !=
+			       plan.memory.begin() + plan.read_count;
 		});
 	}
 
@@ -468,15 +497,17 @@ private:
 			for (; bad_dword < descriptor.dword_count; bad_dword++) {
 				const auto* value = descriptor.dwords[bad_dword].Resolve().TryInstruction();
 				if (value != nullptr && value->GetOpcode() == ValueOpcode::ReadConstBuffer) {
-					Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-					                     ValueOpcodeName(expected), bad_dword));
+					Fail(pc, fmt::format("{} dword {} is not a valid runtime value: {}",
+					                     ValueOpcodeName(expected), bad_dword,
+					                     ValueGraphToString(descriptor.dwords[bad_dword])));
 				}
 			}
 			bad_dword = 0;
 		}
 		if (!ValidateSource(descriptor, bad_dword)) {
-			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-			                     ValueOpcodeName(expected), bad_dword));
+			Fail(pc, fmt::format("{} dword {} is not a valid runtime value: {}",
+			                     ValueOpcodeName(expected), bad_dword,
+			                     ValueGraphToString(descriptor.dwords[bad_dword])));
 		}
 		source = InternSource(descriptor);
 	}

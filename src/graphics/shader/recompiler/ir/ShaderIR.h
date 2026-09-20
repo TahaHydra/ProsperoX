@@ -456,12 +456,21 @@ struct BlockInfo {
 };
 
 struct DescriptorSource {
+	// A descriptor the shader looks up at runtime: it reads a key out of the
+	// material buffer at selector_stride/selector_offset, then reads the image
+	// descriptor out of the heap buffer at key * heap_stride + heap_offset.
+	// Storing the heap geometry rather than assuming a packed 32-byte table is
+	// what lets a title keep its descriptors inside a larger per-record struct.
 	struct IndirectImage {
 		uint32_t material_source = 0;
 		uint32_t heap_source     = 0;
 		uint32_t selector_stride = 0;
 		uint32_t selector_offset = 0;
 		uint32_t key_arg         = 0;
+		uint32_t heap_stride     = 32;
+		uint32_t heap_offset     = 0;
+		// Four for an r128 descriptor, which the translator zero-pads to eight.
+		uint32_t dword_count     = 8;
 
 		bool operator==(const IndirectImage& other) const = default;
 	};
