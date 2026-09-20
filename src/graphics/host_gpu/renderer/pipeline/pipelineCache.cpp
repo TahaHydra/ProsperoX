@@ -103,6 +103,15 @@ bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
 }
 
+// The descriptor walk follows addresses the shader computed, so it reaches
+// unmapped memory whenever a chain does not mean what the walk assumed. Reading
+// through the guest address space answers that with a refusal rather than a
+// host fault.
+bool ReadShaderGuestMemoryAny(void*, uint64_t address, uint32_t* value) {
+	return value != nullptr &&
+	       Libs::LibKernel::Memory::TryReadBacking(address, value, sizeof(*value));
+}
+
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
 	if (!Config::GraphicsDebugDumpEnabled()) {
@@ -299,6 +308,7 @@ struct PipelineCache::ProgramCache {
 		const ShaderRecompiler::IR::SrtRuntime       runtime {
 		    .user_data                  = params.user_data,
 		    .shader_base                = params.Base(),
+		    .read_memory                = ReadShaderGuestMemoryAny,
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		          .max_images                 = max_images,
 		};

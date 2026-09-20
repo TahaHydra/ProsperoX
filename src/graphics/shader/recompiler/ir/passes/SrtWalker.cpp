@@ -141,7 +141,7 @@ private:
 		value = value.Resolve();
 		// Host floating-point evaluation does not model shader rounding/denormal modes.
 		if (m_type == RuntimeValueType::Integer &&
-		    TypesOverlap(value.GetType(), Type::F16 | Type::F32 | Type::F32x2)) {
+		    TypesOverlap(value.GetType(), Type::F16 | Type::F32 | Type::F32x2 | Type::F64)) {
 			return false;
 		}
 		const auto* inst = value.TryInstruction();
@@ -443,11 +443,17 @@ private:
 
 class Evaluator {
 public:
+	// `visiting` is the in-progress stack of the evaluator that created this
+	// one. A lane-restricted evaluation starts a new evaluator so it does not
+	// pollute the outer value cache, but it is still the same walk: without a
+	// shared stack a value whose own definition reaches back through the
+	// read-first-lane it sits under would recurse until the host stack ran out.
 	Evaluator(const ResourcePlan& program, const SrtRuntime& runtime,
 	          std::span<const uint8_t> clean_flat_slots = {}, Evaluator* clean_evaluator = nullptr,
-	          Value active_mask = {})
+	          Value active_mask = {}, std::vector<const Inst*>* visiting = nullptr)
 	    : m_program(program), m_runtime(runtime), m_clean_flat_slots(clean_flat_slots),
-	      m_clean_evaluator(clean_evaluator), m_active_mask(active_mask.Resolve()) {}
+	      m_clean_evaluator(clean_evaluator), m_active_mask(active_mask.Resolve()),
+	      m_visiting(visiting != nullptr ? *visiting : m_own_visiting) {}
 
 	bool Evaluate(Value value, uint32_t& result) {
 		uint64_t wide = 0;
@@ -496,6 +502,13 @@ private:
 			return true;
 		}
 		if (std::ranges::find(m_visiting, inst) != m_visiting.end()) {
+			return false;
+		}
+		// A descriptor is reached through a short chain of scalar arithmetic. A
+		// walk that goes deeper than this is not describing one, and recursing
+		// after the host stack runs out is not a diagnosis anybody can read.
+		constexpr size_t MaxEvaluationDepth = 96;
+		if (m_visiting.size() >= MaxEvaluationDepth) {
 			return false;
 		}
 		m_visiting.push_back(inst);
@@ -605,12 +618,12 @@ private:
 			}
 		}
 		uint32_t word = 0;
-		if (m_runtime.read_memory != nullptr) {
-			if (!m_runtime.read_memory(m_runtime.userdata, address, &word)) {
-				return false;
-			}
-		} else {
-			std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+		// Without a reader this walk would dereference a guest address it has
+		// not validated. A descriptor chain that leads somewhere unmapped is a
+		// chain this pass cannot resolve, not a reason to fault the host.
+		if (m_runtime.read_memory == nullptr ||
+		    !m_runtime.read_memory(m_runtime.userdata, address, &word)) {
+			return false;
 		}
 		result = word;
 		return true;
@@ -638,7 +651,7 @@ private:
 			case ValueOpcode::Phi: return EvaluatePhi(inst, result);
 			case ValueOpcode::ReadFirstLane: {
 				Evaluator active(m_program, m_runtime, m_clean_flat_slots, m_clean_evaluator,
-				                 inst.Arg(1));
+				                 inst.Arg(1), &m_visiting);
 				return active.EvaluateWide(inst.Arg(0), result);
 			}
 			case ValueOpcode::BitCastU32F32:
@@ -953,7 +966,8 @@ private:
 	Evaluator*                                m_clean_evaluator = nullptr;
 	Value                                     m_active_mask;
 	std::unordered_map<const Inst*, uint64_t> m_cache;
-	std::vector<const Inst*>                  m_visiting;
+	std::vector<const Inst*>                  m_own_visiting;
+	std::vector<const Inst*>&                 m_visiting;
 	bool                                      m_reserved = false;
 };
 
@@ -1034,14 +1048,27 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 	std::vector<uint32_t> flattened;
 	if (evaluate_flat) {
 		flattened.resize(program.srt_reads.size());
+		uint32_t unresolved = 0;
 		for (const auto& read: program.srt_reads) {
 			const bool clean    = read.flat_offset < clean_flat_slots.size() &&
 			                      clean_flat_slots[read.flat_offset] != 0u;
 			auto&      selected = clean ? clean_evaluator : evaluator;
-			if (read.flat_offset >= flattened.size() ||
-			    !selected.Evaluate(read.value, flattened[read.flat_offset])) {
+			if (read.flat_offset >= flattened.size()) {
 				return false;
 			}
+			// A large shader carries descriptor chains for paths this dispatch
+			// does not take, and their bases are whatever was left in the
+			// registers. A slot whose chain leads nowhere readable is zero --
+			// the same thing an unmapped read gives the guest -- rather than a
+			// reason to refuse every binding in the shader.
+			if (!selected.Evaluate(read.value, flattened[read.flat_offset])) {
+				flattened[read.flat_offset] = 0u;
+				unresolved++;
+			}
+		}
+		if (unresolved != 0) {
+			LOGF("shader SRT: %u of %u flattened slots were not readable and are zero\n",
+			     unresolved, static_cast<uint32_t>(program.srt_reads.size()));
 		}
 	}
 	results = std::move(evaluated);

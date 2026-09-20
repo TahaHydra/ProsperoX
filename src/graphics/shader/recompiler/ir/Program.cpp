@@ -54,42 +54,52 @@ bool IsRuntimeRead(ValueOpcode opcode) {
 	       AddressOpcodeInfoOf(opcode).access == AddressAccess::Read;
 }
 
+// Walks the two value graphs with an explicit stack rather than the host's.
+// A loop-carried phi makes these graphs cyclic, and the pair set that keeps the
+// walk finite can hold one entry per pair of instructions, so the recursion this
+// replaces could nest thousands deep before the pair set caught it -- deep
+// enough to run the thread out of stack on a large shader.
 bool EquivalentValue(const ResourcePlan& program, Value left, Value right,
                      std::vector<std::pair<const Inst*, const Inst*>>& visited) {
-	left  = left.Resolve();
-	right = right.Resolve();
-	if (left == right) {
-		return true;
-	}
-	if (left.IsImmediate() || right.IsImmediate() || left.GetType() != right.GetType()) {
-		return false;
-	}
-	const auto* lhs = left.TryInstruction();
-	const auto* rhs = right.TryInstruction();
-	if (lhs == nullptr || rhs == nullptr || lhs->GetOpcode() != rhs->GetOpcode() ||
-	    lhs->NumArgs() != rhs->NumArgs()) {
-		return false;
-	}
-	if (std::ranges::find(visited, std::pair {lhs, rhs}) != visited.end()) {
-		return true;
-	}
-	visited.emplace_back(lhs, rhs);
-	if (IsRuntimeRead(lhs->GetOpcode())) {
-		const auto li = lhs->Flags<MemoryFlags>().index;
-		const auto ri = rhs->Flags<MemoryFlags>().index;
-		if (li >= program.memory_info.size() || ri >= program.memory_info.size() ||
-		    program.memory_info[li] != program.memory_info[ri]) {
+	std::vector<std::pair<Value, Value>> pending {{left, right}};
+	while (!pending.empty()) {
+		const auto [pending_left, pending_right] = pending.back();
+		pending.pop_back();
+		const auto current_left  = pending_left.Resolve();
+		const auto current_right = pending_right.Resolve();
+		if (current_left == current_right) {
+			continue;
+		}
+		if (current_left.IsImmediate() || current_right.IsImmediate() ||
+		    current_left.GetType() != current_right.GetType()) {
 			return false;
 		}
-	} else if (lhs->Flags<uint64_t>() != rhs->Flags<uint64_t>()) {
-		return false;
-	}
-	for (size_t index = 0; index < lhs->NumArgs(); index++) {
-		if (lhs->GetOpcode() == ValueOpcode::Phi && lhs->PhiBlock(index) != rhs->PhiBlock(index)) {
+		const auto* lhs = current_left.TryInstruction();
+		const auto* rhs = current_right.TryInstruction();
+		if (lhs == nullptr || rhs == nullptr || lhs->GetOpcode() != rhs->GetOpcode() ||
+		    lhs->NumArgs() != rhs->NumArgs()) {
 			return false;
 		}
-		if (!EquivalentValue(program, lhs->Arg(index), rhs->Arg(index), visited)) {
+		if (std::ranges::find(visited, std::pair {lhs, rhs}) != visited.end()) {
+			continue;
+		}
+		visited.emplace_back(lhs, rhs);
+		if (IsRuntimeRead(lhs->GetOpcode())) {
+			const auto li = lhs->Flags<MemoryFlags>().index;
+			const auto ri = rhs->Flags<MemoryFlags>().index;
+			if (li >= program.memory_info.size() || ri >= program.memory_info.size() ||
+			    program.memory_info[li] != program.memory_info[ri]) {
+				return false;
+			}
+		} else if (lhs->Flags<uint64_t>() != rhs->Flags<uint64_t>()) {
 			return false;
+		}
+		for (size_t index = 0; index < lhs->NumArgs(); index++) {
+			if (lhs->GetOpcode() == ValueOpcode::Phi &&
+			    lhs->PhiBlock(index) != rhs->PhiBlock(index)) {
+				return false;
+			}
+			pending.emplace_back(lhs->Arg(index), rhs->Arg(index));
 		}
 	}
 	return true;
