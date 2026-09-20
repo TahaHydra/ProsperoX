@@ -899,6 +899,18 @@ void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands)
 	ProcessPm4(execution, stop_depth);
 }
 
+// A chained buffer continues the current one rather than nesting inside it:
+// the packet that names it is the last thing the current buffer runs, and
+// nothing returns to what follows it. Pushing it instead would keep every
+// buffer in a chain on the stack, which is what a long chain used to run out
+// of rather than a shader asking for real nesting.
+void CommandProcessor::ChainIndirectBuffer(std::span<const uint32_t> commands) {
+	EXIT_IF(g_current_execution == nullptr);
+	auto& execution          = *g_current_execution;
+	execution.m_chain         = commands;
+	execution.m_chain_pending = true;
+}
+
 void CommandProcessor::SuspendPm4() {
 	EXIT_IF(g_current_execution == nullptr);
 	g_current_execution->m_suspended = true;
@@ -1027,6 +1039,13 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 		}
 		EXIT_IF(execution.m_buffer_stack.size() != buffer_index + 1);
 		execution.m_buffer_stack[buffer_index].offset_dw += packet_dw;
+		if (execution.m_chain_pending) {
+			execution.m_chain_pending                              = false;
+			execution.m_buffer_stack[buffer_index].commands        = execution.m_chain;
+			execution.m_buffer_stack[buffer_index].offset_dw       = 0;
+			execution.m_buffer_stack[buffer_index].deferred_advance_dw = 0;
+			execution.m_chain                                      = {};
+		}
 		execution.m_made_progress = true;
 	}
 }

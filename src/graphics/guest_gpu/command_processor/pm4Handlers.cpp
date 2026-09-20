@@ -1925,7 +1925,11 @@ KYTY_CP_OP_PARSER(CpOpIndirectBuffer) {
 
 	const uint32_t control = buffer[2];
 
-	const uint32_t control_flags = control & 0x0fe00000u;
+	// Bit 20 chains: the named buffer replaces this one rather than running
+	// inside it. Bit 21 pre-fetches. The rest is the vmid and cache policy,
+	// neither of which the host queue has an equivalent for.
+	const uint32_t chain          = control & 0x00100000u;
+	const uint32_t control_flags  = control & 0x0fe00000u;
 	if (control_flags != 0x0f200000u) {
 		LOGF("\t temporary: accepting PS5 indirect buffer control flags = 0x%08" PRIx32 "\n",
 		     control_flags);
@@ -1937,8 +1941,9 @@ KYTY_CP_OP_PARSER(CpOpIndirectBuffer) {
 	static std::atomic<uint32_t> indirect_log_count {0};
 	if (indirect_log_count.fetch_add(1) < 128) {
 		LOGF("\t indirect buffer: addr=0x%016" PRIx64 ", num_dw=%" PRIu32 ", control=0x%08" PRIx32
-		     "\n",
-		     reinterpret_cast<uint64_t>(indirect_buffer), indirect_num_dw, control);
+		     ", chain=%u\n",
+		     reinterpret_cast<uint64_t>(indirect_buffer), indirect_num_dw, control,
+		     chain != 0 ? 1u : 0u);
 	}
 
 	if (indirect_num_dw == 0) {
@@ -1952,7 +1957,11 @@ KYTY_CP_OP_PARSER(CpOpIndirectBuffer) {
 
 	GraphicsDbgDumpDcb("ci", indirect_num_dw, indirect_buffer);
 
-	cp.ProcessIndirectBuffer({indirect_buffer, indirect_num_dw});
+	if (chain != 0) {
+		cp.ChainIndirectBuffer({indirect_buffer, indirect_num_dw});
+	} else {
+		cp.ProcessIndirectBuffer({indirect_buffer, indirect_num_dw});
+	}
 
 	return 3;
 }

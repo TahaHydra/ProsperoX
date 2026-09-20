@@ -92,6 +92,7 @@ private:
 	bool          IMAGE_ATOMIC(const Decoder::Instruction& inst, IR::ValueOpcode opcode);
 	bool DS_ATOMIC(const Decoder::Instruction& inst, IR::ValueOpcode opcode, bool returns_value);
 	bool DS_ATOMIC_BITWISE64(const Decoder::Instruction& inst, IR::ValueOpcode opcode);
+	bool DS_ATOMIC_CARRY64(const Decoder::Instruction& inst, bool subtract);
 	bool FLAT_LOAD(const Decoder::Instruction& inst);
 	bool FLAT_STORE(const Decoder::Instruction& inst);
 	bool IMAGE_GET_RESINFO(const Decoder::Instruction& inst);

@@ -624,6 +624,48 @@ bool Translator::DS_ATOMIC_BITWISE64(const Decoder::Instruction& inst, IR::Value
 	return true;
 }
 
+// A 64-bit shared add is carried out on the two halves separately: the low
+// half's own atomic reports what it replaced, which is exactly what says
+// whether the high half has to take a carry. The sum the memory ends up with
+// is the one the hardware would have written; what is not reproduced is the
+// hardware's guarantee that no other lane can observe the pair half-updated,
+// which needs a 64-bit view of the same workgroup storage that Vulkan only
+// offers through an aliasing extension.
+bool Translator::DS_ATOMIC_CARRY64(const Decoder::Instruction& inst, bool subtract) {
+	const auto base    = MemoryInfoFromDecoded(inst);
+	const auto address = ReadU32(MemorySourceAt(inst, 1));
+	const auto data    = MemorySourceAt(inst, 0);
+	const auto low     = ReadU32(OffsetOperand(data, 0));
+	const auto high    = ReadU32(OffsetOperand(data, 1));
+	const auto active  = ir.GetExec();
+	const auto opcode  = subtract ? IR::ValueOpcode::SharedAtomicISub32
+	                              : IR::ValueOpcode::SharedAtomicIAdd32;
+
+	auto low_memory            = base;
+	low_memory.data_dwords     = 1u;
+	low_memory.component_index = 0u;
+	const auto replaced =
+	    ir.Emit(opcode, {address, low, active}, AddMemoryInfo(low_memory, inst.pc));
+
+	// Adding wraps when the sum no longer fits; subtracting borrows when the
+	// value taken away was larger than what the low half held.
+	const auto carry =
+	    subtract ? ir.Emit(IR::ValueOpcode::SelectU32,
+	                       {ir.Emit(IR::ValueOpcode::ULessThan32, {replaced, low}),
+	                        IR::Value(1u), IR::Value(0u)})
+	             : ir.Emit(IR::ValueOpcode::CompositeExtractU32x2,
+	                       {ir.Emit(IR::ValueOpcode::IAddCarry32, {replaced, low}),
+	                        IR::Value(1u)});
+	const auto adjusted = ir.Emit(IR::ValueOpcode::IAdd32, {high, carry});
+
+	auto high_memory            = base;
+	high_memory.offset         += sizeof(uint32_t);
+	high_memory.data_dwords     = 1u;
+	high_memory.component_index = 1u;
+	ir.Emit(opcode, {address, adjusted, active}, AddMemoryInfo(high_memory, inst.pc));
+	return true;
+}
+
 bool Translator::FLAT_LOAD(const Decoder::Instruction& inst) {
 	const auto      memory = MemoryInfoFromDecoded(inst);
 	IR::ValueOpcode opcode;
@@ -1059,6 +1101,8 @@ bool Translator::EmitMemory(const Decoder::Instruction& inst) {
 			return DS_ATOMIC(inst, IR::ValueOpcode::SharedAtomicXor32, true);
 		case Decoder::Opcode::DS_WRXCHG_RTN_B32:
 			return DS_ATOMIC(inst, IR::ValueOpcode::SharedAtomicSwap32, true);
+		case Decoder::Opcode::DS_ADD_U64: return DS_ATOMIC_CARRY64(inst, false);
+		case Decoder::Opcode::DS_SUB_U64: return DS_ATOMIC_CARRY64(inst, true);
 		case Decoder::Opcode::DS_AND_B64:
 			return DS_ATOMIC_BITWISE64(inst, IR::ValueOpcode::SharedAtomicAnd32);
 		case Decoder::Opcode::DS_OR_B64:

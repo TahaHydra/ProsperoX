@@ -56,6 +56,11 @@ private:
 
 	std::vector<BufferCursor> m_buffer_stack;
 	Pm4WaitCondition          m_wait;
+	// A chained buffer takes the place of the one that named it instead of
+	// running inside it, so it is held here until the packet that named it has
+	// been stepped over.
+	std::span<const uint32_t> m_chain;
+	bool                      m_chain_pending = false;
 	bool                      m_suspended     = false;
 	bool                      m_made_progress = false;
 };
@@ -156,6 +161,7 @@ public:
 
 	Pm4ProcessResult Process(Pm4Execution& execution, std::span<const uint32_t> commands);
 	void             ProcessIndirectBuffer(std::span<const uint32_t> commands);
+	void             ChainIndirectBuffer(std::span<const uint32_t> commands);
 
 	void SetFlip(const FlipInfo& flip) { m_flip = flip; }
 
