@@ -1485,7 +1485,129 @@ std::vector<uint32_t> SelectionRegion(const Graph& graph, const BasicBlock& head
 	return region;
 }
 
-bool SplitOneSelectionMerge(Graph& graph) {
+// A selection whose region is entered from outside it cannot be structured:
+// SPIR-V lets a construct be entered only through its header. The region is
+// ordinary straight-line code, so the outside path is given its own copy of the
+// blocks it reaches and the selection keeps a single entry. Only the blocks that
+// edge can actually reach inside the region are copied, so the cost stays local.
+bool CloneExternallyEnteredRegion(Graph& graph, uint32_t header_id,
+                                  const std::vector<uint32_t>& region, uint32_t entered,
+                                  uint32_t merge) {
+	std::vector<uint32_t> members;
+	std::vector<uint32_t> pending {entered};
+	while (!pending.empty()) {
+		const auto block_id = pending.back();
+		pending.pop_back();
+		if (block_id == merge || block_id == header_id || !Contains(region, block_id) ||
+		    Contains(members, block_id)) {
+			continue;
+		}
+		const auto* block = graph.FindBlock(block_id);
+		if (block == nullptr) {
+			continue;
+		}
+		AddUnique(members, block_id);
+		pending.insert(pending.end(), block->successors.begin(), block->successors.end());
+	}
+	if (members.empty()) {
+		return false;
+	}
+
+	// Copying a loop header, or any block a back edge lands on, would duplicate
+	// the loop rather than reshape it, so those stay as they are.
+	for (const auto block_id: members) {
+		const auto* block = graph.FindBlock(block_id);
+		if (block == nullptr || block->terminator.loop_header) {
+			return false;
+		}
+		if (std::ranges::any_of(graph.back_edges,
+		                        [&](const BackEdge& edge) { return edge.to == block_id; })) {
+			return false;
+		}
+	}
+
+	const auto* entered_block = graph.FindBlock(entered);
+	if (entered_block == nullptr) {
+		return false;
+	}
+	std::vector<uint32_t> outside;
+	for (const auto predecessor: entered_block->predecessors) {
+		if (predecessor != header_id && !Contains(region, predecessor)) {
+			AddUnique(outside, predecessor);
+		}
+	}
+	if (outside.empty()) {
+		return false;
+	}
+
+	std::vector<std::pair<uint32_t, uint32_t>> copies;
+	copies.reserve(members.size());
+	for (const auto block_id: members) {
+		const auto* source = graph.FindBlock(block_id);
+		BasicBlock  copy   = *source;
+		copy.id            = static_cast<uint32_t>(graph.blocks.size());
+		copy.predecessors.clear();
+		copy.dominators.clear();
+		copy.post_dominators.clear();
+		copies.emplace_back(block_id, copy.id);
+		graph.blocks.push_back(std::move(copy));
+	}
+
+	const auto copy_of = [&](uint32_t block_id) {
+		for (const auto& [original, clone]: copies) {
+			if (original == block_id) {
+				return clone;
+			}
+		}
+		return block_id;
+	};
+
+	// Edges that stayed inside the copied set follow the copies; everything else
+	// still leaves to the same place the original did.
+	for (const auto& [original, clone]: copies) {
+		auto* block = graph.FindBlock(clone);
+		if (block == nullptr) {
+			continue;
+		}
+		for (auto& successor: block->successors) {
+			successor = copy_of(successor);
+		}
+		const auto retarget = [&](uint32_t& target) {
+			if (target != UINT32_MAX) {
+				target = copy_of(target);
+			}
+		};
+		retarget(block->terminator.true_block);
+		retarget(block->terminator.false_block);
+		block->terminator.merge_block    = UINT32_MAX;
+		block->terminator.continue_block = UINT32_MAX;
+		for (auto& target: block->terminator.indirect_targets) {
+			target = copy_of(target);
+		}
+		for (auto& target: block->terminator.indirect_selector_targets) {
+			target = copy_of(target);
+		}
+		(void)original;
+	}
+
+	const auto entered_copy = copy_of(entered);
+	for (const auto predecessor: outside) {
+		auto* block = graph.FindBlock(predecessor);
+		if (block == nullptr) {
+			continue;
+		}
+		ReplaceValue(block->successors, entered, entered_copy);
+		ReplaceTerminatorTarget(block->terminator, entered, entered_copy);
+	}
+
+	RebuildPredecessors(graph);
+	RecomputeAnalyses(graph);
+	return true;
+}
+
+// Innermost selections first: an inner construct has to be shaped before the
+// one that contains it, or the outer merge moves under it.
+std::vector<uint32_t> SelectionHeadersByDepth(const Graph& graph) {
 	std::vector<uint32_t> loop_headers;
 	loop_headers.reserve(graph.natural_loops.size());
 	for (const auto& loop: graph.natural_loops) {
@@ -1506,8 +1628,49 @@ bool SplitOneSelectionMerge(Graph& graph) {
 		const auto  rhs_depth = rhs_block != nullptr ? rhs_block->dominators.size() : 0u;
 		return lhs_depth != rhs_depth ? lhs_depth > rhs_depth : lhs < rhs;
 	});
+	return selection_headers;
+}
 
-	for (const auto block_id: selection_headers) {
+// One pass of the copy: the first selection that is entered from outside gets
+// the outside path its own blocks. Returns false once none are left.
+bool CloneOneExternallyEnteredSelection(Graph& graph) {
+	for (const auto block_id: SelectionHeadersByDepth(graph)) {
+		const auto* block = graph.FindBlock(block_id);
+		if (block == nullptr || IsInnermostLoopControlConditional(graph, *block)) {
+			continue;
+		}
+		const auto merge = FindSelectionMerge(graph, *block);
+		if (merge == UINT32_MAX || graph.FindBlock(merge) == nullptr) {
+			continue;
+		}
+		const auto region   = SelectionRegion(graph, *block, merge);
+		const auto external = std::find_if(region.begin(), region.end(), [&](uint32_t member) {
+			const auto* member_block = graph.FindBlock(member);
+			return member_block != nullptr &&
+			       std::ranges::any_of(member_block->predecessors, [&](uint32_t predecessor) {
+				       return predecessor != block_id && !Contains(region, predecessor);
+			       });
+		});
+		if (external != region.end() &&
+		    CloneExternallyEnteredRegion(graph, block_id, region, *external, merge)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool CloneExternallyEnteredSelections(Graph& graph) {
+	const auto budget = std::max<uint32_t>(8u, static_cast<uint32_t>(graph.blocks.size()));
+	for (uint32_t clones = 0; clones < budget; clones++) {
+		if (!CloneOneExternallyEnteredSelection(graph)) {
+			return clones != 0;
+		}
+	}
+	return true;
+}
+
+bool SplitOneSelectionMerge(Graph& graph) {
+	for (const auto block_id: SelectionHeadersByDepth(graph)) {
 		const auto* block = graph.FindBlock(block_id);
 		if (block == nullptr) {
 			continue;
@@ -1531,8 +1694,7 @@ bool SplitOneSelectionMerge(Graph& graph) {
 		if (external != region.end()) {
 			SetFailure(
 			    graph, FailureKind::StructuredControlFlow, block_id,
-			    fmt::format("selection header block {} has externally entered region block {}; "
-			                "semantic block cloning is disabled",
+			    fmt::format("selection header block {} has externally entered region block {}",
 			                block_id, *external));
 			return false;
 		}
@@ -2251,7 +2413,7 @@ bool Structurize(Graph& graph) {
 	}
 
 	Graph failed_graph      = std::move(graph);
-	graph                   = std::move(original);
+	graph                   = original;
 	const auto route_budget = static_cast<uint32_t>(graph.blocks.size());
 	// Apply one route at a time and retry. Eagerly routing every matching diamond can
 	// rewrite unrelated selections that were already structurally valid.
@@ -2265,6 +2427,16 @@ bool Structurize(Graph& graph) {
 			return true;
 		}
 	}
+
+	// Routing rewrites the arms where they are, so it cannot help a selection the
+	// outside enters in the middle. Copying the blocks that edge reaches can, at
+	// the cost of emitting them twice, which is still far cheaper than dropping
+	// the whole shader onto the dispatcher's state machine.
+	graph = std::move(original);
+	if (CloneExternallyEnteredSelections(graph) && StructurizeImpl(graph)) {
+		return true;
+	}
+
 	graph = std::move(failed_graph);
 	return false;
 }
