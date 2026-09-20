@@ -45,6 +45,10 @@ struct Provenance {
 [[nodiscard]] std::string DescribeInstructionWindow(const Decoder::Program& program, uint32_t pc,
                                                     uint32_t before, uint32_t after);
 
+// Every instruction in the shader this decoder does not implement. A shader
+// that uses one instruction from a family it lacks usually uses several.
+[[nodiscard]] std::string DescribeUnsupportedInstructions(const Decoder::Program& program);
+
 // Everything above, as the body of a failure report.
 [[nodiscard]] std::string DescribeShaderFailure(const Provenance& origin,
                                                 const Decoder::Program& program, uint32_t pc);

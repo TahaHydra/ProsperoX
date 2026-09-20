@@ -64,6 +64,22 @@ std::string DescribeInstructionWindow(const Decoder::Program& program, uint32_t 
 	return out;
 }
 
+std::string DescribeUnsupportedInstructions(const Decoder::Program& program) {
+	std::string out;
+	uint32_t    count = 0;
+	for (const auto& inst: program.instructions) {
+		if (inst.opcode != Decoder::Opcode::UNSUPPORTED) {
+			continue;
+		}
+		count++;
+		out += fmt::format("   +0x{:04x} {}\n", inst.pc, Decoder::InstructionToString(inst));
+	}
+	if (count == 0) {
+		return {};
+	}
+	return fmt::format(" every unsupported instruction in this shader ({}):\n", count) + out;
+}
+
 std::string DescribeShaderFailure(const Provenance& origin, const Decoder::Program& program,
                                   uint32_t pc) {
 	std::string out = DescribeProvenance(origin);
@@ -71,6 +87,10 @@ std::string DescribeShaderFailure(const Provenance& origin, const Decoder::Progr
 	out += DescribeCodeWindow(program.code, origin.code_base, pc, 6, 6);
 	out += " decoded instructions:\n";
 	out += DescribeInstructionWindow(program, pc, 6, 2);
+	// One report per shader is worth more than one per run: a shader that uses
+	// an instruction family this decoder lacks usually uses several of them,
+	// and fixing them one launch at a time is how a day disappears.
+	out += DescribeUnsupportedInstructions(program);
 	return out;
 }
 
