@@ -575,6 +575,27 @@ bool Translator::DS_ATOMIC(const Decoder::Instruction& inst, IR::ValueOpcode opc
 	return true;
 }
 
+// A bitwise operation on a 64-bit shared value is two independent operations on
+// its halves: no bit of the result depends on a bit of the other half. The pair
+// of 32-bit atomics therefore leaves exactly what one 64-bit atomic would, which
+// is not true of add, minimum, maximum or exchange, and is not true of the
+// returning forms either, because a reader could see one half of an old value
+// and one half of a new one.
+bool Translator::DS_ATOMIC_BITWISE64(const Decoder::Instruction& inst, IR::ValueOpcode opcode) {
+	const auto base    = MemoryInfoFromDecoded(inst);
+	const auto address = ReadU32(MemorySourceAt(inst, 1));
+	const auto data    = MemorySourceAt(inst, 0);
+	for (uint32_t half = 0; half < 2u; half++) {
+		auto memory = base;
+		memory.offset += half * sizeof(uint32_t);
+		memory.data_dwords     = 1u;
+		memory.component_index = half;
+		ir.Emit(opcode, {address, ReadU32(OffsetOperand(data, half)), ir.GetExec()},
+		        AddMemoryInfo(memory, inst.pc));
+	}
+	return true;
+}
+
 bool Translator::FLAT_LOAD(const Decoder::Instruction& inst) {
 	const auto      memory = MemoryInfoFromDecoded(inst);
 	IR::ValueOpcode opcode;
@@ -1004,6 +1025,12 @@ bool Translator::EmitMemory(const Decoder::Instruction& inst) {
 			return DS_ATOMIC(inst, IR::ValueOpcode::SharedAtomicXor32, true);
 		case Decoder::Opcode::DS_WRXCHG_RTN_B32:
 			return DS_ATOMIC(inst, IR::ValueOpcode::SharedAtomicSwap32, true);
+		case Decoder::Opcode::DS_AND_B64:
+			return DS_ATOMIC_BITWISE64(inst, IR::ValueOpcode::SharedAtomicAnd32);
+		case Decoder::Opcode::DS_OR_B64:
+			return DS_ATOMIC_BITWISE64(inst, IR::ValueOpcode::SharedAtomicOr32);
+		case Decoder::Opcode::DS_XOR_B64:
+			return DS_ATOMIC_BITWISE64(inst, IR::ValueOpcode::SharedAtomicXor32);
 
 		case Decoder::Opcode::IMAGE_ATOMIC_SWAP:
 			return IMAGE_ATOMIC(inst, IR::ValueOpcode::ImageAtomicSwap32);
