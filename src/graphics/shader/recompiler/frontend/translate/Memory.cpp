@@ -471,12 +471,40 @@ bool Translator::BUFFER_LOAD(const Decoder::Instruction& inst) {
 	return true;
 }
 
+// A D16 format load packs two components into each destination register, low
+// half first, and leaves a half it does not fill alone.
+bool Translator::BUFFER_LOAD_FORMAT_D16(const Decoder::Instruction& inst) {
+	const auto memory   = MemoryInfoFromDecoded(inst);
+	const auto resource = GetBufferResource(memory);
+	const auto address  = ReadBufferAddress(inst, 0);
+	const auto count    = std::min(memory.data_dwords, 4u);
+	for (uint32_t index = 0; index < count; index++) {
+		auto component             = memory;
+		component.data_dwords      = 1u;
+		component.component_index  = index;
+		const auto loaded          = ir.Emit(IR::ValueOpcode::LoadBufferU32,
+		                                     {resource, address.index, address.offset,
+		                                      address.soffset, ir.GetExec()},
+		                                     AddMemoryInfo(component, inst.pc));
+		auto       destination     = OffsetOperand(inst.dst, index / 2u);
+		destination.sdwa_sel          = index % 2u == 0u ? 4u : 5u;
+		destination.sdwa_dst_unused   = 2u;
+		destination.explicit_sdwa_dst = true;
+		WriteF16(destination, ir.BitCastF32(IR::U32(loaded)));
+	}
+	return true;
+}
+
 bool Translator::BUFFER_STORE(const Decoder::Instruction& inst) {
 	const auto      memory   = MemoryInfoFromDecoded(inst);
 	const auto      resource = GetBufferResource(memory);
 	const auto      address  = ReadBufferAddress(inst, 1);
 	const auto      data_src = MemorySourceAt(inst, 0);
-	const auto      data     = ReadU32(data_src);
+	auto            data     = ReadU32(data_src);
+	// The D16_HI form takes its byte from the upper half of the register.
+	if (inst.opcode == Decoder::Opcode::BUFFER_STORE_BYTE_D16_HI) {
+		data = ir.ShiftRightLogical(data, IR::U32(IR::Value(16u)));
+	}
 	IR::ValueOpcode opcode;
 	IR::Value       value;
 	switch (memory.data_bits) {
@@ -941,11 +969,17 @@ bool Translator::EmitMemory(const Decoder::Instruction& inst) {
 		case Decoder::Opcode::TBUFFER_LOAD_FORMAT_XYZ:
 		case Decoder::Opcode::TBUFFER_LOAD_FORMAT_XYZW: return BUFFER_LOAD(inst);
 
+		case Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_X:
+		case Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_XY:
+		case Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_XYZ:
+		case Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_XYZW: return BUFFER_LOAD_FORMAT_D16(inst);
+
 		case Decoder::Opcode::BUFFER_STORE_DWORD:
 		case Decoder::Opcode::BUFFER_STORE_DWORDX2:
 		case Decoder::Opcode::BUFFER_STORE_DWORDX3:
 		case Decoder::Opcode::BUFFER_STORE_DWORDX4:
 		case Decoder::Opcode::BUFFER_STORE_BYTE:
+		case Decoder::Opcode::BUFFER_STORE_BYTE_D16_HI:
 		case Decoder::Opcode::BUFFER_STORE_SHORT:
 		case Decoder::Opcode::BUFFER_STORE_FORMAT_X:
 		case Decoder::Opcode::BUFFER_STORE_FORMAT_XY:

@@ -87,6 +87,7 @@ private:
 	bool          S_LOAD(const Decoder::Instruction& inst, bool raw);
 	bool          BUFFER_LOAD(const Decoder::Instruction& inst);
 	bool          BUFFER_STORE(const Decoder::Instruction& inst);
+	bool          BUFFER_LOAD_FORMAT_D16(const Decoder::Instruction& inst);
 	bool          BUFFER_ATOMIC(const Decoder::Instruction& inst, IR::ValueOpcode opcode);
 	bool          IMAGE_ATOMIC(const Decoder::Instruction& inst, IR::ValueOpcode opcode);
 	bool DS_ATOMIC(const Decoder::Instruction& inst, IR::ValueOpcode opcode, bool returns_value);
