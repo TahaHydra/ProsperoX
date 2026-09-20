@@ -363,7 +363,12 @@ void PlayGo::Open(const std::filesystem::path& file_name) {
 
 	m_f.Read(&magic1, 4);
 
-	if (magic1 != 0x6f676c70) {
+	// "plgo" is the PS4 chunk file and "plgx" the PS5 one. They disagree about
+	// the tail of the header but not about where the chunk count sits, which is
+	// all this reads, so a PS5 title is no reason to report no PlayGo support.
+	constexpr uint32_t Ps4Magic = 0x6f676c70;
+	constexpr uint32_t Ps5Magic = 0x78676c70;
+	if (magic1 != Ps4Magic && magic1 != Ps5Magic) {
 		LOGF("invalid file: magic1 = %08" PRIx32 "\n", magic1);
 		return;
 	}

@@ -9,7 +9,12 @@ namespace Libs::Graphics {
 
 GpuResourceManager::GpuResourceManager(GraphicContext& graphics, CommandScheduler& scheduler)
     : m_scheduler(scheduler), m_buffer_cache(graphics, scheduler, m_page_manager, m_texture_cache),
-      m_texture_cache(graphics, scheduler, m_page_manager, m_buffer_cache) {}
+      m_texture_cache(graphics, scheduler, m_page_manager, m_buffer_cache) {
+	// The fault buffer names pages by address alone, so it has no way to tell a
+	// page the title gave the GPU from one a stray shader address landed on.
+	m_buffer_cache.SetFaultMappedQuery(
+	    [this](uint64_t address, uint64_t size) { return IsMapped(address, size); });
+}
 
 GpuResourceManager::~GpuResourceManager() = default;
 

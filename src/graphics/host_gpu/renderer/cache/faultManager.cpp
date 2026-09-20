@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <atomic>
 #include <bit>
 #include <cinttypes>
 #include <cstring>
@@ -81,6 +82,26 @@ FaultManager::~FaultManager() {
 	m_graphics.device.destroyPipeline(m_fault_process_pipeline, nullptr);
 	m_graphics.device.destroyPipelineLayout(m_fault_process_pipeline_layout, nullptr);
 	m_graphics.device.destroyDescriptorSetLayout(m_fault_process_desc_layout, nullptr);
+}
+
+// A shader that computes a flat address out of registers it never initialised
+// still records a page, and the page table spans the whole guest address space,
+// so that page can name the title's own code or data. Building a GPU buffer
+// over it would later write the GPU's copy back over memory the title owns,
+// which is how a title ends up reading zero out of its own globals.
+bool FaultManager::IsGuestGpuMemory(uint64_t address, uint64_t size) const {
+	if (!m_is_mapped) {
+		return true;
+	}
+	if (m_is_mapped(address, size)) {
+		return true;
+	}
+	static std::atomic<uint32_t> log_count {0};
+	if (log_count.fetch_add(1) < 64) {
+		LOGF("Ignoring a faulted page outside GPU memory at 0x%016" PRIx64 ", size=0x%" PRIx64 "\n",
+		     address, size);
+	}
+	return false;
 }
 
 void FaultManager::ProcessFaultBuffer(bool process_writes) {
@@ -161,12 +182,18 @@ void FaultManager::ProcessFaultBuffer(bool process_writes) {
 		};
 		collect(mapped).ForEach([this](uint64_t start, uint64_t end) {
 			EXIT_IF(end - start > std::numeric_limits<uint32_t>::max());
+			if (!IsGuestGpuMemory(start, end - start)) {
+				return;
+			}
 			LOGF("Accessed non-GPU cached memory at 0x%016" PRIx64 "\n", start);
 			(void)m_buffer_cache.FindBuffer(start, end - start);
 		});
 		if (process_writes) {
 			collect(mapped + PageFaultListSize).ForEach([this](uint64_t start, uint64_t end) {
 				EXIT_IF(end - start > std::numeric_limits<uint32_t>::max());
+				if (!IsGuestGpuMemory(start, end - start)) {
+					return;
+				}
 				// The page now holds bytes only the GPU has.
 				(void)m_buffer_cache.FindBuffer(start, end - start);
 				m_buffer_cache.MarkGpuModified(start, end - start);

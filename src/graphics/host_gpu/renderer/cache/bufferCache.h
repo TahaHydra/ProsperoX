@@ -83,6 +83,9 @@ public:
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer(bool process_writes);
+	void SetFaultMappedQuery(FaultManager::MappedQuery query) {
+		m_fault_manager.SetMappedQuery(std::move(query));
+	}
 	// A range the GPU wrote outside a bound buffer -- through a flat address --
 	// which the copy kept for the CPU therefore no longer matches.
 	void               MarkGpuModified(uint64_t vaddr, uint64_t size);
